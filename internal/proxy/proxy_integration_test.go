@@ -58,13 +58,19 @@ func TestGatewayIntegration(t *testing.T) {
 	}
 	defer cs.Close()
 	await(t, 5*time.Second, func() bool { return len(p.Registry.Names()) == 6 })
-	list, err := cs.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(list.Tools) != 5 {
-		t.Fatalf("got %d visible tools, want 5", len(list.Tools))
-	}
+	// Changed updates the registry before publishing tools to the SDK server.
+	// Wait for the downstream view as well as the internal discovery snapshot.
+	var list *mcp.ListToolsResult
+	await(t, 5*time.Second, func() bool {
+		list, err = cs.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list.Tools) > 5 {
+			t.Fatalf("got %d visible tools, want 5", len(list.Tools))
+		}
+		return len(list.Tools) == 5
+	})
 	names := map[string]bool{}
 	for _, tool := range list.Tools {
 		names[tool.Name] = true
@@ -163,15 +169,19 @@ drained:
 		t.Fatal("missing downstream list_changed")
 	}
 	var all []*mcp.Tool
-	for tool, err := range cs.Tools(ctx, nil) {
-		if err != nil {
-			t.Fatal(err)
+	await(t, 5*time.Second, func() bool {
+		all = nil
+		for tool, err := range cs.Tools(ctx, nil) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, tool)
 		}
-		all = append(all, tool)
-	}
-	if len(all) != 6 {
-		t.Fatalf("after update: got %d tools", len(all))
-	}
+		if len(all) > 6 {
+			t.Fatalf("after update: got %d tools", len(all))
+		}
+		return len(all) == 6
+	})
 }
 func await(t *testing.T, timeout time.Duration, f func() bool) {
 	t.Helper()

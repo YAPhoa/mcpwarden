@@ -221,3 +221,18 @@ commit. Publication failure or uncertain commit locks access; no callback retrie
 The real MCP test now activates ciphertext read from PostgreSQL. No SDK call
 semantics, legacy argument hash, gateway configuration or production custody mode
 change. See [vault storage](security/vault-storage.md) for contracts and gates.
+
+## 2026-09-23 — Downstream discovery readiness in integration tests
+
+`Proxy.Changed` replaces the internal registry before registering individual tools
+in the SDK servers. Verified the pinned Go SDK v1.8.0 `mcp/server.go`: `AddTool`
+validates and publishes one tool through `changeAndNotify`; there is no atomic
+batch publication implied by the registry count. Concurrent discovery can
+therefore expose an intermediate downstream inventory during startup or refresh.
+
+The gateway integration test now waits for the client-visible `tools/list`
+inventory after internal discovery, and likewise for the iterator after a dynamic
+tool addition. This corrects the readiness signal behind an intermittent hosted
+race-test failure without adding sleeps, skipping assertions or changing runtime
+behavior. Policy, call, timing, cancellation and list-change notification checks
+remain in place.

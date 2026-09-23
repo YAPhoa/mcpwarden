@@ -670,3 +670,16 @@ Live health, authentication/access/history boundaries, no-store and all 12
 brand/favicon asset bytes and MIME types passed. The prior audit file was
 preserved byte-for-byte with no new records from verification. Deployment keys
 and volume mounts were preserved; application credential custody is unchanged.
+
+The branding commit's hosted CI exposed a pre-existing asynchronous readiness
+assumption in `TestGatewayIntegration`: registry discovery could be complete
+while the downstream SDK was still registering tools. Corrected the test to
+wait for the client-visible list at startup and after dynamic additions, with
+the existing bounded poller and policy/notification/cancellation assertions.
+The pinned SDK behavior is recorded in [decisions](decisions.md).
+
+The corrected integration test passed 300 race-enabled repetitions across
+`-cpu=1,2,4`. `go build ./...`, `go vet ./...` and the full PostgreSQL-enabled
+`go test -race -count=1 -timeout=10m ./...` passed again. Rebuilding reproduced
+the same deployed gateway/UI image digests; the correction changes only test
+synchronization and documentation, with no shipped runtime change.
