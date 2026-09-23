@@ -34,6 +34,16 @@ function el(tag, props = {}, ...children) {
   for (const child of children.flat()) if (child !== null && child !== undefined && child !== false) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return node;
 }
+// Lists are re-rendered on every refresh; keep keyboard focus on the same
+// control (matched by its data attributes) when it is replaced.
+function replaceKeepingFocus(container, children) {
+  const active = document.activeElement, keys = ['request', 'window', 'connectorId', 'action'];
+  const match = container.contains(active) && active !== container ? keys.filter(k => active.dataset?.[k] !== undefined).map(k => [k, active.dataset[k]]) : [];
+  container.replaceChildren(...children);
+  if (!match.length) return;
+  const selector = match.map(([k, v]) => `[data-${k.replace(/[A-Z]/g, c => '-' + c.toLowerCase())}="${CSS.escape(v)}"]`).join('');
+  container.querySelector(selector)?.focus();
+}
 function fact(label, ...value) { return [el('dt', {text: label}), el('dd', {}, ...value)]; }
 function exact(value) { return value ? window.MCPWardenTime.format(value) : 'Not set'; }
 function serverNow() { return Date.now() + state.clockOffset; }
@@ -242,7 +252,7 @@ function renderRequests() {
   const live = list.filter(r => ['pending', 'approved'].includes(requestPhase(r, now).key));
   $('vault-request-count').textContent = `${live.length} waiting`;
   const container = $('vault-requests');
-  container.replaceChildren(...(list.length ? list.map(r => requestCard(r, now)) : [el('p', {class: 'empty', text: 'No access requests. When an agent asks for access, it appears here for your review.'})]));
+  replaceKeepingFocus(container, list.length ? list.map(r => requestCard(r, now)) : [el('p', {class: 'empty', text: 'No access requests. When an agent asks for access, it appears here for your review.'})]);
 }
 function requestCard(r, now) {
   const phase = requestPhase(r, now), pending = state.pending.get(r.id), busy = state.busy === r.id;
@@ -277,7 +287,7 @@ function renderWindows() {
   const shown = all.filter(l => (!filters.state || l.phase.key === filters.state) && (!filters.caller || l.client.access_id === filters.caller) && (!filters.connector || l.credential.connector_id === filters.connector));
   const active = all.filter(l => l.phase.key === 'active' || l.phase.key === 'provider').length;
   $('vault-window-count').textContent = `${active} active · ${all.length - active} ended in the last 24 hours`;
-  $('vault-windows').replaceChildren(...(shown.length ? shown.map(windowCard) : [el('p', {class: 'empty', text: all.length ? 'No windows match these filters.' : 'No access windows yet.'})]));
+  replaceKeepingFocus($('vault-windows'), shown.length ? shown.map(windowCard) : [el('p', {class: 'empty', text: all.length ? 'No windows match these filters.' : 'No access windows yet.'})]);
 }
 function syncFilter(id, all, entries) {
   const select = $(id), value = select.value;
@@ -317,7 +327,7 @@ function renderCredentials() {
         el('p', {class: 'help', text: destination ? `Header${c.header_names.length === 1 ? '' : 's'}: ${c.header_names.join(', ')}` : reason})),
       el('div', {class: 'access-row-actions'}, el('button', {type: 'button', 'data-connector-id': c.id, disabled, 'aria-describedby': unlocked() ? null : 'vault-status-text', text: stored ? 'Replace credential' : 'Add encrypted credential'})));
   });
-  $('vault-credentials').replaceChildren(...(rows.length ? rows : [el('p', {class: 'empty', text: 'Add a personal HTTP upstream with header authentication first. Its credential can then be encrypted here.'})]));
+  replaceKeepingFocus($('vault-credentials'), rows.length ? rows : [el('p', {class: 'empty', text: 'Add a personal HTTP upstream with header authentication first. Its credential can then be encrypted here.'})]);
 }
 function renderSettings() {
   const p = state.vaultState?.approval_policy;
