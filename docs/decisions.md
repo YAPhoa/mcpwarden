@@ -236,3 +236,15 @@ tool addition. This corrects the readiness signal behind an intermittent hosted
 race-test failure without adding sleeps, skipping assertions or changing runtime
 behavior. Policy, call, timing, cancellation and list-change notification checks
 remain in place.
+
+## 2026-09-23 — Stdio upstream environment allowlist
+
+Stdio upstreams previously inherited the whole gateway environment, which holds
+the catalog key, operator bearer token and OAuth introspection credentials. Any
+configured stdio command could read the key that decrypts every user's saved
+connections. The child now receives only a fixed set of basic process variables
+(`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`,
+`TERM`, `TMPDIR` and Windows process basics) plus its explicit `env` map, which
+wins over inherited values. Proxy settings and runtime-specific variables such as
+`NODE_OPTIONS` are not inherited; operators pass them with `${VAR}` placeholders.
+Process isolation beyond the environment remains in the pending hardening work.

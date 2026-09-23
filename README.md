@@ -88,7 +88,7 @@ In OAuth mode, the admin API requires an access token for the same user with the
 
 ## Run the server locally
 
-Requires Go 1.27 or newer. Copy and edit [the example config](examples/config.yaml); replace the sample upstreams with servers available on your machine. `${VAR}` placeholders must be set in the process environment. The sample `npx` upstream requires Node.js at runtime; the gateway and its tests do not.
+Requires Go 1.27 or newer. Copy and edit [the example config](examples/config.yaml); replace the sample upstreams with servers available on your machine. `${VAR}` placeholders must be set in the process environment. Stdio upstreams inherit only basic process variables (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TERM`, `TMPDIR` and the Windows equivalents); pass anything else a command needs through its `env` map, for example `HTTPS_PROXY: ${HTTPS_PROXY}`. The sample `npx` upstream requires Node.js at runtime; the gateway and its tests do not.
 
 ```sh
 go build -o mcpwarden ./cmd/mcpwarden

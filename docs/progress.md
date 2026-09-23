@@ -683,3 +683,17 @@ The corrected integration test passed 300 race-enabled repetitions across
 `go test -race -count=1 -timeout=10m ./...` passed again. Rebuilding reproduced
 the same deployed gateway/UI image digests; the correction changes only test
 synchronization and documentation, with no shipped runtime change.
+
+## 2026-09-23 — Stdio upstream environment allowlist
+
+Stdio upstream commands no longer inherit the gateway environment, so they cannot
+read `MCPWARDEN_CREDENTIAL_KEY` or the other deployment secrets. See
+[decisions](decisions.md) for the inherited variable list. A new stdio test checks
+that an unlisted variable is absent while `PATH`, `LC_*` and explicit overrides
+arrive exactly once; it fails against the previous behavior.
+
+Validation passed: `go build ./...`, `go vet ./...` and
+`go test -race -count=1 -timeout=10m ./...`. PostgreSQL-dependent cases were not
+run against the compose fixture in this environment. Existing stdio upstreams
+that relied on other inherited variables need them added to their `env` map
+before redeploying.

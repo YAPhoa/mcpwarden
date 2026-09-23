@@ -42,7 +42,8 @@ acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CH
 8. **Transport and process hardening.** Finish explicit maintenance/session cleanup,
    provider session/resource limits, any connection pooling, OAuth endpoint
    SSRF/redirect protection, permitted private-network selection and stdio
-   environment/process isolation. Keep all credential use bounded by authority.
+   process isolation. Stdio commands already receive only an allowlisted
+   environment. Keep all credential use bounded by authority.
 9. **Migration, restore and rollout.** Implement a protected legacy export/import
    with checkpointed, interrupted-run-safe conversion. Verify counts, stable IDs,
    verifiers, scopes, hashes, lifecycle and historical audit before cutover.
