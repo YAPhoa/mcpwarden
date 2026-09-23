@@ -617,5 +617,25 @@ Validation on Go 1.27.1 / Node 20.19.2:
 The ordered implementation backlog is in [pending tasks](pending-tasks.md).
 Owner security routes, panel integration, full PostgreSQL catalog migration and
 startup enforcement remain pending; current deployment custody remains the
-legacy encrypted catalog. Hosted CI and the deployment outcome are recorded
-below after they are verified.
+legacy encrypted catalog.
+
+Initial commit `9019942` was pushed to the private repository with `main` tracking
+`origin/main`. Its [hosted CI run](https://github.com/YAPhoa/mcpwarden/actions/runs/35825326621)
+passed every mandatory job on Ubuntu 24.04, including Node 24, the three browser
+engines, PostgreSQL race tests, workflow checks, vulnerability/secret scans,
+container smoke and the final aggregate check. CodeQL skipped as configured for
+private repositories without the explicit Code Security opt-in. Actions and
+Dependabot vulnerability alerts are enabled; Dependabot has opened its first
+update proposal. GitHub returned HTTP 403 for repository rulesets, requiring an
+account upgrade before private-branch check enforcement is available. No billing
+or repository visibility changes were made.
+
+Rebuilt and redeployed both services after a consistent stopped-gateway backup
+at `/tmp/mcpwarden-predeploy-20260923-initial-1/`; keys are separate at
+`/tmp/mcpwarden-predeploy-keys-20260923-initial-1/`. Gateway and UI are running in
+new containers with zero restarts. Their built image digests remained server
+`aebf3bcc947f` and UI `14edadb03a34`: this batch's dependency change affects the
+separate database CLI, while current startup still uses legacy file custody.
+Health, authenticated/unauthenticated APIs, no-store, served asset bytes, worker
+MIME/CSP and preserved volume mounts passed. Previous audit history was retained
+byte-for-byte. Deployment encryption keys and operator credentials were unchanged.

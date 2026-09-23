@@ -7,6 +7,16 @@ required status in the main-branch ruleset; it fails if any mandatory job fails,
 is cancelled or is skipped. The private repository is
 [YAPhoa/mcpwarden](https://github.com/YAPhoa/mcpwarden).
 
+The [initial hosted CI run](https://github.com/YAPhoa/mcpwarden/actions/runs/35825326621)
+passed every mandatory job. Actions and Dependabot vulnerability alerts are
+enabled. Repository workflow permissions default to read-only, without permission
+to approve pull requests. GitHub returned HTTP 403 when checking repository
+rulesets: this account needs GitHub Pro to enforce branch rules on this private
+repository. Until that is available, check **Required checks** manually before
+merging. See [protected-branch availability](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
+CodeQL is configured but skipped while private Code Security access and the
+explicit opt-in are absent.
+
 | Check | What it runs |
 |---|---|
 | Go and PostgreSQL | gofmt; module tidy/verification; original spec and vendored crypto hashes; build; vet; full race suite with PostgreSQL enabled and Node available; CGO-disabled build/JSON/storage tests; two bounded parser fuzz runs. |
