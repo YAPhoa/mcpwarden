@@ -226,8 +226,13 @@ revocation and execution-lock routes now run in the gateway when `owner_security
 is configured. Only an active local-account browser session can confirm or
 activate; any request carrying an API key is refused and audited. Unsafe requests
 need an allowlisted HTTPS Origin, a session-bound CSRF token and JSON bodies;
-security changes re-verify the account password. Policy and ciphertext changes
+all routes separately require direct TLS or verified HTTPS from an explicitly
+trusted immediate proxy. Direct loopback HTTP development is opt-in. Security
+changes re-verify the account password. Policy and ciphertext changes
 commit with their audit event, stale requests and revoked windows in one
-transaction. PostgreSQL route tests cover isolation, replay, concurrent CAS writes
-and activations, key revocation and executor loss. Execution does not consult
+transaction, rechecking session authority after database waits and writes.
+Session revocation and password changes share the owner gate through commit.
+PostgreSQL route tests cover isolation, replay, concurrent CAS writes
+and activations, key/session revocation, queued session expiry, transport trust
+and executor loss. Execution does not consult
 leases yet (step 4). See [owner API](owner-api.md).

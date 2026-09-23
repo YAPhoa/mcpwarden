@@ -43,3 +43,8 @@ audit:
 # the guarded execution path is not installed by this setting.
 # owner_security:
 #   database_url_env: MCPWARDEN_SECURITY_DATABASE_URL
+#   # Trust only the immediate proxy's IP/CIDR. It must overwrite
+#   # X-Forwarded-Proto with the verified client scheme, not forward user input.
+#   trusted_proxies: ["127.0.0.1/32", "::1/128"]
+#   # Optional direct loopback HTTP for development only; default false.
+#   allow_insecure_loopback: false

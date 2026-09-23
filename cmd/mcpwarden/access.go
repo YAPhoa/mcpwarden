@@ -68,12 +68,13 @@ type activeMCP struct {
 	session *mcp.ServerSession
 }
 type accessManager struct {
-	closing  bool
-	cleanup  sync.WaitGroup
-	store    catalog.Repository
-	mu       sync.Mutex
-	sessions map[*mcp.ServerSession]activeMCP
-	guard    accessGuard
+	closing      bool
+	cleanup      sync.WaitGroup
+	store        catalog.Repository
+	mu           sync.Mutex
+	sessions     map[*mcp.ServerSession]activeMCP
+	guard        accessGuard
+	sessionGuard accessGuard
 }
 
 func newAccessManager(s catalog.Repository) *accessManager {
@@ -273,7 +274,7 @@ func (a *accessManager) handler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Browser sessions do not own access windows; ending one never
 			// stops approved agent work (browser lock is not execution lock).
-			err = revoke()
+			err = a.sessionGuard.run(r.Context(), owner, revoke)
 		}
 		if err != nil {
 			http.Error(w, "could not revoke access", 500)

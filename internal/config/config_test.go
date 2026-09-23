@@ -75,3 +75,19 @@ func TestOwnerSecurityRequiresAccountsAndDatabaseEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnerSecurityTrustedProxyConfiguration(t *testing.T) {
+	for _, raw := range []string{"proxy.example.test", "192.0.2.8", "0.0.0.0/0", "::/0", "192.0.2.8/24", "::ffff:192.0.2.8/128", "not-a-network"} {
+		if _, err := (OwnerSecurity{TrustedProxies: []string{raw}}).ProxyPrefixes(); err == nil {
+			t.Errorf("unsafe or ambiguous proxy network accepted: %s", raw)
+		}
+	}
+	for _, raw := range []string{"127.0.0.1/32", "::1/128", "192.0.2.0/24", "2001:db8::/64"} {
+		if _, err := (OwnerSecurity{TrustedProxies: []string{raw}}).ProxyPrefixes(); err != nil {
+			t.Errorf("valid proxy network rejected: %s", raw)
+		}
+	}
+	if _, err := (OwnerSecurity{TrustedProxies: make([]string, 17)}).ProxyPrefixes(); err == nil {
+		t.Fatal("unbounded proxy network list accepted")
+	}
+}

@@ -274,3 +274,23 @@ PostgreSQL catalog tracks them; admission and activation still recheck live
 visibility, policy and definition digests. See
 [owner API](security/owner-api.md).
 
+## 2026-09-23 — Owner API transport and concurrent authorization
+
+An HTTPS Origin authenticates neither the incoming transport nor a proxy hop.
+Check direct TLS or an explicitly trusted immediate proxy before authentication
+and body parsing on every security route. Trusted CIDRs are opt-in; only a single
+`X-Forwarded-Proto: https` assertion is accepted, and the proxy must overwrite
+client-supplied values. Plain HTTP development is a separate opt-in restricted
+to direct loopback peers and hosts without forwarding headers. The existing HTTP
+Compose UI does not establish this trust by itself.
+
+Initial cookie validation cannot authorize a mutation after a slow upload or
+database wait. `ChangeOwnerAtomic` rechecks the interactive browser inside the
+owner transaction after acquiring the durable owner lock, then checks expiry
+again after writes. `ChangeSessions` serializes logout, login replacement,
+explicit session revocation and password changes with that transaction and its
+cache publication. It requires no database operation and does not revoke agent
+windows, preserving the browser-lock/execution-lock distinction. Expensive
+password hashing stays outside the gate; its exact verifier is checked again
+under the gate before root or policy changes. The trusted `ChangeAtomic` entry
+point remains available to non-HTTP integrations.

@@ -126,6 +126,8 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 			security.register(mux)
 			accounts.guard = security.guardAccess
 			rs.access.guard = security.guardAccess
+			accounts.sessionGuard = security.service.ChangeSessions
+			rs.access.sessionGuard = security.service.ChangeSessions
 		}
 		mcpHandler = accounts.protect(mcpHandler, false)
 		clientProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true, true) }

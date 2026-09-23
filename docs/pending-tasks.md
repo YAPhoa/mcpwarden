@@ -14,7 +14,9 @@ per-case coverage of the 68 acceptance tests is in the
    setting; see [owner API](security/owner-api.md). Owner-scoped vault/credential
    persistence and request, confirmation, activation, revocation and
    execution-lock endpoints enforce interactive browser authentication,
-   CSRF/Origin checks, bounded inputs, rate limits and mutation audit. Approval
+   verified HTTPS transport, CSRF/Origin checks, bounded inputs, rate limits and
+   mutation audit. Session authority is rechecked inside owner transactions;
+   revocation and password changes share the owner gate. Approval
    `none` still requires explicit owner CEK release; MCP keys cannot activate.
    Accounts, sessions and keys stay in the file catalog until step 3.
 2. **Vault and lease UI.** Connect setup, recovery-key save/confirmation, unlock,

@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -44,20 +45,26 @@ const (
 // It stores ciphertext and authorization metadata only. Installing guarded
 // execution for converted providers is a separate startup step.
 type securityAPI struct {
-	service   *lease.Service
-	store     *postgres.Store
-	cache     *vault.Cache
-	index     *custody.Index
-	authority *custody.Authority
-	catalog   catalog.Repository
-	accounts  *accountAuth
-	origins   []string
-	csrfKey   []byte
-	limits    *rateLimits
-	logger    *slog.Logger
+	service               *lease.Service
+	store                 *postgres.Store
+	cache                 *vault.Cache
+	index                 *custody.Index
+	authority             *custody.Authority
+	catalog               catalog.Repository
+	accounts              *accountAuth
+	origins               []string
+	csrfKey               []byte
+	limits                *rateLimits
+	logger                *slog.Logger
+	trustedProxies        []netip.Prefix
+	allowInsecureLoopback bool
 }
 
 func openSecurity(ctx context.Context, cfg config.Config, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
+	trustedProxies, err := cfg.OwnerSecurity.ProxyPrefixes()
+	if err != nil {
+		return nil, err
+	}
 	db, err := postgres.Open(ctx, cfg.OwnerSecurity.DatabaseURL)
 	if err != nil {
 		return nil, errors.New("owner security storage unavailable")
@@ -72,7 +79,8 @@ func openSecurity(ctx context.Context, cfg config.Config, store catalog.Reposito
 		return nil, errors.New("owner security executor could not start")
 	}
 	api := &securityAPI{service: service, store: db, cache: cache, index: index, authority: authority, catalog: store,
-		accounts: accounts, origins: cfg.Origins, csrfKey: randBytes(32), limits: newRateLimits(), logger: logger}
+		accounts: accounts, origins: cfg.Origins, csrfKey: randBytes(32), limits: newRateLimits(), logger: logger,
+		trustedProxies: trustedProxies, allowInsecureLoopback: cfg.OwnerSecurity.AllowInsecureLoopback}
 	snapshot, err := db.LoadCustody(ctx)
 	if err == nil {
 		err = index.Load(snapshot, cache)
@@ -130,6 +138,9 @@ type securityHandler func(http.ResponseWriter, *http.Request, catalog.AccessReco
 func (api *securityAPI) owner(next securityHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		noStore(w)
+		if !api.secureTransport(w, r) {
+			return
+		}
 		if value := r.Header.Get("Authorization"); value != "" {
 			api.rejectKey(r, value)
 			securityFailure(w, http.StatusForbidden, "interactive_owner_required", "An interactive owner browser session is required; access keys cannot use this route.")
@@ -167,6 +178,9 @@ func (api *securityAPI) caller(next securityHandler) http.Handler {
 			return
 		}
 		noStore(w)
+		if !api.secureTransport(w, r) {
+			return
+		}
 		if !isAPIKeyAuthorization(value) {
 			securityFailure(w, http.StatusUnauthorized, "access_key_required", "A named access key or owner session is required.")
 			return
@@ -302,6 +316,8 @@ func rateLimited(w http.ResponseWriter) {
 // details never reach the response.
 func securityError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errPasswordChanged):
+		securityFailure(w, http.StatusForbidden, "reauthentication_required", "Current account password required.")
 	case errors.Is(err, lease.ErrNotFound), errors.Is(err, vault.ErrNotFound):
 		securityFailure(w, http.StatusNotFound, "not_found", "Not found.")
 	case errors.Is(err, lease.ErrDenied):
@@ -348,18 +364,21 @@ func methodNotAllowed(w http.ResponseWriter, allow string) {
 	securityFailure(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 }
 
+var errPasswordChanged = errors.New("account password changed during owner authorization")
+
 // fresh requires the account password again for changes to the vault wrappers
 // or approval policy. A long-lived session alone cannot weaken either.
-func (api *securityAPI) fresh(w http.ResponseWriter, owner, password string) bool {
-	switch status := api.accounts.verifyCurrentPassword(owner, password); status {
+func (api *securityAPI) fresh(w http.ResponseWriter, owner, password string) (passwordProof, bool) {
+	proof, status := api.accounts.verifyCurrentPassword(owner, password)
+	switch status {
 	case 0:
-		return true
+		return proof, true
 	case http.StatusTooManyRequests:
 		rateLimited(w)
 	default:
 		securityFailure(w, http.StatusForbidden, "reauthentication_required", "Current account password required.")
 	}
-	return false
+	return passwordProof{}, false
 }
 
 func (api *securityAPI) csrf(w http.ResponseWriter, r *http.Request, _ catalog.AccessRecord) {
@@ -403,13 +422,18 @@ func (api *securityAPI) approvalPolicy(w http.ResponseWriter, r *http.Request, c
 			securityError(w, custody.ErrInvalid)
 			return
 		}
-		if !api.fresh(w, caller.Owner, in.CurrentPassword) {
+		proof, ok := api.fresh(w, caller.Owner, in.CurrentPassword)
+		if !ok {
 			return
 		}
+		defer clear(proof.hash)
 		var saved custody.Policy
 		// The change stales pending requests and revokes live windows in the
 		// same transaction, before success is reported.
-		err := api.service.ChangeAtomic(r.Context(), caller.Owner, func(tx lease.Tx) (func() error, error) {
+		err := api.service.ChangeOwnerAtomic(r.Context(), func(tx lease.Tx) (func() error, error) {
+			if !api.accounts.passwordUnchanged(proof) {
+				return nil, errPasswordChanged
+			}
 			ctx := tx.(custody.Tx)
 			if err := ctx.PutApprovalPolicy(custody.Policy{OwnerID: caller.Owner, Mode: in.Mode, ChangedBy: caller.ID}, in.ExpectedRevision); err != nil {
 				return nil, err
@@ -560,14 +584,19 @@ func (api *securityAPI) vaultSetup(w http.ResponseWriter, r *http.Request, calle
 		securityError(w, vault.ErrInvalid)
 		return
 	}
-	if !api.fresh(w, caller.Owner, in.CurrentPassword) {
+	proof, ok := api.fresh(w, caller.Owner, in.CurrentPassword)
+	if !ok {
 		return
 	}
-	api.putRoot(w, r, caller, in.Root, "", "vault.created", http.StatusCreated)
+	defer clear(proof.hash)
+	api.putRoot(w, r, caller, proof, in.Root, "", "vault.created", http.StatusCreated)
 }
 
-func (api *securityAPI) putRoot(w http.ResponseWriter, r *http.Request, caller catalog.AccessRecord, root vault.Root, expected, event string, status int) {
-	err := api.service.ChangeAtomic(r.Context(), caller.Owner, func(tx lease.Tx) (func() error, error) {
+func (api *securityAPI) putRoot(w http.ResponseWriter, r *http.Request, caller catalog.AccessRecord, proof passwordProof, root vault.Root, expected, event string, status int) {
+	err := api.service.ChangeOwnerAtomic(r.Context(), func(tx lease.Tx) (func() error, error) {
+		if !api.accounts.passwordUnchanged(proof) {
+			return nil, errPasswordChanged
+		}
 		if err := tx.(vault.Tx).PutVaultRoot(root, expected); err != nil {
 			return nil, err
 		}
@@ -624,10 +653,12 @@ func (api *securityAPI) vaultWrappers(w http.ResponseWriter, r *http.Request, ca
 			securityError(w, vault.ErrInvalid)
 			return
 		}
-		if !api.fresh(w, caller.Owner, in.CurrentPassword) {
+		proof, ok := api.fresh(w, caller.Owner, in.CurrentPassword)
+		if !ok {
 			return
 		}
-		api.putRoot(w, r, caller, in.Root, in.ExpectedWrapperRevision, "vault.rewrapped", http.StatusOK)
+		defer clear(proof.hash)
+		api.putRoot(w, r, caller, proof, in.Root, in.ExpectedWrapperRevision, "vault.rewrapped", http.StatusOK)
 	default:
 		methodNotAllowed(w, "GET, PUT")
 	}
@@ -711,7 +742,7 @@ func (api *securityAPI) credential(w http.ResponseWriter, r *http.Request, calle
 
 func (api *securityAPI) changeCredential(w http.ResponseWriter, r *http.Request, caller catalog.AccessRecord, id, event string, status int, write func(vault.Tx) error) {
 	var stored vault.Record
-	err := api.service.ChangeAtomic(r.Context(), caller.Owner, func(tx lease.Tx) (func() error, error) {
+	err := api.service.ChangeOwnerAtomic(r.Context(), func(tx lease.Tx) (func() error, error) {
 		v := tx.(vault.Tx)
 		if err := write(v); err != nil {
 			return nil, err

@@ -123,6 +123,7 @@ func (f *ownerFixture) start() {
 		}
 	})
 	f.accounts.guard, f.access.guard = api.guardAccess, api.guardAccess
+	f.accounts.sessionGuard, f.access.sessionGuard = api.service.ChangeSessions, api.service.ChangeSessions
 	f.mux = http.NewServeMux()
 	api.register(f.mux)
 	f.mux.Handle("/api/auth/", originOnly(http.HandlerFunc(f.accounts.authHandler), f.cfg.Origins))
@@ -162,7 +163,7 @@ func (f *ownerFixture) do(r req) *httptest.ResponseRecorder {
 		}
 		r.csrf = token.Token
 	}
-	hr := httptest.NewRequest(r.method, "http://gateway.internal"+r.path, strings.NewReader(r.body))
+	hr := httptest.NewRequest(r.method, panelOrigin+r.path, strings.NewReader(r.body))
 	if r.body != "" {
 		hr.Header.Set("Content-Type", "application/json")
 	}
@@ -345,7 +346,7 @@ func TestOwnerRoutesRequireInteractiveBrowserSession(t *testing.T) {
 			f.expect(req{path: "/api/security/csrf", user: "alice"}, 200, &token)
 			return token.Token
 		}()
-		hr := httptest.NewRequest("POST", "http://gateway.internal/api/vault/lock-execution", strings.NewReader("{}"))
+		hr := httptest.NewRequest("POST", panelOrigin+"/api/vault/lock-execution", strings.NewReader("{}"))
 		hr.Header.Set("Content-Type", contentType)
 		hr.Header.Set("Origin", panelOrigin)
 		hr.Header.Set("X-CSRF-Token", csrf)
@@ -724,6 +725,13 @@ func TestOwnerRoutesFailClosedOnDatabaseLoss(t *testing.T) {
 	if _, ok := authenticateAPIKey(f.store, f.keys["agent"]); ok {
 		t.Fatal("key revocation blocked by storage loss")
 	}
+	// Browser logout must also work without PostgreSQL, even though it shares
+	// the owner gate with credential writes.
+	f.expect(req{method: "POST", path: "/api/auth/logout", user: "alice", body: "{}", skipCSRF: true}, 204, nil)
+	if _, ok := f.store.AuthenticateAccess(tokenHash(f.cookies["alice"]), "browser"); ok {
+		t.Fatal("session revocation blocked by storage loss")
+	}
+	f.cookies["alice"] = f.session("alice")
 	// A fresh executor starts locked: the old window is suspended.
 	f.restart()
 	var leases []leaseView

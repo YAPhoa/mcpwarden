@@ -49,7 +49,7 @@ Totals: 3 Live, 11 Opt-in, 23 Library, 22 Partial, 2 Open, 7 Unselected.
 | A06 | Library | `TestNoUnionAndCurrentToolPolicy` | Startup wiring |
 | A07 | Library | `TestResourceConstraints` (changed definition), `TestEncryptedDispatchThroughMCPAndPostgres` (definition drift) | Startup wiring |
 | A08 | Library | `TestNoUnionAndCurrentToolPolicy`, `TestPreparationDoesNotSwitchToAnotherLease` | Startup wiring |
-| A09 | Opt-in | `TestOwnerConcurrentMutationsAndKeyRevocation` (key revocation ends its window through the coordinator), `TestOwnerRoutesFailClosedOnDatabaseLoss` (revocation still succeeds while storage is lost), `TestAccessCapsRevocationAndMigration`, `TestAccessRolesAndRevocableMCPSessions`, `TestChangePasswordRequiresCurrentAndRevokesOtherBrowsers` | Without `owner_security` there are no windows to end |
+| A09 | Opt-in | `TestOwnerConcurrentMutationsAndKeyRevocation` (key revocation ends its window through the coordinator), `TestOwnerRoutesFailClosedOnDatabaseLoss` (key revocation and logout still succeed while storage is lost), `TestOwnerMutationsRejectRevokedSession`, `TestOwnerCredentialWriteRejectsReplacedSession`, `TestOwnerMutationRechecksSessionAfterDatabaseWait`, `TestAccessCapsRevocationAndMigration`, `TestAccessRolesAndRevocableMCPSessions`, `TestChangePasswordRequiresCurrentAndRevokesOtherBrowsers` | Without `owner_security` there are no windows to end |
 | A10 | Partial | UI test "workspace shows server identity and clearly labels shared operator mode" | Owner-specific caller authorization for shared upstreams under leases |
 
 ## 22.3 Cryptography and lifecycle
@@ -76,7 +76,7 @@ Totals: 3 Live, 11 Opt-in, 23 Library, 22 Partial, 2 Open, 7 Unselected.
 | D02 | Unselected | Not applicable while no delivery or factor adapter is enabled | Needed only if push or TOTP is selected |
 | D03 | Unselected | Not applicable | Needed only if push or TOTP is selected |
 | D04 | Partial | `TestOwnerSecurityRequestLimitsAndBodies` (per-key route budget, body and duration caps), `TestCallerExpiryOwnerIsolationAndRequestLimits` (request caps and deduplication) | Push rate limits are unselected |
-| D05 | Opt-in | `TestOwnerRoutesRequireInteractiveBrowserSession` (missing or forged CSRF, foreign, missing or plain-HTTP Origin, cross-site fetch metadata, non-JSON bodies, `no-store` headers), `TestOriginValidation`, `TestBearerAndOrigin` | Owner UI (step 2) |
+| D05 | Opt-in | `TestOwnerRoutesRequireInteractiveBrowserSession` (CSRF, Origin, fetch metadata, JSON and no-store), `TestOwnerRejectsInsecureExternalActivation` (forged HTTPS headers rejected before CEK body reads), `TestOwnerTransportTrust` (explicit trusted proxies and direct-loopback development), `TestOriginValidation`, `TestBearerAndOrigin` | Owner UI (step 2); verified production TLS ingress before enabling the API |
 | D06 | Partial | `TestDialChecksAllAnswersAndPinsCheckedIP`, `TestDestinationIPPolicy`, `TestOAuthRejectsInsecureDiscoveredEndpoint` | Legacy HTTP transport lacks connection-time IP checks; OAuth endpoint SSRF (step 8) |
 | D07 | Partial | `TestStdioChildEnvironment` (only allowlisted variables reach stdio children) | Process and host isolation (step 8) |
 | D08 | Open | None | Serialized OAuth refresh (step 6) |
@@ -99,7 +99,7 @@ Totals: 3 Live, 11 Opt-in, 23 Library, 22 Partial, 2 Open, 7 Unselected.
 | P09 | Opt-in | `TestOwnerRoutesFailClosedOnDatabaseLoss` (terminated executor session locks owner routes; restart suspends the old window), `TestPostgresExclusiveExecutorAndLoss` | Guarded execution at startup (step 4) |
 | P10 | Library | `TestPostgresDurabilityIsolationAndPrivileges` | Retention role and procedure |
 | P11 | Partial | `TestBudgetAdmissionAtomicAndConcurrency`, `TestPostgresAtomicBudget` | High-concurrency load tests (step 10) |
-| P12 | Partial | `TestOwnerConfirmModeAndPolicyChange`, `TestOwnerVaultCredentialLifecycleAndRestart` (owner policy and credential writes go through the coordinator), `TestAtomicVaultCommitFailureDoesNotPublish`, `TestAtomicVaultMutationRevokesOnlyAfterCommit` | Catalog mutations do not go through the coordinator yet (step 3) |
+| P12 | Partial | `TestOwnerConfirmModeAndPolicyChange`, `TestOwnerVaultCredentialLifecycleAndRestart` (owner policy and credential writes go through the coordinator), `TestOwnerMutationExpiryRollsBackWritesAndRevocation`, `TestSessionRevocationWaitsForOwnerCommitAndPublication`, `TestAtomicVaultCommitFailureDoesNotPublish`, `TestAtomicVaultMutationRevokesOnlyAfterCommit` | Remaining catalog mutations do not go through the coordinator yet (step 3) |
 
 ## 22.6 Optional-mode acceptance cases
 

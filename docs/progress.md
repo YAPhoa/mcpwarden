@@ -1,5 +1,30 @@
 # Progress
 
+## 2026-09-23 — Owner security API review fixes
+
+Fixed the two blockers found while reviewing PR #3. Every owner-security route
+now checks actual TLS or an explicitly trusted immediate proxy before reading
+authentication or request bodies. An HTTPS Origin and forged forwarding headers
+cannot authorize plaintext activation. Direct loopback HTTP is a separate,
+disabled-by-default development option; the examples and deployment requirements
+are documented in [owner API](security/owner-api.md).
+
+Owner policy, root and credential mutations recheck the browser session after
+acquiring the database owner lock and after writes. Logout, login replacement,
+explicit session revocation and password changes share the owner gate through
+commit and cache publication. Fresh password checks are bound to the exact
+stored verifier and rechecked under that gate. Browser revocation still preserves
+approved agent windows and remains available during PostgreSQL failure.
+
+Validation passed: `go build ./...`, `go vet ./...`, and
+`go test -race -count=1 -timeout=10m ./...` with the isolated PostgreSQL fixture
+enabled. New regressions cover forged HTTPS headers without reading the CEK body,
+trusted proxies, direct loopback restrictions, revoked sessions during uploads
+for all six mutation paths, session replacement, password changes, expiry while
+waiting for the database lock, rollback on expiry during writes, and revocation
+ordering through commit/publication. All 18 original spec/vendor integrity
+checks passed. Hosted CI and deployment are recorded separately when complete.
+
 ## 2026-09-23 — Owner security API (roadmap step 1)
 
 Added owner-scoped vault, credential, access-request, confirmation, activation,

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -35,9 +36,29 @@ type Config struct {
 // by PostgreSQL. It does not change credential custody or tool execution: the
 // guarded execution path is installed separately (roadmap step 4).
 type OwnerSecurity struct {
-	DatabaseURLEnv string `yaml:"database_url_env"`
-	DatabaseURL    string `yaml:"-"`
+	DatabaseURLEnv        string   `yaml:"database_url_env"`
+	DatabaseURL           string   `yaml:"-"`
+	TrustedProxies        []string `yaml:"trusted_proxies"`
+	AllowInsecureLoopback bool     `yaml:"allow_insecure_loopback"`
 }
+
+// ProxyPrefixes accepts explicit, canonical IP networks, never hostnames or a
+// catch-all network. Only these immediate peers may assert X-Forwarded-Proto.
+func (c OwnerSecurity) ProxyPrefixes() ([]netip.Prefix, error) {
+	if len(c.TrustedProxies) > 16 {
+		return nil, fmt.Errorf("owner_security.trusted_proxies: at most 16 networks are supported")
+	}
+	out := make([]netip.Prefix, 0, len(c.TrustedProxies))
+	for _, raw := range c.TrustedProxies {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil || p.Bits() == 0 || p.Addr().Is4In6() || p.Masked() != p || p.String() != raw {
+			return nil, fmt.Errorf("owner_security.trusted_proxies requires canonical IP CIDRs with a nonzero prefix length")
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 type Managed struct {
 	Path   string `yaml:"path"`
 	KeyEnv string `yaml:"key_env"`
@@ -111,6 +132,9 @@ func (c *Config) ResolveAndValidate() error {
 		// Operator bearer and external OAuth modes cannot distinguish a human.
 		if c.Accounts == nil {
 			return fmt.Errorf("owner_security requires accounts mode")
+		}
+		if _, err := c.OwnerSecurity.ProxyPrefixes(); err != nil {
+			return err
 		}
 		if c.OwnerSecurity.DatabaseURLEnv == "" {
 			return fmt.Errorf("owner_security.database_url_env is required")

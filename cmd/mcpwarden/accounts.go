@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -43,6 +44,8 @@ type accountAuth struct {
 	onRevoke func(string)
 	// guard routes API-key revocation through the owner lease coordinator.
 	guard accessGuard
+	// sessionGuard serializes session/password revocation without ending leases.
+	sessionGuard accessGuard
 }
 
 // accessGuard runs a mutation that can revoke an API key. With owner security
@@ -141,7 +144,7 @@ func (a *accountAuth) startSession(w http.ResponseWriter, r *http.Request, user 
 	now := time.Now()
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		if old, ok := a.store.AuthenticateAccess(tokenHash(cookie.Value), "browser"); ok {
-			if err := a.store.RevokeAccess(old.Owner, old.ID); err != nil {
+			if err := a.sessionGuard.run(r.Context(), old.Owner, func() error { return a.store.RevokeAccess(old.Owner, old.ID) }); err != nil {
 				http.Error(w, "could not rotate session", 500)
 				return
 			}
@@ -186,7 +189,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/auth/logout" {
 		if current, ok := a.session(r); ok {
-			if err := a.store.RevokeAccess(current.Owner, current.AccessID); err != nil {
+			if err := a.sessionGuard.run(r.Context(), current.Owner, func() error { return a.store.RevokeAccess(current.Owner, current.AccessID) }); err != nil {
 				http.Error(w, "could not revoke session", 500)
 				return
 			}
@@ -299,34 +302,47 @@ func (a *accountAuth) allowAttempt() bool {
 	return a.attempts <= 30
 }
 
-// verifyCurrentPassword gives a security change fresh proof of the account
-// password. It returns 0 on success or the HTTP status to report.
-func (a *accountAuth) verifyCurrentPassword(owner, password string) int {
+// passwordProof binds a completed password check to the exact stored verifier.
+// Rechecking it under the owner gate keeps expensive hashing outside that gate.
+type passwordProof struct {
+	owner, username string
+	hash            []byte
+}
+
+func (a *accountAuth) passwordUnchanged(p passwordProof) bool {
+	account, ok := a.store.Account(p.username)
+	return ok && account.ID == p.owner && len(p.hash) != 0 && subtle.ConstantTimeCompare(account.PasswordHash, p.hash) == 1
+}
+
+// verifyCurrentPassword returns proof and status 0 on success, or an HTTP error
+// status. The proof must be checked again in the authorized owner transaction.
+func (a *accountAuth) verifyCurrentPassword(owner, password string) (passwordProof, int) {
 	if password == "" || len(password) > 1024 {
-		return http.StatusBadRequest
+		return passwordProof{}, http.StatusBadRequest
 	}
 	if !a.allowAttempt() {
-		return http.StatusTooManyRequests
+		return passwordProof{}, http.StatusTooManyRequests
 	}
 	select {
 	case a.hashing <- struct{}{}:
 		defer func() { <-a.hashing }()
 	default:
-		return http.StatusTooManyRequests
+		return passwordProof{}, http.StatusTooManyRequests
 	}
 	user, ok := a.store.AccountOwner(owner)
 	if !ok {
-		return http.StatusForbidden
+		return passwordProof{}, http.StatusForbidden
 	}
 	account, ok := a.store.Account(user.Username)
 	if !ok || account.ID != owner {
-		return http.StatusForbidden
+		return passwordProof{}, http.StatusForbidden
 	}
 	hash, err := pbkdf2.Key(sha256.New, password, account.Salt, account.Iterations, 32)
+	defer clear(hash)
 	if err != nil || subtle.ConstantTimeCompare(hash, account.PasswordHash) != 1 {
-		return http.StatusForbidden
+		return passwordProof{}, http.StatusForbidden
 	}
-	return 0
+	return passwordProof{owner: owner, username: account.Username, hash: append([]byte(nil), account.PasswordHash...)}, 0
 }
 
 func (a *accountAuth) changePassword(w http.ResponseWriter, r *http.Request) {
@@ -365,7 +381,17 @@ func (a *accountAuth) changePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "password update failed", 500)
 		return
 	}
-	ids, err := a.store.ChangePassword(current.Username, account.PasswordHash, salt, hash, passwordIterations, current.AccessID)
+	var ids []string
+	err = a.sessionGuard.run(r.Context(), current.Owner, func() error {
+		// Logout or session replacement may have completed while hashing.
+		again, ok := a.session(r)
+		if !ok || again.Owner != current.Owner || again.AccessID != current.AccessID {
+			return errors.New("browser session no longer active")
+		}
+		var err error
+		ids, err = a.store.ChangePassword(current.Username, account.PasswordHash, salt, hash, passwordIterations, current.AccessID)
+		return err
+	})
 	if err != nil {
 		http.Error(w, "password update failed", 409)
 		return
