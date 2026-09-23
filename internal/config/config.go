@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -18,17 +19,46 @@ type Accounts struct {
 }
 
 type Config struct {
-	Accounts       *Accounts  `yaml:"accounts"`
-	Listen         string     `yaml:"listen"`
-	DownstreamAuth *Auth      `yaml:"downstream_auth"`
-	OAuth          *OAuth     `yaml:"oauth"`
-	Origins        []string   `yaml:"allowed_origins"`
-	Upstreams      []Upstream `yaml:"upstreams"`
-	Policy         Policy     `yaml:"policy"`
-	Audit          Audit      `yaml:"audit"`
-	Managed        *Managed   `yaml:"managed_upstreams"`
-	Token          string     `yaml:"-"`
+	Accounts       *Accounts      `yaml:"accounts"`
+	Listen         string         `yaml:"listen"`
+	DownstreamAuth *Auth          `yaml:"downstream_auth"`
+	OAuth          *OAuth         `yaml:"oauth"`
+	Origins        []string       `yaml:"allowed_origins"`
+	Upstreams      []Upstream     `yaml:"upstreams"`
+	Policy         Policy         `yaml:"policy"`
+	Audit          Audit          `yaml:"audit"`
+	Managed        *Managed       `yaml:"managed_upstreams"`
+	OwnerSecurity  *OwnerSecurity `yaml:"owner_security"`
+	Token          string         `yaml:"-"`
 }
+
+// OwnerSecurity enables the owner vault, access-request and lease routes backed
+// by PostgreSQL. It does not change credential custody or tool execution: the
+// guarded execution path is installed separately (roadmap step 4).
+type OwnerSecurity struct {
+	DatabaseURLEnv        string   `yaml:"database_url_env"`
+	DatabaseURL           string   `yaml:"-"`
+	TrustedProxies        []string `yaml:"trusted_proxies"`
+	AllowInsecureLoopback bool     `yaml:"allow_insecure_loopback"`
+}
+
+// ProxyPrefixes accepts explicit, canonical IP networks, never hostnames or a
+// catch-all network. Only these immediate peers may assert X-Forwarded-Proto.
+func (c OwnerSecurity) ProxyPrefixes() ([]netip.Prefix, error) {
+	if len(c.TrustedProxies) > 16 {
+		return nil, fmt.Errorf("owner_security.trusted_proxies: at most 16 networks are supported")
+	}
+	out := make([]netip.Prefix, 0, len(c.TrustedProxies))
+	for _, raw := range c.TrustedProxies {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil || p.Bits() == 0 || p.Addr().Is4In6() || p.Masked() != p || p.String() != raw {
+			return nil, fmt.Errorf("owner_security.trusted_proxies requires canonical IP CIDRs with a nonzero prefix length")
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 type Managed struct {
 	Path   string `yaml:"path"`
 	KeyEnv string `yaml:"key_env"`
@@ -96,6 +126,24 @@ func Load(path string) (Config, error) {
 func (c *Config) ResolveAndValidate() error {
 	if c.Accounts != nil && (c.Managed == nil || c.OAuth != nil) {
 		return fmt.Errorf("accounts requires managed_upstreams and cannot be combined with oauth mode")
+	}
+	if c.OwnerSecurity != nil {
+		// Only local-account browser sessions can prove an interactive owner.
+		// Operator bearer and external OAuth modes cannot distinguish a human.
+		if c.Accounts == nil {
+			return fmt.Errorf("owner_security requires accounts mode")
+		}
+		if _, err := c.OwnerSecurity.ProxyPrefixes(); err != nil {
+			return err
+		}
+		if c.OwnerSecurity.DatabaseURLEnv == "" {
+			return fmt.Errorf("owner_security.database_url_env is required")
+		}
+		var ok bool
+		c.OwnerSecurity.DatabaseURL, ok = os.LookupEnv(c.OwnerSecurity.DatabaseURLEnv)
+		if !ok || c.OwnerSecurity.DatabaseURL == "" {
+			return fmt.Errorf("owner_security: environment variable %s is unset or empty", c.OwnerSecurity.DatabaseURLEnv)
+		}
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8787"

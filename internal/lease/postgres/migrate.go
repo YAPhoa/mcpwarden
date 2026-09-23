@@ -20,9 +20,12 @@ var migration string
 //go:embed migrations/002_vault.sql
 var vaultMigration string
 
-var migrations = []string{migration, vaultMigration}
+//go:embed migrations/003_owner_api.sql
+var ownerMigration string
 
-const SchemaVersion = 2
+var migrations = []string{migration, vaultMigration, ownerMigration}
+
+const SchemaVersion = 3
 
 const executorLock int64 = 0x4d43505753454331 // MCPWSEC1, shared by migration and executor
 
@@ -132,6 +135,7 @@ func Migrate(ctx context.Context, conn *pgx.Conn, runtimeRole string) error {
 		"GRANT INSERT ON mcpwarden_security.security_events,mcpwarden_security.invocation_events TO " + role,
 		"GRANT INSERT, UPDATE ON mcpwarden_security.vault_roots,mcpwarden_security.credential_heads,mcpwarden_security.credential_epochs TO " + role,
 		"GRANT INSERT ON mcpwarden_security.vault_wrapper_sets,mcpwarden_security.credential_versions TO " + role,
+		"GRANT INSERT, UPDATE ON mcpwarden_security.approval_policies TO " + role,
 	} {
 		if _, err = tx.Exec(ctx, sql); err != nil {
 			return ErrMigration

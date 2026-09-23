@@ -59,7 +59,7 @@ recovery confirmation and accessible owner screens remain integration work.
 Migration `002_vault.sql` extends the unchanged v1 migration. The migrator verifies
 an exact contiguous prefix of the pinned SHA-256 ledger, applies missing versions
 atomically, and reapplies least-privilege grants. Empty, edited, gapped and unknown
-ledgers fail closed. The executor requires the entire current schema (v2), and
+ledgers fail closed. The executor requires the entire current schema (v3, which adds approval policies), and
 migration still excludes an active executor through the shared advisory lock.
 
 The database stores only public context and ciphertext: current root pointers,

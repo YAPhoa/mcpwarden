@@ -73,8 +73,11 @@ the candidate spec's complete catalog schema and not a general history importer.
 
 The reviewed first migration is
 [`001_leases.sql`](../../internal/lease/postgres/migrations/001_leases.sql).
-`cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql`, verifying
-both SHA-256 hashes in an ordered ledger. Migration 001 is unchanged.
+`cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql` and
+`003_owner_api.sql`, verifying every SHA-256 hash in an ordered ledger. Earlier
+migrations are unchanged. Migration 003 adds per-owner approval policies (revision
+CAS enforced by a trigger; the runtime role may insert and update, not delete) and
+the owner-route audit event types.
 There is no destructive down migration. Rerunning the same version is supported;
 checksum drift or a newer/unexpected ledger fails closed.
 

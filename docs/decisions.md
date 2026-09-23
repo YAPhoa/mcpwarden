@@ -248,3 +248,49 @@ connections. The child now receives only a fixed set of basic process variables
 wins over inherited values. Proxy settings and runtime-specific variables such as
 `NODE_OPTIONS` are not inherited; operators pass them with `${VAR}` placeholders.
 Process isolation beyond the environment remains in the pending hardening work.
+
+## 2026-09-23 — Owner security API storage and request protection
+
+Keep accounts, browser sessions and API keys in the file catalog for step 1; the
+owner API is opt-in (`owner_security`, accounts mode only) and adds only
+per-owner approval policies and new audit event types to PostgreSQL (schema v3).
+Moving identity and catalog records is step 3. API-key revocation calls the lease
+coordinator first so it ends the key's windows, and falls back to a direct catalog
+revocation when storage is lost or execution is locked, so a database outage
+never blocks revoking a key. Browser sign-out does not end windows.
+
+Owner routes accept only an active browser session and refuse any request that
+carries an `Authorization` header, so no MCP key can confirm or activate even in
+mode `none`. CSRF tokens are an HMAC of the session secret under a per-process
+key (no server-side token store; a restart invalidates them), combined with an
+exact Origin allowlist, HTTPS outside loopback development, same-origin fetch
+metadata and JSON-only bodies. Policy, vault setup and wrapper changes re-verify
+the account password under the existing sign-in budget. Rate limits are
+in-memory fixed windows, which is adequate for one executor process.
+
+The default approval mode for owners without a stored policy is `confirm`.
+Tool-policy and connector-security revisions are fixed at `1` until the
+PostgreSQL catalog tracks them; admission and activation still recheck live
+visibility, policy and definition digests. See
+[owner API](security/owner-api.md).
+
+## 2026-09-23 — Owner API transport and concurrent authorization
+
+An HTTPS Origin authenticates neither the incoming transport nor a proxy hop.
+Check direct TLS or an explicitly trusted immediate proxy before authentication
+and body parsing on every security route. Trusted CIDRs are opt-in; only a single
+`X-Forwarded-Proto: https` assertion is accepted, and the proxy must overwrite
+client-supplied values. Plain HTTP development is a separate opt-in restricted
+to direct loopback peers and hosts without forwarding headers. The existing HTTP
+Compose UI does not establish this trust by itself.
+
+Initial cookie validation cannot authorize a mutation after a slow upload or
+database wait. `ChangeOwnerAtomic` rechecks the interactive browser inside the
+owner transaction after acquiring the durable owner lock, then checks expiry
+again after writes. `ChangeSessions` serializes logout, login replacement,
+explicit session revocation and password changes with that transaction and its
+cache publication. It requires no database operation and does not revoke agent
+windows, preserving the browser-lock/execution-lock distinction. Expensive
+password hashing stays outside the gate; its exact verifier is checked again
+under the gate before root or policy changes. The trusted `ChangeAtomic` entry
+point remains available to non-HTTP integrations.

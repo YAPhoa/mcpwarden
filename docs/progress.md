@@ -1,5 +1,46 @@
 # Progress
 
+## 2026-09-23 — Owner security API review fixes
+
+Fixed the two blockers found while reviewing PR #3. Every owner-security route
+now checks actual TLS or an explicitly trusted immediate proxy before reading
+authentication or request bodies. An HTTPS Origin and forged forwarding headers
+cannot authorize plaintext activation. Direct loopback HTTP is a separate,
+disabled-by-default development option; the examples and deployment requirements
+are documented in [owner API](security/owner-api.md).
+
+Owner policy, root and credential mutations recheck the browser session after
+acquiring the database owner lock and after writes. Logout, login replacement,
+explicit session revocation and password changes share the owner gate through
+commit and cache publication. Fresh password checks are bound to the exact
+stored verifier and rechecked under that gate. Browser revocation still preserves
+approved agent windows and remains available during PostgreSQL failure.
+
+Validation passed: `go build ./...`, `go vet ./...`, and
+`go test -race -count=1 -timeout=10m ./...` with the isolated PostgreSQL fixture
+enabled. New regressions cover forged HTTPS headers without reading the CEK body,
+trusted proxies, direct loopback restrictions, revoked sessions during uploads
+for all six mutation paths, session replacement, password changes, expiry while
+waiting for the database lock, rollback on expiry during writes, and revocation
+ordering through commit/publication. All 18 original spec/vendor integrity
+checks passed. Hosted CI and deployment are recorded separately when complete.
+
+## 2026-09-23 — Owner security API (roadmap step 1)
+
+Added owner-scoped vault, credential, access-request, confirmation, activation,
+revocation, execution-lock, approval-policy and audit-event routes, registered
+only when `owner_security` is configured in accounts mode. PostgreSQL schema v3
+adds approval policies and owner-route event types. API-key revocation now goes
+through the lease coordinator. No deployment, live configuration or data change
+was made; the feature is off unless configured. See
+`docs/security/owner-api.md`; the acceptance matrix now lists 11 cases as Opt-in.
+
+Validation: `go build ./...`, `go vet ./...`, gofmt and
+`go test -race ./...` passed with `MCPWARDEN_TEST_DATABASE_URL` set to the local
+PostgreSQL fixture, including the seven new route tests
+(`cmd/mcpwarden/security_test.go`) and the existing lease/vault PostgreSQL tests
+on schema v3. The owner route tests also passed four consecutive race runs.
+
 ## 2026-09-22 — Redeploy security caller/audit foundation
 
 Rebuilt and restarted the separate Compose gateway and UI services at the user's

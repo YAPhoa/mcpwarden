@@ -70,6 +70,7 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
         AND NOT has_table_privilege(current_user,'mcpwarden_security.credential_heads','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.credential_epochs','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.vault_roots','DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.approval_policies','DELETE,TRUNCATE')
         FROM pg_roles r,pg_namespace n WHERE r.rolname=current_user AND n.nspname='mcpwarden_security'`).Scan(&safe)
 	if err != nil || !safe {
 		return nil, lease.ErrStorage

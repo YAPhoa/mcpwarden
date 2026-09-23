@@ -775,6 +775,9 @@ func (s *Service) LockExecution(ctx context.Context) error {
 		if err := s.endAll(tx, a.Owner, "revoked", actor.AccessID); err != nil {
 			return err
 		}
+		if err := s.event(tx, a.Owner, "execution.locked", actor.AccessID, "", "", ""); err != nil {
+			return err
+		}
 		o.publish = append(o.publish, func() error {
 			for id, rt := range o.live {
 				endRuntime(rt)
@@ -813,16 +816,58 @@ func (s *Service) Change(ctx context.Context, owner string, mutation func() erro
 // stopped. Publication failure locks this owner until a fresh process reloads.
 // Neither callback is retried, including when the commit outcome is unknown.
 func (s *Service) ChangeAtomic(ctx context.Context, owner string, mutation func(Tx) (func() error, error)) error {
+	return s.changeAtomic(ctx, owner, false, mutation)
+}
+
+// ChangeOwnerAtomic authorizes an interactive browser under the owner gate,
+// after the database owner lock is acquired, and again after the writes. Session
+// revocation must use ChangeSessions so it cannot interleave with this commit.
+func (s *Service) ChangeOwnerAtomic(ctx context.Context, mutation func(Tx) (func() error, error)) error {
+	a, ok := identity.ActorFrom(ctx)
+	if !ok {
+		return ErrDenied
+	}
+	return s.changeAtomic(ctx, a.Owner, true, mutation)
+}
+
+// ChangeSessions serializes trusted browser-session and password changes with
+// owner mutations. It does not end agent windows and still works with lost
+// storage or a locked executor. The callback must not call back into Service.
+func (s *Service) ChangeSessions(ctx context.Context, owner string, mutation func() error) error {
+	if owner == "" || len(owner) > 512 || mutation == nil {
+		return ErrDenied
+	}
+	o := s.state(owner)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return mutation()
+}
+
+func (s *Service) changeAtomic(ctx context.Context, owner string, interactive bool, mutation func(Tx) (func() error, error)) error {
 	if mutation == nil {
 		return ErrDenied
 	}
 	return s.transition(ctx, owner, func(tx Tx, o *ownerState) error {
+		if interactive {
+			if _, err := s.actor(ctx, tx.Now(), true); err != nil {
+				return err
+			}
+		}
 		publish, err := mutation(tx)
 		if err != nil {
 			return err
 		}
 		if err = s.endAll(tx, owner, "revoked", ""); err != nil {
 			return err
+		}
+		if interactive {
+			// A session can expire while a write is waiting on a database lock.
+			if _, err := s.actor(ctx, s.opts.Clock.Wall(), true); err != nil {
+				return err
+			}
 		}
 		o.publish = append(o.publish, func() error {
 			for id, rt := range o.live {

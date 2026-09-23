@@ -51,3 +51,43 @@ func TestAccountsRequireEncryptedStorageAndExcludeOAuth(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnerSecurityRequiresAccountsAndDatabaseEnv(t *testing.T) {
+	t.Setenv("TEST_MANAGED_KEY", "key")
+	t.Setenv("TEST_SECURITY_DSN", "postgres://runtime@127.0.0.1/db")
+	managed := &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}
+	for name, tt := range map[string]struct {
+		cfg  Config
+		want string
+	}{
+		"operator mode": {Config{OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, "requires accounts"},
+		"missing env":   {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "MISSING_MCPWARDEN_TEST"}}, "unset"},
+		"accounts":      {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := tt.cfg.ResolveAndValidate()
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("got error %v, want containing %q", err, tt.want)
+			}
+			if tt.want == "" && tt.cfg.OwnerSecurity.DatabaseURL != "postgres://runtime@127.0.0.1/db" {
+				t.Fatal("database URL not resolved")
+			}
+		})
+	}
+}
+
+func TestOwnerSecurityTrustedProxyConfiguration(t *testing.T) {
+	for _, raw := range []string{"proxy.example.test", "192.0.2.8", "0.0.0.0/0", "::/0", "192.0.2.8/24", "::ffff:192.0.2.8/128", "not-a-network"} {
+		if _, err := (OwnerSecurity{TrustedProxies: []string{raw}}).ProxyPrefixes(); err == nil {
+			t.Errorf("unsafe or ambiguous proxy network accepted: %s", raw)
+		}
+	}
+	for _, raw := range []string{"127.0.0.1/32", "::1/128", "192.0.2.0/24", "2001:db8::/64"} {
+		if _, err := (OwnerSecurity{TrustedProxies: []string{raw}}).ProxyPrefixes(); err != nil {
+			t.Errorf("valid proxy network rejected: %s", raw)
+		}
+	}
+	if _, err := (OwnerSecurity{TrustedProxies: make([]string, 17)}).ProxyPrefixes(); err == nil {
+		t.Fatal("unbounded proxy network list accepted")
+	}
+}

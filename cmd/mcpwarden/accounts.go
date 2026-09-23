@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -41,6 +42,24 @@ type accountAuth struct {
 	attempts int
 	hashing  chan struct{}
 	onRevoke func(string)
+	// guard routes API-key revocation through the owner lease coordinator.
+	guard accessGuard
+	// sessionGuard serializes session/password revocation without ending leases.
+	sessionGuard accessGuard
+}
+
+// accessGuard runs a mutation that can revoke an API key. With owner security
+// enabled it first ends that owner's access windows; otherwise it just runs.
+type accessGuard func(ctx context.Context, owner string, mutation func() error) error
+
+func (g accessGuard) run(ctx context.Context, owner string, mutation func() error) error {
+	if g == nil {
+		return mutation()
+	}
+	return g(ctx, owner, mutation)
+}
+func (a *accountAuth) change(ctx context.Context, owner string, mutation func() error) error {
+	return a.guard.run(ctx, owner, mutation)
 }
 
 func newAccountAuth(store catalog.Repository, cfg config.Config) *accountAuth {
@@ -125,7 +144,7 @@ func (a *accountAuth) startSession(w http.ResponseWriter, r *http.Request, user 
 	now := time.Now()
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		if old, ok := a.store.AuthenticateAccess(tokenHash(cookie.Value), "browser"); ok {
-			if err := a.store.RevokeAccess(old.Owner, old.ID); err != nil {
+			if err := a.sessionGuard.run(r.Context(), old.Owner, func() error { return a.store.RevokeAccess(old.Owner, old.ID) }); err != nil {
 				http.Error(w, "could not rotate session", 500)
 				return
 			}
@@ -170,7 +189,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/auth/logout" {
 		if current, ok := a.session(r); ok {
-			if err := a.store.RevokeAccess(current.Owner, current.AccessID); err != nil {
+			if err := a.sessionGuard.run(r.Context(), current.Owner, func() error { return a.store.RevokeAccess(current.Owner, current.AccessID) }); err != nil {
 				http.Error(w, "could not revoke session", 500)
 				return
 			}
@@ -194,7 +213,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		token := "mw_" + randomToken()
-		if err := a.store.SetClientToken(identity.Username, tokenHash(token)); err != nil {
+		if err := a.change(r.Context(), identity.Owner, func() error { return a.store.SetClientToken(identity.Username, tokenHash(token)) }); err != nil {
 			http.Error(w, "token could not be saved", 500)
 			return
 		}
@@ -209,15 +228,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "registration is closed", 403)
 		return
 	}
-	a.mu.Lock()
-	if time.Since(a.window) >= time.Minute {
-		a.window = time.Now()
-		a.attempts = 0
-	}
-	a.attempts++
-	allowed := a.attempts <= 30
-	a.mu.Unlock()
-	if !allowed {
+	if !a.allowAttempt() {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many attempts", 429)
 		return
@@ -278,6 +289,62 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 	a.startSession(w, r, user)
 }
 
+// allowAttempt is the shared password-attempt window for login, registration,
+// password changes and fresh verification before owner security changes.
+func (a *accountAuth) allowAttempt() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if time.Since(a.window) >= time.Minute {
+		a.window = time.Now()
+		a.attempts = 0
+	}
+	a.attempts++
+	return a.attempts <= 30
+}
+
+// passwordProof binds a completed password check to the exact stored verifier.
+// Rechecking it under the owner gate keeps expensive hashing outside that gate.
+type passwordProof struct {
+	owner, username string
+	hash            []byte
+}
+
+func (a *accountAuth) passwordUnchanged(p passwordProof) bool {
+	account, ok := a.store.Account(p.username)
+	return ok && account.ID == p.owner && len(p.hash) != 0 && subtle.ConstantTimeCompare(account.PasswordHash, p.hash) == 1
+}
+
+// verifyCurrentPassword returns proof and status 0 on success, or an HTTP error
+// status. The proof must be checked again in the authorized owner transaction.
+func (a *accountAuth) verifyCurrentPassword(owner, password string) (passwordProof, int) {
+	if password == "" || len(password) > 1024 {
+		return passwordProof{}, http.StatusBadRequest
+	}
+	if !a.allowAttempt() {
+		return passwordProof{}, http.StatusTooManyRequests
+	}
+	select {
+	case a.hashing <- struct{}{}:
+		defer func() { <-a.hashing }()
+	default:
+		return passwordProof{}, http.StatusTooManyRequests
+	}
+	user, ok := a.store.AccountOwner(owner)
+	if !ok {
+		return passwordProof{}, http.StatusForbidden
+	}
+	account, ok := a.store.Account(user.Username)
+	if !ok || account.ID != owner {
+		return passwordProof{}, http.StatusForbidden
+	}
+	hash, err := pbkdf2.Key(sha256.New, password, account.Salt, account.Iterations, 32)
+	defer clear(hash)
+	if err != nil || subtle.ConstantTimeCompare(hash, account.PasswordHash) != 1 {
+		return passwordProof{}, http.StatusForbidden
+	}
+	return passwordProof{owner: owner, username: account.Username, hash: append([]byte(nil), account.PasswordHash...)}, 0
+}
+
 func (a *accountAuth) changePassword(w http.ResponseWriter, r *http.Request) {
 	current, ok := a.session(r)
 	if !ok {
@@ -314,7 +381,17 @@ func (a *accountAuth) changePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "password update failed", 500)
 		return
 	}
-	ids, err := a.store.ChangePassword(current.Username, account.PasswordHash, salt, hash, passwordIterations, current.AccessID)
+	var ids []string
+	err = a.sessionGuard.run(r.Context(), current.Owner, func() error {
+		// Logout or session replacement may have completed while hashing.
+		again, ok := a.session(r)
+		if !ok || again.Owner != current.Owner || again.AccessID != current.AccessID {
+			return errors.New("browser session no longer active")
+		}
+		var err error
+		ids, err = a.store.ChangePassword(current.Username, account.PasswordHash, salt, hash, passwordIterations, current.AccessID)
+		return err
+	})
 	if err != nil {
 		http.Error(w, "password update failed", 409)
 		return
