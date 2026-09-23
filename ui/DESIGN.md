@@ -119,3 +119,22 @@ History groups calls within each page by upstream service; upstream selection sc
 ### Clean URL routing (2026-09-22)
 
 UI routes now use `/dashboard`, `/upstreams`, `/upstreams/{name}`, `/upstreams/{name}/settings`, `/tools`, `/tools/{names}`, `/history`, `/access` and `/settings/{section}`. Same-origin navigation uses History API pushState/popstate; modified clicks retain normal browser behavior. Legacy `/#/...` bookmarks are converted with replaceState. Hosting must serve index.html for UI deep links, as the supplied Nginx configuration already does; `/api/` remains separately proxied.
+
+### Supplied brand assets (2026-09-23)
+
+The user's SVG set is stored unchanged in `static/brand/`, with the primary
+browser icon at `static/favicon.svg`. The user also authorized the ICO fallback
+at `static/favicon.ico`, rendered from that same SVG with 16, 32, 48 and 64px
+frames. No fonts, CDN requests or new runtime dependencies are needed to render
+the branding.
+
+Sign-in, desktop navigation and the mobile header pair the matching monogram and
+wordmark. CSS follows the existing resolved Light/Dark/System preference; each
+dashboard link has one accessible name and its artwork is decorative. The loading
+screen uses the matching square app icon. The README also adapts its monogram
+to the reader's color scheme.
+
+The supplied `logo-horizontal-dark.svg` and `logo-horizontal-light.svg` have
+identical light-background artwork. Both original files are retained; the UI
+uses the separate, correctly colored monogram/wordmark pairs. Monochrome variants
+are also available for future uses.

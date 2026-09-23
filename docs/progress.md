@@ -639,3 +639,34 @@ separate database CLI, while current startup still uses legacy file custody.
 Health, authenticated/unauthenticated APIs, no-store, served asset bytes, worker
 MIME/CSP and preserved volume mounts passed. Previous audit history was retained
 byte-for-byte. Deployment encryption keys and operator credentials were unchanged.
+
+## 2026-09-23 — Supplied branding and favicon integration
+
+Imported all 11 supplied SVGs unchanged. Sign-in, desktop navigation and the
+mobile header now use the matching monogram/wordmark for the resolved Light,
+Dark or System appearance. Loading uses the matching app icon, and README uses
+a color-scheme-aware monogram. Dashboard links retain a single accessible name.
+The supplied horizontal dark logo duplicates the light artwork, so the UI uses
+the correctly colored component pairs; both original horizontal files remain.
+
+Added the SVG favicon and, at the user's request, an ICO fallback rendered from
+the same artwork with 16, 32, 48 and 64px frames. No runtime dependency or external
+asset request was added. Brand files are served by the separate UI container.
+
+Validation passed: `go build ./...`, `go vet ./...`,
+`go test -race -count=1 -timeout=10m ./...` with PostgreSQL enabled, all UI/crypto
+tests, and all 18 original spec/vendor integrity hashes. Chromium, Firefox and
+WebKit verified light/dark sign-in and dashboard layouts at 1440, 390 and 320px,
+manual/System theme changes, dashboard navigation and loading icons. No page
+overflow, JavaScript error or external asset request was observed in these
+synthetic browser fixtures. Desktop/mobile screenshots were inspected. All
+three engines decoded both favicon formats; ICO frame sizes were also checked.
+
+Rebuilt and redeployed both services. A protected, consistent stopped-gateway
+backup is at `/tmp/mcpwarden-predeploy-20260923-brand-1/`, with keys separately at
+`/tmp/mcpwarden-predeploy-keys-20260923-brand-1/`. UI image `b7e14c305b6d` and
+gateway image `aebf3bcc947f` are healthy in new containers with zero restarts.
+Live health, authentication/access/history boundaries, no-store and all 12
+brand/favicon asset bytes and MIME types passed. The prior audit file was
+preserved byte-for-byte with no new records from verification. Deployment keys
+and volume mounts were preserved; application credential custody is unchanged.

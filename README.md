@@ -1,5 +1,10 @@
 # mcpwarden
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="ui/static/brand/monogram-dark.svg">
+  <img src="ui/static/brand/monogram-light.svg" alt="MCPWarden monogram" width="160" height="90">
+</picture>
+
 A self-hosted MCP gateway with a headless Go server and a separate admin panel. Connect one MCP client to mcpwarden; it aggregates tools from stdio and Streamable HTTP upstreams under names like `fs__read_file`.
 
 ## Features

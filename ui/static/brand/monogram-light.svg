@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180" role="img" aria-labelledby="monogram-light-title monogram-light-desc">
+<title id="monogram-light-title">MCPWarden — monogram for light backgrounds</title>
+<desc id="monogram-light-desc">Geometric blue-and-silver M/W identity. No tagline.</desc>
+<defs>
+  <linearGradient id="monogram-light-blue" x1="0" y1="0" x2="153" y2="131" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#4D88CF"/><stop offset="1" stop-color="#326CB2"/>
+  </linearGradient>
+  <linearGradient id="monogram-light-silver" x1="248" y1="20" x2="118" y2="153" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#425970"/><stop offset="1" stop-color="#22364F"/>
+  </linearGradient>
+</defs>
+<g transform="translate(16 14) scale(1)"><path d="M0 0 73 43 153 -1 153 94.48 118 115.4 118 57 73 83 34 60 34 111 0 131Z" fill="url(#monogram-light-blue)"/><path d="M118 115 205 63 255 93 255 39 288 20 288 153 205 103 118 153Z" fill="url(#monogram-light-silver)"/></g>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="app-icon-light-title app-icon-light-desc">
+<title id="app-icon-light-title">MCPWarden — app icon with light tile</title>
+<desc id="app-icon-light-desc">Geometric blue-and-silver M/W identity. No tagline.</desc>
+<defs>
+  <linearGradient id="app-icon-light-blue" x1="0" y1="0" x2="153" y2="131" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#4D88CF"/><stop offset="1" stop-color="#326CB2"/>
+  </linearGradient>
+  <linearGradient id="app-icon-light-silver" x1="248" y1="20" x2="118" y2="153" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#425970"/><stop offset="1" stop-color="#22364F"/>
+  </linearGradient>
+</defs>
+<rect x="1" y="1" width="510" height="510" rx="108" fill="#EDF2F8" stroke="#CBD6E3" stroke-width="2"/><g transform="translate(96 173.444) scale(1.11111)"><path d="M0 0 73 43 153 -1 153 94.48 118 115.4 118 57 73 83 34 60 34 111 0 131Z" fill="url(#app-icon-light-blue)"/><path d="M118 115 205 63 255 93 255 39 288 20 288 153 205 103 118 153Z" fill="url(#app-icon-light-silver)"/></g>
+</svg>
