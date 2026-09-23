@@ -25,22 +25,31 @@ let current = 'startup';
 // The gateway allows 120 owner-route requests per owner per minute. Steps wait
 // for headroom so the flows exercise the console, not the rate limiter.
 const OWNER_ROUTE = /^\/api\/(vault|access-requests|approvals|leases|security)(\/|\?|$)/;
-let watchdog;
+let watchdog, budgetWait = false;
+const began = Date.now();
+const stamp = () => ((Date.now() - began) / 1000).toFixed(1).padStart(6);
 async function step(name) {
-  current = name; console.log(`· ${name}`);
+  current = name; console.log(`· ${stamp()} ${name}`);
   clearTimeout(watchdog);
   // No step needs this long; report where it stalled instead of hanging CI.
-  watchdog = setTimeout(() => {
-    console.error(`owner flow stalled during: ${name}\nlast responses:\n${log.responses.slice(-15).join('\n')}`);
+  watchdog = setTimeout(async () => {
+    console.error(`owner flow stalled during: ${name} (${budgetWait ? 'waiting for owner-route budget' : 'running'}; ${recentOwner()} owner-route requests in the last 61 s)\nlast requests:\n${log.requests.slice(-15).map(r => `${r.at} ${r.page} ${r.method} ${r.path}`).join('\n')}\nlast responses:\n${log.responses.slice(-15).join('\n')}`);
+    if (proxyErrors.length) console.error('proxy errors:', proxyErrors);
+    const dump = await fixture.dumpGoroutines().catch(error => `goroutine dump failed: ${error}`);
+    console.error('gateway log and goroutines:\n' + dump.split('\n').slice(-2000).join('\n'));
     process.exit(1);
   }, 240000);
   watchdog.unref();
-  for (;;) {
-    const recent = log.owner.filter(at => at > Date.now() - 61000).length;
-    if (recent <= 60) return;
-    await sleep(1000);
+  budgetWait = true;
+  // Bounded, so a console that never stops calling owner routes shows up as
+  // 429s and a diagnosis rather than a silent wait.
+  for (const started = Date.now(); Date.now() - started < 90000; await sleep(1000)) {
+    if (recentOwner() <= 60) { budgetWait = false; return; }
   }
+  budgetWait = false;
+  console.error(`owner-route rate stayed high before "${name}": ${recentOwner()} requests in the last 61 s`);
 }
+function recentOwner() { return log.owner.filter(at => at > Date.now() - 61000).length; }
 function counted(owner) { return (...args) => { log.owner.push(Date.now()); return owner(...args); }; }
 
 function watch(page, label) {
@@ -49,9 +58,9 @@ function watch(page, label) {
   page.on('request', r => {
     const url = new URL(r.url());
     if (OWNER_ROUTE.test(url.pathname) && !r.headers().authorization) log.owner.push(Date.now());
-    if (url.pathname.startsWith('/api/')) log.requests.push({page: label, method: r.method(), path: url.pathname + url.search, headers: r.headers(), body: r.postData() || ''});
+    if (url.pathname.startsWith('/api/')) log.requests.push({at: stamp(), page: label, method: r.method(), path: url.pathname + url.search, headers: r.headers(), body: r.postData() || ''});
   });
-  page.on('response', r => { const url = new URL(r.url()); if (url.pathname.startsWith('/api/')) log.responses.push(`${label} ${r.request().method()} ${url.pathname} ${r.status()}`); });
+  page.on('response', r => { const url = new URL(r.url()); if (url.pathname.startsWith('/api/')) log.responses.push(`${stamp()} ${label} ${r.request().method()} ${url.pathname} ${r.status()}`); });
   page.on('pageerror', error => log.errors.push(`${label}: ${error.message}`));
   page.on('console', message => { if (/content.security.policy/i.test(message.text())) log.csp.push(`${label}: ${message.text()}`); });
   page.addInitScript(() => document.addEventListener('securitypolicyviolation', event => {
@@ -588,6 +597,8 @@ try {
   console.error('last responses:\n' + log.responses.slice(-12).join('\n'));
   if (proxyErrors.length) console.error('proxy errors:', proxyErrors);
   console.error('gateway log tail:\n' + fixture.logs().split('\n').slice(-20).join('\n'));
+  // A gateway call that timed out means a handler hung; show where.
+  if (error?.name === 'TimeoutError') console.error('goroutines:\n' + (await fixture.dumpGoroutines()).split('\n').slice(-2000).join('\n'));
 } finally {
   await browser.close();
   await fixture.close();

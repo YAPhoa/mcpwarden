@@ -147,9 +147,18 @@ export async function startFixture() {
   return {
     ui: ui.origin, gateway, upstream: upstream.url, logs: () => logs,
     restart: async () => { await stop(); await start(); },
+    // Diagnostics for a stalled run: the Go runtime prints every goroutine on SIGQUIT.
+    dumpGoroutines: async () => {
+      const gatewayProcess = child;
+      if (!gatewayProcess || gatewayProcess.exitCode !== null) return logs;
+      const exited = new Promise(done => gatewayProcess.once('exit', done));
+      gatewayProcess.kill('SIGQUIT');
+      await Promise.race([exited, sleep(5000)]);
+      return logs;
+    },
     // A named API key acting directly against the gateway, as an agent would.
     key: token => async (method, path, body) => {
-      const response = await fetch(gateway + path, {method, headers: {Authorization: `Bearer ${token}`, ...(body ? {'Content-Type': 'application/json'} : {})}, body: body ? JSON.stringify(body) : undefined});
+      const response = await fetch(gateway + path, {method, headers: {Authorization: `Bearer ${token}`, ...(body ? {'Content-Type': 'application/json'} : {})}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000)});
       const text = await response.text();
       return {status: response.status, data: text ? JSON.parse(text) : null};
     },
@@ -157,10 +166,10 @@ export async function startFixture() {
     owner: cookie => async (method, path, body) => {
       const headers = {Cookie: cookie, Origin: ui.origin, 'X-MCPWarden-Request': 'browser'};
       if (method !== 'GET') {
-        const csrf = await (await fetch(gateway + '/api/security/csrf', {headers})).json();
+        const csrf = await (await fetch(gateway + '/api/security/csrf', {headers, signal: AbortSignal.timeout(30000)})).json();
         headers['X-CSRF-Token'] = csrf.token; headers['Content-Type'] = 'application/json';
       }
-      const response = await fetch(gateway + path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body)});
+      const response = await fetch(gateway + path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30000)});
       const text = await response.text();
       return {status: response.status, data: text ? JSON.parse(text) : null};
     },
