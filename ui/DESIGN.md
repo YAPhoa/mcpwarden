@@ -138,3 +138,55 @@ The supplied `logo-horizontal-dark.svg` and `logo-horizontal-light.svg` have
 identical light-background artwork. Both original files are retained; the UI
 uses the separate, correctly colored monogram/wordmark pairs. Monochrome variants
 are also available for future uses.
+
+### Vault and access windows (2026-09-24)
+
+`/vault`, `/vault/credentials` and `/vault/settings` form the owner console. It is
+a separate module (`static/security/owner-console.mjs`, with DOM-free helpers in
+`owner-core.mjs`) that listens for `mcpwarden:identity` and `mcpwarden:route`
+events from `app.js`. It uses the existing settings cards, access rows, badges,
+dialogs and filter controls; no new colors or fonts were added. Countdowns use
+tabular numerals. Below 700px the status controls, facts and row actions stack.
+
+The page appears only for local accounts with `owner_security` enabled. A
+disabled API, untrusted transport, storage failure or shared operator/OAuth
+workspace gets a plain status line and no controls. A note on every visit says
+windows do not yet limit ordinary tool calls, which still use gateway-managed
+credentials.
+
+| Surface | Source or mutation |
+| --- | --- |
+| Vault and policy state | GET `/api/vault/state`; GET `/api/vault/wrappers` (root wrappers, credential metadata, wrapped keys and current envelopes) |
+| Setup and passphrase change | POST `/api/vault/setup`; PUT `/api/vault/wrappers` with `expected_wrapper_revision` and the account password |
+| Credentials | PUT `/api/vault/credentials/{id}` with the expected epoch and revision, or `null` when new |
+| Requests | GET `/api/access-requests[/{id}]`; POST `/api/approvals/{id}/begin`, `/deny`, `/activate` (Idempotency-Key); owner renewal POST `/api/access-requests` |
+| Windows | GET `/api/leases?include=ended` (active plus the last 24 hours, at most 50 ended); DELETE `/api/leases/{id}` |
+| Locks and policy | POST `/api/vault/lock-execution`; PUT `/api/security/approval-policy` |
+
+Owner requests send the session cookie, `X-MCPWarden-Request` and the CSRF token,
+never an Authorization header. Setup shows the recovery key once as 14 groups of
+Crockford base32 with a checksum. Setup finishes only after the owner types the
+key back and it opens the recovery wrapper; nothing is uploaded before then.
+Unlock offers the passphrase or the recovery key. Credential dialogs are
+password fields for each existing header name of an HTTPS or loopback HTTP
+connector. They are cleared before encryption, and replacing a credential starts
+a new epoch under the same credential ID.
+
+Request cards show the caller label and public key handle, key expiry,
+credential version, endpoint and header names, tools with their descriptions and
+argument constraints, duration and call limits. Labels and descriptions are text
+nodes styled as untrusted. `confirm` mode's button reads "Allow for 15 minutes";
+`none` reads "Start access for 15 minutes". Both release one credential key from
+this browser. A response lost in transit keeps its Idempotency-Key and offers
+"Check status" and "Retry the same activation", never a fresh grant.
+
+Window cards show the exact end time, a countdown from the gateway's `Date`
+header, call counts, and approval details. They can be filtered by state, caller
+and connector. States are Active, Provider unavailable, Ended, Stopped and
+Suspended; requests show Waiting for your review and Approved · not active yet.
+Renew opens a dialog (5, 15, 30 or 60 minutes, default 15) and creates a new
+request and window. "Lock browser" only terminates this browser's vault worker;
+"Stop access" ends one window; "Lock all execution" ends every window after a
+confirmation dialog. Browser lock also happens on sign-out, account change,
+leaving `/vault`, page hide and 10 minutes without input. Each lock discards any
+response still in flight.

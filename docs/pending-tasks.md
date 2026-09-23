@@ -1,9 +1,10 @@
 # Pending work
 
 Current boundary: the running gateway still uses the encrypted file catalog.
-The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter and
-owner security API are implemented and tested. The owner API is opt-in, and tool
-execution does not use client-release custody yet. The original
+The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter,
+owner security API and owner vault console are implemented and tested. The
+owner API and console are opt-in, and tool execution does not use client-release
+custody yet. The original
 acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
 per-case coverage of the 68 acceptance tests is in the
 [acceptance matrix](security/acceptance-matrix.md).
@@ -19,11 +20,16 @@ per-case coverage of the 68 acceptance tests is in the
    revocation and password changes share the owner gate. Approval
    `none` still requires explicit owner CEK release; MCP keys cannot activate.
    Accounts, sessions and keys stay in the file catalog until step 3.
-2. **Vault and lease UI.** Connect setup, recovery-key save/confirmation, unlock,
-   passphrase changes, credential entry and selected CEK release to those APIs.
-   Add request review, exact caller/tool scope, fixed countdowns, revoke/lock and
-   explicit renewal. Clear inputs and terminate the worker on logout/navigation/
-   idle lock; cover error recovery and accessibility.
+2. **Vault and lease UI.** Implemented at `/vault` for the opt-in API; see
+   [UI design](../ui/DESIGN.md#vault-and-access-windows-2026-09-24). It covers
+   setup with a verified recovery key, passphrase or recovery unlock, passphrase
+   changes, browser-encrypted credential entry and replacement for existing
+   header-authenticated HTTP connectors, request review, explicit activation and
+   renewal, fixed countdowns, and the separate browser lock, stop access and
+   lock-all controls. Real-browser flows run against a gateway and PostgreSQL in
+   Chromium, Firefox and WebKit in CI. Remaining gaps: nginx sends no page CSP
+   yet (the flows use a strict one); no screen-reader or 200% zoom review; and
+   the console cannot delete a vault credential.
 3. **Full PostgreSQL catalog and authority coordination.** Preserve account/password
    verifiers, named keys, sessions, stable provider/tool IDs, visibility, discovery
    caches and lifecycle timestamps. Route every security change through the owner
@@ -63,8 +69,8 @@ per-case coverage of the 68 acceptance tests is in the
     in the [acceptance matrix](security/acceptance-matrix.md)), actual owner
     UI/device tests, Argon2/WASM review, mobile KDF measurements, load/failure tests,
     operational audit/storage health signals and a controlled production rollout.
-    The current browser matrix covers cryptographic worker behavior, not complete
-    product flows or a third-party security audit.
+    The browser matrix now covers the worker and the owner console's product
+    flows on desktop engines, not real devices or a third-party security audit.
 
 ## GitHub follow-up
 

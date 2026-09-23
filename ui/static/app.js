@@ -37,7 +37,18 @@ function clearWorkspace() {
   for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   render();
 }
+// The owner console module listens for route and identity changes so it can
+// lock its vault worker and discard late results when the workspace changes.
+function announceWorkspace(kind, detail) {
+  if (typeof CustomEvent === 'function' && typeof document.dispatchEvent === 'function') document.dispatchEvent(new CustomEvent('mcpwarden:' + kind, {detail}));
+}
+window.MCPWardenWorkspace = {
+  current: () => ({epoch: identityEpoch, access, session: session ? {mode: session.mode, subject: session.subject, username: session.username} : null, route: readRoute()}),
+  // Called when an owner route reports that the browser session ended.
+  authLost() { clearWorkspace(); accessStatus('Authentication required', 'Sign in again to continue.', 'failure'); $('account-error').textContent = 'Your session ended. Sign in again.'; },
+};
 function renderIdentity() {
+  announceWorkspace('identity', window.MCPWardenWorkspace.current());
   $('gateway-status').hidden=!access;
   if(access){const enabled=providers.filter(p=>p.enabled!==false), healthy=enabled.filter(p=>p.healthy).length;
     $('gateway-status').textContent=!providers.length?'No connectors added':!enabled.length?'All connectors disabled':healthy===enabled.length?'Connectors available':healthy?'Some connectors unavailable':'No connectors available';
@@ -66,6 +77,7 @@ function readRoute() {
   if (parts[0] === 'settings') return {view:'settings', section:['account','appearance','security'].includes(parts[1])?parts[1]:'account'};
   if (parts[0] === 'history') return {view:'history'};
   if (parts[0] === 'access') return {view:'access'};
+  if (parts[0] === 'vault') return {view:'vault', section:['credentials','settings'].includes(parts[1])?parts[1]:'access'};
   if (parts[0] === 'tools') { let provider = ''; try { provider = decodeURIComponent(parts[1] || ''); } catch (_) {} return {view: 'tools', provider: provider.includes(',') ? '' : provider, providerNames: provider ? provider.split(',') : []}; }
   if (parts[0] === 'upstreams' && parts[1]) { let name = ''; try {name = decodeURIComponent(parts[1]);} catch (_) {} return {view: 'detail', name, section:parts[2]==='settings'?'settings':'tools'}; }
   return {view: parts[0] === 'upstreams' ? 'upstreams' : 'dashboard'};
@@ -80,12 +92,13 @@ function applyRoute(focus = false) {
   if(route.view === 'settings') renderAccountSettings();
   $('calls-page').hidden = route.view !== 'history';
   $('access-page').hidden = route.view !== 'access';
+  $('vault-page').hidden = route.view !== 'vault';
   $('dashboard').hidden = route.view !== 'dashboard';
   $('connections').hidden = route.view !== 'upstreams';
   $('connection-view').hidden = route.view !== 'detail';
   $('directory').hidden = route.view !== 'tools';
   if (route.view === 'detail') selected = route.name;
-  const title = route.view === 'settings' ? 'Account settings' : route.view === 'history' ? 'History' : route.view === 'access' ? 'Access' : route.view === 'tools' ? 'Tool directory' : route.view === 'detail' ? selected : route.view === 'dashboard' ? 'Dashboard' : 'Upstreams';
+  const title = route.view === 'settings' ? 'Account settings' : route.view === 'history' ? 'History' : route.view === 'access' ? 'Access' : route.view === 'vault' ? 'Vault & windows' : route.view === 'tools' ? 'Tool directory' : route.view === 'detail' ? selected : route.view === 'dashboard' ? 'Dashboard' : 'Upstreams';
   $('breadcrumb-upstreams').hidden = route.view !== 'detail';
   $('breadcrumb-separator').hidden = route.view !== 'detail';
   $('breadcrumb-page').textContent = title;
@@ -111,7 +124,8 @@ function applyRoute(focus = false) {
   renderDashboard(); renderDetails(); renderTools(); renderAccess();
   if(route.view==='history' && access && !callsLoaded && !callsLoading) loadCalls();
   if (route.view === 'access' && access && !accessData && !accessLoading) loadAccess();
-  if (focus) $(route.view === 'settings' ? 'settings-title' : route.view === 'history' ? 'calls-title' : route.view === 'access' ? 'access-title' : route.view === 'tools' ? 'directory-title' : route.view === 'detail' ? 'connection-title' : route.view === 'dashboard' ? 'dashboard-title' : 'page-title').focus();
+  announceWorkspace('route', route);
+  if (focus) $(route.view === 'settings' ? 'settings-title' : route.view === 'history' ? 'calls-title' : route.view === 'access' ? 'access-title' : route.view === 'vault' ? 'vault-title' : route.view === 'tools' ? 'directory-title' : route.view === 'detail' ? 'connection-title' : route.view === 'dashboard' ? 'dashboard-title' : 'page-title').focus();
 }
 let previousRoute = routePath(), workspaceReturn = '/dashboard', workspaceFocus = null, workspaceScroll = 0;
 function routeChanged() {
@@ -144,7 +158,7 @@ document.addEventListener('click',event=>{
  const link=event.target.closest('a[href]');
  if(!link||link.hasAttribute('download')||(link.target&&link.target!=='_self'))return;
  const url=new URL(link.href,location.href);
- if(url.origin!==location.origin||url.hash||!/^\/(dashboard|upstreams|tools|history|access|settings)(\/|$)/.test(url.pathname))return;
+ if(url.origin!==location.origin||url.hash||!/^\/(dashboard|upstreams|tools|history|access|vault|settings)(\/|$)/.test(url.pathname))return;
  event.preventDefault();navigate(url.pathname+url.search);
 });
 function openDialog(id) {

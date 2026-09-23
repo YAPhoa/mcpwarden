@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-09-24 — Vault and access-window console (roadmap step 2)
+
+Added the owner console at `/vault`, `/vault/credentials` and `/vault/settings`
+for gateways with the opt-in owner API. It covers vault setup with a separate
+passphrase and a recovery key that must be typed back and proven before upload,
+plus passphrase or recovery unlock and passphrase changes. Owners can enter and
+replace browser-encrypted header credentials for existing HTTP connectors.
+Requests are reviewed with the exact caller, handle, credential, destination,
+tools, constraints, duration and limits. Owners start access explicitly in both
+`confirm` and `none` modes and can renew. Windows show fixed countdowns, exact
+end times, call counts and filters. "Lock browser", "Stop access" and "Lock all
+execution" stay separate. Live providers, their legacy headers and tool execution
+are unchanged. No deployment or live configuration change was made in this
+slice, and `owner_security` stays off in production.
+
+Two additive reads support it: wrapper listings now return each live credential's
+current envelope, and `GET /api/leases?include=ended` returns windows ended in the
+last 24 hours. `TestOwnerLeaseHistoryAndWrapperEnvelopes` covers both, including
+key and owner isolation and restart. `TestDestinationDigestVectorsSharedWithUI`
+pins the browser's destination digest to the gateway's.
+
+`ui/tests/owner-flows.mjs` runs 25 steps in a real browser against a built
+gateway, a scratch PostgreSQL database, a synthetic MCP upstream and a static UI
+proxy. It covers:
+
+- setup errors and recovery confirmation, including a wrong account password
+- credential encryption, a replacement conflict from a second tab, and a
+  passphrase change
+- untrusted labels and tool descriptions rendered as text
+- explicit activation headers and body, `none` mode and renewal
+- uncertain activation handled by checking status or retrying with the same key
+- locking while an activation is in flight
+- a 20-second window expiring, a gateway restart, and an expired session
+- idle, navigation and sign-out locks that keep windows running
+- another account's isolation and the disabled, untrusted and unavailable states
+- responsive widths, focus return and CSP violations
+- a scan of every request body, gateway log and browser storage for vault
+  material
+
+Running the flows found and fixed four bugs: a load that a lock discarded could
+leave the page unable to refresh, stale lists stayed rendered after sign-out,
+focus was lost after lock-all and dialog closes, and sub-minute durations were
+labelled "0 minutes".
+
+Local validation: `gofmt`, `go build ./...`, `go vet ./...` and
+`go test -race -count=1 ./...` passed with the isolated PostgreSQL fixture
+(PostgreSQL 16 locally; CI uses 18.6). `npm --prefix ui test` passed 54 tests, and
+`python3 scripts/ci/integrity.py` verified all 18 files. The worker check and all
+25 owner-flow steps passed in Chromium 141. Firefox and WebKit could not be
+downloaded in this environment, so those two engines run only in CI, which now
+starts PostgreSQL and Go in each browser job and runs the flows.
+
+Remaining gaps: nginx sends no CSP for the main page; no screen-reader, 200% zoom
+or real-device review was done; the console has no credential deletion; and
+windows still do not govern ordinary tool calls until guarded startup (step 4).
+
 ## 2026-09-24 — PR #3 merge and deployment
 
 Merged [PR #3](https://github.com/YAPhoa/mcpwarden/pull/3) at `c0203dc`, with

@@ -43,13 +43,13 @@ loopback Origin. The default Compose deployment leaves `owner_security` unset.
 | `/api/security/events` | GET `?limit=1..200` | Owner browser |
 | `/api/vault/state` | GET | Owner browser |
 | `/api/vault/setup` | POST | Owner browser; current password; once per owner |
-| `/api/vault/wrappers` | GET, PUT | Owner browser; PUT needs the current password and `expected_wrapper_revision` |
+| `/api/vault/wrappers` | GET, PUT | Owner browser. GET includes each live credential's current `envelope` so the browser can authenticate it before releasing a key. PUT needs the current password and `expected_wrapper_revision` |
 | `/api/vault/lock-execution` | POST | Owner browser |
 | `/api/vault/credentials` | GET | Owner browser or API key (selectable tools only) |
 | `/api/vault/credentials/{id}` | PUT, DELETE | Owner browser; epoch/revision CAS |
 | `/api/access-requests`, `/{id}` | GET, POST | API key (its own requests) or owner browser (all) |
 | `/api/approvals/{id}/begin`, `/deny`, `/activate` | POST | Owner browser only |
-| `/api/leases`, `/{id}` | GET, DELETE | API key (its own windows) or owner browser |
+| `/api/leases`, `/{id}` | GET `[?include=ended]`, DELETE | API key (its own windows) or owner browser. `include=ended` adds windows that ended in the last 24 hours (at most 50, newest first, with `ended_at`) |
 
 Owner-only fields on a request (`gateway_boot_id`, `scope_digest`,
 `request_digest`, `challenge`) are never returned to the requesting key.
