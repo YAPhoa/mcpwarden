@@ -1,5 +1,31 @@
 # Progress
 
+## 2026-09-24 — PR #3 merge and deployment
+
+Merged [PR #3](https://github.com/YAPhoa/mcpwarden/pull/3) at `c0203dc`, with
+the same source tree as reviewed head `6dd7884`. The
+[PR CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35885414590) and
+[post-merge CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35887537633)
+passed all mandatory Go/PostgreSQL, Chromium/Firefox/WebKit, container and
+security jobs. CodeQL remained skipped for the private repository. Local
+build/vet/race and integrity results are recorded below.
+
+Rebuilt and redeployed the separate gateway and UI after a consistent
+stopped-gateway backup at `/tmp/mcpwarden-predeploy-20260924-owner-api-1/`;
+keys are separate at `/tmp/mcpwarden-predeploy-keys-20260924-owner-api-1/`.
+Backup directories are mode 0700 and files mode 0600; recorded file hashes were
+rechecked after deployment. Gateway image `2a9cd8050e77` and UI image
+`b7e14c305b6d` are healthy in new containers with zero restarts. Health,
+authentication/access/history boundaries, history filters, no-store, served UI
+source bytes and all 12 branding/favicon assets passed verification.
+
+The encrypted account/provider catalog and prior audit history are unchanged
+byte-for-byte, with no added audit records. Deployment keys and volume mounts
+were preserved. The live configuration still leaves `owner_security` unset:
+the new routes return 404 on both ports, and tool execution continues under
+legacy server-managed custody. The next implementation slice is the vault and
+lease UI; PostgreSQL catalog migration and guarded startup remain pending.
+
 ## 2026-09-23 — Owner security API review fixes
 
 Fixed the two blockers found while reviewing PR #3. Every owner-security route
@@ -23,7 +49,7 @@ trusted proxies, direct loopback restrictions, revoked sessions during uploads
 for all six mutation paths, session replacement, password changes, expiry while
 waiting for the database lock, rollback on expiry during writes, and revocation
 ordering through commit/publication. All 18 original spec/vendor integrity
-checks passed. Hosted CI and deployment are recorded separately when complete.
+checks passed. Hosted CI and deployment are recorded in the entry above.
 
 ## 2026-09-23 — Owner security API (roadmap step 1)
 
