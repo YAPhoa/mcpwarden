@@ -3,7 +3,9 @@
 Current boundary: the running gateway still uses the encrypted file catalog.
 The lease engine, browser crypto primitives and PostgreSQL ciphertext adapter are
 implemented and tested, but client-release custody is not enabled. The original
-acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md).
+acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
+per-case coverage of the 68 acceptance tests is in the
+[acceptance matrix](security/acceptance-matrix.md).
 
 ## Next implementation sequence
 
@@ -27,6 +29,9 @@ acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CH
    disable legacy credential resolution/reconnect for converted providers. Restart
    with a new boot and no active material. Preserve fail-closed behavior on storage,
    ownership and clock uncertainty; never fall through to legacy execution.
+   The initial cutover covers only existing HTTP providers that use header
+   credentials. Setting up new providers under this custody requires step 5, and
+   OAuth providers require step 6.
 5. **Initial setup/discovery authorization.** Implement a bounded owner-only
    discovery capability for new providers before their tool catalog exists.
    Revalidate destination/header/network policy and actual discovered definitions.
@@ -49,7 +54,8 @@ acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CH
    verifiers, scopes, hashes, lifecycle and historical audit before cutover.
    Exercise full application backup/restore, restart-locked recovery, token/access
    reconciliation and rollback without losing audit or reviving old authority.
-10. **Release qualification.** Run complete spec acceptance families, actual owner
+10. **Release qualification.** Run complete spec acceptance families (track them
+    in the [acceptance matrix](security/acceptance-matrix.md)), actual owner
     UI/device tests, Argon2/WASM review, mobile KDF measurements, load/failure tests,
     operational audit/storage health signals and a controlled production rollout.
     The current browser matrix covers cryptographic worker behavior, not complete

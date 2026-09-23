@@ -697,3 +697,9 @@ Validation passed: `go build ./...`, `go vet ./...` and
 run against the compose fixture in this environment. Existing stdio upstreams
 that relied on other inherited variables need them added to their `env` map
 before redeploying.
+
+Hosted CI passed on the branch head `800edeb` through a manual `workflow_dispatch`
+run ([CI run 6](https://github.com/YAPhoa/mcpwarden/actions/runs/35843446238)),
+including the Go race tests against the PostgreSQL service. The workflow does not
+run on pushes to branches other than `main`, so feature branches need a pull
+request or a manual dispatch.
