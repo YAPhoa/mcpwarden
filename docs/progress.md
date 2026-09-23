@@ -52,6 +52,15 @@ Local validation: `gofmt`, `go build ./...`, `go vet ./...` and
 downloaded in this environment, so those two engines run only in CI, which now
 starts PostgreSQL and Go in each browser job and runs the flows.
 
+[PR CI run 35903731538](https://github.com/YAPhoa/mcpwarden/actions/runs/35903731538)
+passed the flows in Chromium, Firefox and WebKit. An earlier WebKit run lost
+keyboard focus when a background reload redrew a list; the console now restores
+focus to the matching control. One earlier Chromium run stalled without an error
+at the uncertain-activation step and did not recur in four local runs or the next
+CI run. The flow script now bounds its request-budget wait, times out gateway
+calls after 30 seconds, and prints timestamped requests and a gateway goroutine
+dump if a step stalls, so a recurrence will show its cause.
+
 Remaining gaps: nginx sends no CSP for the main page; no screen-reader, 200% zoom
 or real-device review was done; the console has no credential deletion; and
 windows still do not govern ordinary tool calls until guarded startup (step 4).
