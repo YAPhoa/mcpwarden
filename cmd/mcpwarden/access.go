@@ -73,6 +73,7 @@ type accessManager struct {
 	store    catalog.Repository
 	mu       sync.Mutex
 	sessions map[*mcp.ServerSession]activeMCP
+	guard    accessGuard
 }
 
 func newAccessManager(s catalog.Repository) *accessManager {
@@ -258,13 +259,23 @@ func (a *accessManager) handler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if _, ok := a.store.AccessByID(owner, id); !ok {
+	existing, ok := a.store.AccessByID(owner, id)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	switch r.Method {
 	case http.MethodDelete:
-		if err := a.store.RevokeAccess(owner, id); err != nil {
+		revoke := func() error { return a.store.RevokeAccess(owner, id) }
+		var err error
+		if existing.Kind == "api_key" {
+			err = a.guard.run(r.Context(), owner, revoke)
+		} else {
+			// Browser sessions do not own access windows; ending one never
+			// stops approved agent work (browser lock is not execution lock).
+			err = revoke()
+		}
+		if err != nil {
 			http.Error(w, "could not revoke access", 500)
 			return
 		}

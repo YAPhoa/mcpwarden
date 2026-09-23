@@ -36,3 +36,10 @@ audit:
 # Optional local panel accounts (requires managed_upstreams, incompatible with oauth):
 # accounts:
 #   allow_registration: true
+
+# Optional owner security API (requires accounts). Adds vault, access-request,
+# approval and lease routes backed by PostgreSQL schema v3 (migrate first with
+# cmd/mcpwarden-security-db). Tool execution and credential custody are unchanged;
+# the guarded execution path is not installed by this setting.
+# owner_security:
+#   database_url_env: MCPWARDEN_SECURITY_DATABASE_URL

@@ -184,7 +184,7 @@ func (x *ownerTx) PutLease(l lease.Lease) error {
 	return nil
 }
 func (x *ownerTx) Event(e lease.Event) error {
-	if e.OwnerID != x.owner || !identity.Valid(e.ID) || !identity.Valid(e.BootID) || e.At.IsZero() || e.ActorID != "" && !identity.Valid(e.ActorID) || e.Source != "" && e.Source != "client_activation" && e.Source != "owner_confirmation" {
+	if e.OwnerID != x.owner || !identity.Valid(e.ID) || !identity.Valid(e.BootID) || e.At.IsZero() || e.ActorID != "" && !identity.Valid(e.ActorID) || e.Source != "" && e.Source != "client_activation" && e.Source != "owner_confirmation" || !validEventDetail(e) {
 		return lease.ErrDenied
 	}
 	raw, err := json.Marshal(e)
@@ -197,6 +197,22 @@ func (x *ownerTx) Event(e lease.Event) error {
 	}
 	return nil
 }
+
+var eventReasons = map[string]bool{"": true, "key": true, "stale": true, "denied": true, "not_found": true, "locked": true, "api_key": true}
+
+func optionalVersion(v string) bool {
+	if v == "" {
+		return true
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	return err == nil && n > 0 && strconv.FormatInt(n, 10) == v
+}
+
+func validEventDetail(e lease.Event) bool {
+	return (e.CredentialID == "" || identity.Valid(e.CredentialID)) && optionalVersion(e.Epoch) && optionalVersion(e.Revision) &&
+		(e.Mode == "" || e.Mode == "none" || e.Mode == "confirm") && eventReasons[e.Reason]
+}
+
 func (x *ownerTx) Admission(r audit.Record) error {
 	if r.EventType != audit.DispatchAdmitted || r.Owner != x.owner || r.LeaseID == "" || audit.ValidateInvocation(r) != nil {
 		return lease.ErrDenied

@@ -117,6 +117,16 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	} else if cfg.Accounts != nil {
 		accounts := newAccountAuth(store, cfg)
 		accounts.onRevoke = rs.access.closeCredential
+		if cfg.OwnerSecurity != nil {
+			security, err := openSecurity(ctx, cfg, store, pol, accounts, logger)
+			if err != nil {
+				return err
+			}
+			defer security.close()
+			security.register(mux)
+			accounts.guard = security.guardAccess
+			rs.access.guard = security.guardAccess
+		}
 		mcpHandler = accounts.protect(mcpHandler, false)
 		clientProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true, true) }
 		apiProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true) }

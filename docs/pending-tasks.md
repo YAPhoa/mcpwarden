@@ -1,19 +1,22 @@
 # Pending work
 
 Current boundary: the running gateway still uses the encrypted file catalog.
-The lease engine, browser crypto primitives and PostgreSQL ciphertext adapter are
-implemented and tested, but client-release custody is not enabled. The original
+The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter and
+owner security API are implemented and tested. The owner API is opt-in, and tool
+execution does not use client-release custody yet. The original
 acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
 per-case coverage of the 68 acceptance tests is in the
 [acceptance matrix](security/acceptance-matrix.md).
 
 ## Next implementation sequence
 
-1. **Owner security API.** Add owner-scoped vault/credential persistence and
-   request, confirmation, activation, revocation and execution-lock endpoints.
-   Enforce interactive browser authentication, CSRF/Origin checks, bounded inputs,
-   rate limits and mutation audit. Approval `none` still requires explicit owner
-   CEK release; an ordinary admin/client MCP key must never activate itself.
+1. **Owner security API.** Implemented behind the opt-in `owner_security`
+   setting; see [owner API](security/owner-api.md). Owner-scoped vault/credential
+   persistence and request, confirmation, activation, revocation and
+   execution-lock endpoints enforce interactive browser authentication,
+   CSRF/Origin checks, bounded inputs, rate limits and mutation audit. Approval
+   `none` still requires explicit owner CEK release; MCP keys cannot activate.
+   Accounts, sessions and keys stay in the file catalog until step 3.
 2. **Vault and lease UI.** Connect setup, recovery-key save/confirmation, unlock,
    passphrase changes, credential entry and selected CEK release to those APIs.
    Add request review, exact caller/tool scope, fixed countdowns, revoke/lock and

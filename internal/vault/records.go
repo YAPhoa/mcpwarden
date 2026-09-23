@@ -45,6 +45,7 @@ type Tx interface {
 	VaultRoot() (Root, error)
 	PutVaultRoot(Root, string) error // empty expected revision creates once
 	CredentialRecord(string) (Record, error)
+	CredentialRecords() ([]Record, error)       // current heads, including tombstones
 	PutCredentialRecord(Record, *Pointer) error // nil expected creates once
 	DeleteCredentialRecord(string, Pointer) error
 }

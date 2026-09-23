@@ -775,6 +775,9 @@ func (s *Service) LockExecution(ctx context.Context) error {
 		if err := s.endAll(tx, a.Owner, "revoked", actor.AccessID); err != nil {
 			return err
 		}
+		if err := s.event(tx, a.Owner, "execution.locked", actor.AccessID, "", "", ""); err != nil {
+			return err
+		}
 		o.publish = append(o.publish, func() error {
 			for id, rt := range o.live {
 				endRuntime(rt)

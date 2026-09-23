@@ -248,3 +248,29 @@ connections. The child now receives only a fixed set of basic process variables
 wins over inherited values. Proxy settings and runtime-specific variables such as
 `NODE_OPTIONS` are not inherited; operators pass them with `${VAR}` placeholders.
 Process isolation beyond the environment remains in the pending hardening work.
+
+## 2026-09-23 — Owner security API storage and request protection
+
+Keep accounts, browser sessions and API keys in the file catalog for step 1; the
+owner API is opt-in (`owner_security`, accounts mode only) and adds only
+per-owner approval policies and new audit event types to PostgreSQL (schema v3).
+Moving identity and catalog records is step 3. API-key revocation calls the lease
+coordinator first so it ends the key's windows, and falls back to a direct catalog
+revocation when storage is lost or execution is locked, so a database outage
+never blocks revoking a key. Browser sign-out does not end windows.
+
+Owner routes accept only an active browser session and refuse any request that
+carries an `Authorization` header, so no MCP key can confirm or activate even in
+mode `none`. CSRF tokens are an HMAC of the session secret under a per-process
+key (no server-side token store; a restart invalidates them), combined with an
+exact Origin allowlist, HTTPS outside loopback development, same-origin fetch
+metadata and JSON-only bodies. Policy, vault setup and wrapper changes re-verify
+the account password under the existing sign-in budget. Rate limits are
+in-memory fixed windows, which is adequate for one executor process.
+
+The default approval mode for owners without a stored policy is `confirm`.
+Tool-policy and connector-security revisions are fixed at `1` until the
+PostgreSQL catalog tracks them; admission and activation still recheck live
+visibility, policy and definition digests. See
+[owner API](security/owner-api.md).
+

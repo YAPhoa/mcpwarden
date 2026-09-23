@@ -41,6 +41,22 @@ type accountAuth struct {
 	attempts int
 	hashing  chan struct{}
 	onRevoke func(string)
+	// guard routes API-key revocation through the owner lease coordinator.
+	guard accessGuard
+}
+
+// accessGuard runs a mutation that can revoke an API key. With owner security
+// enabled it first ends that owner's access windows; otherwise it just runs.
+type accessGuard func(ctx context.Context, owner string, mutation func() error) error
+
+func (g accessGuard) run(ctx context.Context, owner string, mutation func() error) error {
+	if g == nil {
+		return mutation()
+	}
+	return g(ctx, owner, mutation)
+}
+func (a *accountAuth) change(ctx context.Context, owner string, mutation func() error) error {
+	return a.guard.run(ctx, owner, mutation)
 }
 
 func newAccountAuth(store catalog.Repository, cfg config.Config) *accountAuth {
@@ -194,7 +210,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		token := "mw_" + randomToken()
-		if err := a.store.SetClientToken(identity.Username, tokenHash(token)); err != nil {
+		if err := a.change(r.Context(), identity.Owner, func() error { return a.store.SetClientToken(identity.Username, tokenHash(token)) }); err != nil {
 			http.Error(w, "token could not be saved", 500)
 			return
 		}
@@ -209,15 +225,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "registration is closed", 403)
 		return
 	}
-	a.mu.Lock()
-	if time.Since(a.window) >= time.Minute {
-		a.window = time.Now()
-		a.attempts = 0
-	}
-	a.attempts++
-	allowed := a.attempts <= 30
-	a.mu.Unlock()
-	if !allowed {
+	if !a.allowAttempt() {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many attempts", 429)
 		return
@@ -276,6 +284,49 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startSession(w, r, user)
+}
+
+// allowAttempt is the shared password-attempt window for login, registration,
+// password changes and fresh verification before owner security changes.
+func (a *accountAuth) allowAttempt() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if time.Since(a.window) >= time.Minute {
+		a.window = time.Now()
+		a.attempts = 0
+	}
+	a.attempts++
+	return a.attempts <= 30
+}
+
+// verifyCurrentPassword gives a security change fresh proof of the account
+// password. It returns 0 on success or the HTTP status to report.
+func (a *accountAuth) verifyCurrentPassword(owner, password string) int {
+	if password == "" || len(password) > 1024 {
+		return http.StatusBadRequest
+	}
+	if !a.allowAttempt() {
+		return http.StatusTooManyRequests
+	}
+	select {
+	case a.hashing <- struct{}{}:
+		defer func() { <-a.hashing }()
+	default:
+		return http.StatusTooManyRequests
+	}
+	user, ok := a.store.AccountOwner(owner)
+	if !ok {
+		return http.StatusForbidden
+	}
+	account, ok := a.store.Account(user.Username)
+	if !ok || account.ID != owner {
+		return http.StatusForbidden
+	}
+	hash, err := pbkdf2.Key(sha256.New, password, account.Salt, account.Iterations, 32)
+	if err != nil || subtle.ConstantTimeCompare(hash, account.PasswordHash) != 1 {
+		return http.StatusForbidden
+	}
+	return 0
 }
 
 func (a *accountAuth) changePassword(w http.ResponseWriter, r *http.Request) {

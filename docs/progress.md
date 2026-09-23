@@ -1,5 +1,21 @@
 # Progress
 
+## 2026-09-23 — Owner security API (roadmap step 1)
+
+Added owner-scoped vault, credential, access-request, confirmation, activation,
+revocation, execution-lock, approval-policy and audit-event routes, registered
+only when `owner_security` is configured in accounts mode. PostgreSQL schema v3
+adds approval policies and owner-route event types. API-key revocation now goes
+through the lease coordinator. No deployment, live configuration or data change
+was made; the feature is off unless configured. See
+`docs/security/owner-api.md`; the acceptance matrix now lists 11 cases as Opt-in.
+
+Validation: `go build ./...`, `go vet ./...`, gofmt and
+`go test -race ./...` passed with `MCPWARDEN_TEST_DATABASE_URL` set to the local
+PostgreSQL fixture, including the seven new route tests
+(`cmd/mcpwarden/security_test.go`) and the existing lease/vault PostgreSQL tests
+on schema v3. The owner route tests also passed four consecutive race runs.
+
 ## 2026-09-22 — Redeploy security caller/audit foundation
 
 Rebuilt and restarted the separate Compose gateway and UI services at the user's

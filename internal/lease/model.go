@@ -103,6 +103,13 @@ type Event struct {
 	RequestID string    `json:"request_id,omitempty"`
 	LeaseID   string    `json:"lease_id,omitempty"`
 	Source    string    `json:"source,omitempty"`
+	// Owner-route events identify the changed record by public version metadata
+	// and an allowlisted reason code, never by payload, key or provider error.
+	CredentialID string `json:"credential_id,omitempty"`
+	Epoch        string `json:"epoch,omitempty"`
+	Revision     string `json:"revision,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 // Store implementations must commit all Tx writes together, then return success.
