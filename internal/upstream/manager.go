@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -183,10 +184,7 @@ func (m *Manager) connect(ctx context.Context, c *connection) (*mcp.ClientSessio
 	var transport mcp.Transport
 	if c.cfg.Transport == "stdio" {
 		cmd := exec.Command(c.cfg.Command, c.cfg.Args...)
-		cmd.Env = os.Environ()
-		for k, v := range c.cfg.Env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
+		cmd.Env = stdioEnv(c.cfg.Env)
 		cmd.Stderr = os.Stderr
 		transport = &mcp.CommandTransport{Command: cmd, TerminateDuration: 5 * time.Second}
 	} else {
@@ -390,4 +388,37 @@ func (m *Manager) SetEnabled(name string, enabled bool) error {
 		_ = session.Close()
 	}
 	return nil
+}
+
+// stdioInherited lists the only gateway environment variables a stdio upstream
+// inherits, plus LC_* locale settings. The gateway environment holds the catalog
+// key, operator token and OAuth client secret, so anything else a command needs
+// must be passed explicitly through the upstream's env map.
+var stdioInherited = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "TERM", "TMPDIR",
+	// Windows process basics.
+	"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+}
+
+func stdioEnv(explicit map[string]string) []string {
+	env := make([]string, 0, len(stdioInherited)+len(explicit))
+	for _, k := range stdioInherited {
+		if _, set := explicit[k]; set {
+			continue
+		}
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "LC_") {
+			if _, set := explicit[k]; !set {
+				env = append(env, kv)
+			}
+		}
+	}
+	for k, v := range explicit {
+		env = append(env, k+"="+v)
+	}
+	return env
 }
