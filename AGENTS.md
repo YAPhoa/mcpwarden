@@ -26,3 +26,4 @@ The next slice adds browser vault worker primitives with pinned hash-wasm Argon2
 - Read the package and its tests before editing. Keep changes focused and use `gofmt`.
 - Before a milestone is done, run `go build ./...`, `go vet ./...`, and `go test -race ./...`; record the result in `docs/progress.md`.
 - Record decisions involving SDK or MCP behavior in `docs/decisions.md`.
+- Do not add AI attribution anywhere: no `Co-Authored-By` or `Claude-Session` commit trailers, no "Generated with Claude Code" lines or claude.ai session links in commits, pull request descriptions, documentation or code comments. The commit author name "Claude" is fine.
