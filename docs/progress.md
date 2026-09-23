@@ -686,8 +686,9 @@ synchronization and documentation, with no shipped runtime change.
 
 ## 2026-09-23 — Stdio upstream environment allowlist
 
-Stdio upstream commands no longer inherit the gateway environment, so they cannot
-read `MCPWARDEN_CREDENTIAL_KEY` or the other deployment secrets. See
+Stdio upstream commands no longer inherit unlisted gateway environment variables,
+including `MCPWARDEN_CREDENTIAL_KEY` and the other deployment secrets. This filters
+the child environment; process and host isolation remain open. See
 [decisions](decisions.md) for the inherited variable list. A new stdio test checks
 that an unlisted variable is absent while `PATH`, `LC_*` and explicit overrides
 arrive exactly once; it fails against the previous behavior.
@@ -703,3 +704,34 @@ run ([CI run 6](https://github.com/YAPhoa/mcpwarden/actions/runs/35843446238)),
 including the Go race tests against the PostgreSQL service. The workflow does not
 run on pushes to branches other than `main`, so feature branches need a pull
 request or a manual dispatch.
+
+## 2026-09-23 — PR #2 merge and deployment
+
+Reviewed and merged [PR #2](https://github.com/YAPhoa/mcpwarden/pull/2) at
+`a47ee62`, with the same source tree as the validated PR head `b719c08`.
+The [acceptance matrix](security/acceptance-matrix.md) includes each of the 68
+spec cases exactly once, and all 59 referenced Go test/fuzz functions exist.
+Its library coverage does not imply live client-release enforcement.
+
+The PR's [hosted CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35845920909)
+and the merged commit's [CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35868460589)
+passed all mandatory jobs. CodeQL remained skipped for the private repository.
+Before deployment, `go build ./...`, `go vet ./...`
+and `go test -race -count=1 -timeout=10m ./...` passed locally with the isolated
+PostgreSQL fixture enabled. Original spec and vendored crypto integrity checks
+also passed. The live configuration has no stdio upstreams, so no additional
+explicit environment entries were needed.
+
+Built and redeployed the gateway and UI after a consistent stopped-gateway
+backup at `/tmp/mcpwarden-predeploy-20260923-stdio-1/`; keys are stored separately
+at `/tmp/mcpwarden-predeploy-keys-20260923-stdio-1/`. Backup directories are mode
+0700 and files are mode 0600. Gateway image `2261fe7ed98b` and UI image
+`b7e14c305b6d` run in new containers with zero restarts. Live health,
+authentication/access/history boundaries, history filters, no-store, UI source
+bytes and all 12 brand/favicon assets passed verification. Deployment keys and
+volume mounts were preserved. The encrypted account/provider catalog and prior
+audit bytes are unchanged, with no new audit records from the checks.
+
+The deployed gateway still uses legacy server-managed credential custody.
+Environment filtering is now deployed; process/host isolation and the owner
+API/UI, catalog migration and guarded startup wiring remain pending.
