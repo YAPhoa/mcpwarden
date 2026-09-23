@@ -1,0 +1,20 @@
+listen: 0.0.0.0:8787
+downstream_auth:
+  bearer_token_env: MCPWARDEN_TOKEN
+
+# Add stdio or HTTP upstreams here. The gateway stays up with an empty list.
+upstreams: []
+
+managed_upstreams:
+  path: /data/managed-upstreams.enc
+  key_env: MCPWARDEN_CREDENTIAL_KEY
+
+policy:
+  default: allow
+
+audit:
+  path: /data/audit.jsonl
+
+# Basic panel accounts. Close registration after creating the intended users.
+accounts:
+  allow_registration: true

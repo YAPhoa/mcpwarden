@@ -1,0 +1,17 @@
+.git
+.env
+config.yaml
+audit.jsonl
+mcpwarden
+*.test
+managed-upstreams.enc
+*.enc
+*.jsonl
+.env.*
+data
+backups
+artifacts
+coverage.out
+**/node_modules
+**/playwright-report
+**/test-results

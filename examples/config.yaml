@@ -1,0 +1,38 @@
+listen: 127.0.0.1:8787
+# Required when listen is not loopback. The variable must be set at startup.
+# downstream_auth:
+#   bearer_token_env: MCPWARDEN_TOKEN
+# allowed_origins: ["https://console.example.com"]
+# For ChatGPT OAuth, see examples/oauth-config.yaml. OAuth protects /mcp;
+# downstream_auth still protects the admin API.
+
+upstreams:
+  - name: fs
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/sandbox"]
+    env:
+      SOME_VAR: ${SOME_VAR}
+    call_timeout: 30s
+
+  - name: remote
+    transport: http
+    url: https://example.com/mcp
+    headers:
+      Authorization: "Bearer ${REMOTE_TOKEN}"
+    call_timeout: 60s
+
+policy:
+  default: allow
+  rules:
+    - match: "fs__write_*"
+      action: deny
+    - match: "remote__*"
+      action: allow
+
+audit:
+  path: ./audit.jsonl # Persistent file required: admission is synced before dispatch.
+
+# Optional local panel accounts (requires managed_upstreams, incompatible with oauth):
+# accounts:
+#   allow_registration: true

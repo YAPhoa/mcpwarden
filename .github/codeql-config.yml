@@ -1,0 +1,5 @@
+name: Application security analysis
+paths-ignore:
+  - docs/security/spec-v1.1
+  - ui/static/vendor
+  - ui/tests

@@ -1,0 +1,28 @@
+# mcpwarden agent notes
+
+This repository contains a headless Go MCP gateway and a separate admin UI in `ui/`. Compose runs them as separate services. The UI reads status and tool metadata from the gateway HTTP API. Keep the two components separate.
+
+## Scope
+
+V1 proxies MCP tools from stdio and Streamable HTTP upstreams. It supports namespacing, dynamic tool refresh, allow/deny policy, static operator bearer auth in local mode, optional OAuth resource-server auth for ChatGPT MCP connections, an approval interface with a `None` implementation, and JSONL audit. Users can register their own remote MCP endpoints and headers through the UI. These registrations and last successful tool discovery are stored in an encrypted file. When OAuth mode is enabled, the validated token subject selects each user's upstreams and the admin API requires a separate management scope. The external identity provider owns OAuth login and token issuance. Basic local panel registration was authorized by the user on 2026-09-21: encrypted account storage, password hashing, browser sessions, and per-account opaque MCP tokens are now in scope. Local accounts and external OAuth are mutually exclusive; accounts are personal workspaces, not global administrator roles. Do not add an embedded authorization server, push approvals, resources, prompts, databases, without discussing the scope first. The user explicitly authorized separate admin/client MCP views, per-provider refresh for both, admin provider-management tools, named revocable API keys and sessions, hard active limits, and lifecycle timestamps on 2026-09-21.
+
+Upstream authentication was explicitly expanded by the user on 2026-09-21: no auth, bearer/API-key/custom headers, and generic MCP upstream OAuth consent using the pinned SDK are now in scope. OAuth grants and refresh tokens remain encrypted and per user. A built-in Google Drive API adapter is not included; the user has not selected a Drive MCP server.
+
+Per-user tool-call history, history filters, metadata-only responses, and local password changes were authorized on 2026-09-21. Audit history is append-only, owner-scoped, and linked to stable tool IDs with name snapshots. Connector deletion must retain historical call records.
+
+The user requested review and implementation of the timed-access security spec v1.1 on 2026-09-22, then explicitly authorized PostgreSQL test infrastructure and migration design. The staged roadmap and exact current coverage are in `docs/security/implementation.md`; the original bundle is in `docs/security/spec-v1.1/`. Public caller IDs and durable dispatch audit are integrated. The lease engine, PostgreSQL metadata store, real envelope activator and opt-in guarded proxy adapter now have end-to-end SDK/PostgreSQL tests. Application startup has not installed that adapter; current credentials remain in legacy server-managed custody. Do not claim browser vaults, full catalog migration, or production lease enforcement is enabled. See `docs/security/encrypted-runtime.md` for the exact boundary and remaining gates. Future client-release mode requires a distinct interactive owner flow even when extra approval is `none`; ordinary admin MCP keys cannot self-activate. Push and TOTP remain optional and unselected.
+
+The next slice adds browser vault worker primitives with pinned hash-wasm Argon2id, exact root/CEK wrappers and recovery interoperability tests, plus additive PostgreSQL schema v2 for ciphertext records with CAS, nonce uniqueness, write caps and tombstones. `Service.ChangeAtomic` coordinates ciphertext writes, lease revocation and post-commit cache publication. These remain unwired to the owner API, main UI and startup; see `docs/security/vault-storage.md`. The user requests redeployment after each completed, validated batch. Preserve the live legacy data and take a consistent protected backup before redeploying.
+
+## Code and validation
+
+- Use the official `github.com/modelcontextprotocol/go-sdk` and verify API details in the pinned module source before changing SDK calls.
+- Keep `examples/config.yaml` in sync with `internal/config`.
+- Do not log raw tool arguments, results, or credential values. Audit stores only a canonical argument hash.
+- Preserve argument-hash bytes independently from future RFC 8785 approval hashes. A successful dispatch-admission write must be durable before any tool execution; completion failure must never cause tool replay or replace a successful result with a claimed failure.
+- Keep personal upstreams, headers, cached tools, and admin API responses scoped to the validated user. Never expose stored header values in API responses.
+- Keep hidden tools in the admin inventory so users can re-enable them, while excluding them from MCP `tools/list` and denying direct calls.
+- Add dependencies only when justified. PostgreSQL uses pinned pgx, approval hashes use an RFC 8785 implementation, and the user selected Sonic for JSON performance. Keep legacy argument-hash serialization unchanged. Sonic is configured centrally in `internal/jsoncodec`; no `GOEXPERIMENT=jsonv2` is required.
+- Read the package and its tests before editing. Keep changes focused and use `gofmt`.
+- Before a milestone is done, run `go build ./...`, `go vet ./...`, and `go test -race ./...`; record the result in `docs/progress.md`.
+- Record decisions involving SDK or MCP behavior in `docs/decisions.md`.

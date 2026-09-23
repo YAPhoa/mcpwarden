@@ -1,0 +1,18 @@
+{
+  "APPROVAL-OPTIONS.md": "4973e70920a463e74025ee89b58155be016a9d223d329aa719f36f4288d88143",
+  "CHANGELOG.md": "d6060efc000c54458fe87a2f6eee5526d37ede2effe58f262f4e1fe7674b2bef",
+  "IMPLEMENTATION-CHECKLIST.md": "a2900b143019a4493eeb8c6e9aea696f2c09326ba33c6e9629a188cd843eec67",
+  "README.md": "d6e9c97965747d64e6a9da67a4597b8e70caed6799410b147761da9ed8a7f137",
+  "REFERENCES.md": "f2b85c5827691350d81fe785d3ec83f0fd160b768338cfec4c8ef1bae179b745",
+  "SECURITY-DESIGN.md": "1a7881adca8f607c0f35db8bcdebc5edb5755d9c47b25f59ff6a420bc52389a8",
+  "VALIDATION.md": "2a5d0d197a0f03f02e6f0de94b8fbda64b218e552546c17d46f7c2305e9c022e",
+  "reference/approval-config.yaml": "b9b77015eba2e237e96872091768113dbef80543d843e6469ecd3453c7f20627",
+  "reference/approval-options.sql": "ee08e0c91dcbb764de1c45a5e1f5eee6f1fb5bcb38e4faf8acb15e3259af4092",
+  "reference/document-checks.txt": "fec64b47a2eedb25b24e19777bb8a16d0e8f35f0f5f664ab7ae3a90b0a516840",
+  "reference/envelope-vector.json": "4ee5154c2e62cac7131e263507dcb9f3ff1f3bc8a0bfb56f450a805f7b7a673a",
+  "reference/schema.sql": "b275850cb44595b326d3c1a1819e62b34f47e2f9239c04751160f8926d8ee8e5",
+  "sources/mcpwarden-current-state-2026-09-22.md": "44cc7f65f29e2b11ca6065e9fcf6f1e5609ebde429ab834ef5b298501ed81de2",
+  "tests/test_envelope.go": "e5018521b47ea834ad5f26e1b8983c12c5f2fa00750fd033b75a038191135269",
+  "tests/test_envelope.mjs": "2840c978f21a71a117ac7cee26a9c35cd30c014c4b082a6de35349b35ecbd0df",
+  "tests/test_envelope.py": "c129b8ab9c0f2d208533c8f09ddfbbbe5030eaa74219fe10d8ebb3b3ea42fe91"
+}

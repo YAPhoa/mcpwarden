@@ -1,0 +1,39 @@
+# Proposed configuration; not accepted by the current binary until implemented.
+security:
+  custody_mode: client_release
+  approvals:
+    mode: confirm                  # none | confirm | step_up
+    verification:
+      method: none                 # totp only with step_up and enrolled factor
+      freshness: per_window
+    request_ttl: 5m
+    activation_ttl: 60s
+  notifications:
+    in_app: true
+    web_push:
+      enabled: false
+      on_access_request: false     # opt-in, deduplicated/rate-limited
+      vapid_private_key_env: MCPWARDEN_WEB_PUSH_VAPID_KEY # needed only when enabled
+      storage_key_env: MCPWARDEN_NOTIFICATION_STORAGE_KEY # protects subscriptions
+  leases:
+    default_ttl: 15m
+    max_ttl: 60m
+    idle_timeout: 0s
+    max_calls: null                # not a single-use permit
+    max_concurrent_calls_per_caller: 4
+    automatic_renewal: false
+  audit:
+    require_durable_admission: true
+    retention_days: 90
+  runtime:
+    restart_policy: locked
+    deployment_mode: single_active
+
+storage:
+  driver: postgres
+  dsn_env: MCPWARDEN_DATABASE_URL
+
+# Only needed when a factor with an encrypted server-side seed is enrolled.
+# This key does NOT unwrap the client vault or provider credentials.
+factor_storage:
+  encryption_key_env: MCPWARDEN_FACTOR_STORAGE_KEY

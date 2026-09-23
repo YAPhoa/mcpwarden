@@ -1,0 +1,27 @@
+listen: 0.0.0.0:8787
+
+# Required for a non-loopback bind. OAuth protects /mcp and /api in this mode.
+downstream_auth:
+  bearer_token_env: MCPWARDEN_TOKEN
+
+# Enables OAuth resource-server protection for /mcp. Configure an external
+# OAuth 2.1 provider for authorization-code + PKCE, and use its introspection
+# endpoint for validating access tokens. This resource URL must match the
+# audience the provider issues and ChatGPT sends in the resource parameter.
+oauth:
+  resource: https://mcp.example.com/mcp
+  authorization_server: https://auth.example.com
+  introspection_url: https://auth.example.com/oauth2/introspect
+  introspection_client_id_env: MCPWARDEN_INTROSPECTION_CLIENT_ID
+  introspection_client_secret_env: MCPWARDEN_INTROSPECTION_CLIENT_SECRET
+  scopes: ["mcp:tools"]
+  manage_scope: mcp:manage
+
+upstreams: []
+managed_upstreams:
+  path: /data/managed-upstreams.enc
+  key_env: MCPWARDEN_CREDENTIAL_KEY
+policy:
+  default: allow
+audit:
+  path: /data/audit.jsonl

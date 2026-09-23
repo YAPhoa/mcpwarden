@@ -1,0 +1,11 @@
+{
+  "name": "hash-wasm",
+  "version": "4.12.0",
+  "source": "https://registry.npmjs.org/hash-wasm/-/hash-wasm-4.12.0.tgz",
+  "git_commit": "373b796205ab55fb4a657374dad6ea589bf75815",
+  "npm_integrity": "sha512-+/2B2rYLb48I/evdOIhP+K/DD2ca2fgBjp6O+GBEnCDk2e4rpeXIK8GvIyRPjTezgmWn9gmKwkQjjx6BtqDHVQ==",
+  "files": {
+    "LICENSE": "c14dea172f72f2714284a0ac2ab1b00b5352a01409d58255a46227ffc541debd",
+    "argon2.umd.min.js": "dcec617a2e1b700fa132d1583a186cb70611113395e869f2dd6cc82b415d3094"
+  }
+}

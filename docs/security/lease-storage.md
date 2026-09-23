@@ -1,0 +1,216 @@
+# Lease storage and migration
+
+This is the tested foundation for security spec v1.1. `internal/lease` implements
+authorization state; `internal/lease/postgres` persists its metadata. The opt-in
+proxy adapter now exercises real encrypted credentials with this store, but
+application startup has not installed it. The running gateway still uses its encrypted file
+catalog and JSONL audit, and accepts no new `client_release` configuration. The
+new integration tests use synthetic credentials with the real envelope activator;
+isolated core tests also retain simple test materials. See [encrypted execution](encrypted-runtime.md).
+
+## Transaction and runtime contract
+
+`Service.Request`, `Confirm`, `Activate`, `Admit`, `Revoke`, `Deny`,
+`LockExecution`, `Change` and `ChangeAtomic` use one short coordinator per owner. `Admit` produces
+a single-use capability; call `Run` immediately, never enqueue it. Run rechecks
+the live deadline before invoking work, and releases the coordinator before
+provider I/O. Revocation before admission prevents work; after admission,
+cancellation is best effort and cannot undo a provider side effect. A failed or
+ambiguous admission never invokes work or retries a tool.
+
+There is no default call budget or idle extension. Scope duration is explicit
+(the planned UI default remains 900 seconds), capped by the deployment limit and
+caller expiry. Renewal creates a new request and lease. The original deadline is
+immutable. One lease must satisfy every constraint; matching leases are selected
+by earliest expiry then lease ID. No preferred-scope selector is implemented yet.
+
+An activation stage must verify the current encrypted record with reconstructed
+expected AAD, using local bounded cryptography only. It owns returned buffers;
+the service clears its input key. Material is published only after the database
+commit succeeds while the owner gate remains held. An ambiguous result destroys
+staged material and locks the executor even if PostgreSQL committed the row.
+Existing material is cancelled on loss, revocation or expiry, and destroyed when
+its admitted work drains. Go cannot prove instantaneous zeroization of all copies.
+
+The `Authority` interface supplies coherent current caller/credential/policy/tool
+metadata. Its security mutations must use the same coordinator. `Change` first
+commits revocation, then performs a trusted mutation under that gate. This is a
+conservative bridge: it can leave old leases revoked when the later catalog
+mutation fails. It is **not** an atomic PostgreSQL catalog mutation. The future
+catalog adapter must place catalog updates, revocation and audit in the same
+database transaction; the current file catalog is not connected to this hook.
+The added `ChangeAtomic` implements that shared transaction for ciphertext
+records, with post-commit cache publication. See [vault storage](vault-storage.md).
+
+The first PostgreSQL adapter uses one dedicated session for short transactions
+and its session advisory lock. It never uses a reconnecting pool for ownership.
+Losing the connection, a failed health check, SQL storage failure or uncertain
+commit closes its lost signal; the lease service stops admissions and cancels
+live work. A new Store/boot is required for recovery. Startup atomically marks old
+pending/approved requests stale and active leases suspended. Durable rows alone
+never recreate memory authority. A one-second health probe bounds idle detection;
+each database operation also fails closed. The transaction path has a five-second
+deadline and shorter statement/row-lock timeouts. There is no transaction callback
+retry. This initial single-session adapter has not been load-qualified.
+
+Owner reads always include owner identity. Transactions lock the owner row before
+sampling `clock_timestamp()`; transaction-start `now()` is unsuitable after a wait.
+`synchronous_commit=on` is set on the runtime session. Fixed deadlines, operation
+IDs, scope, epoch, caller and boot cannot be changed by UPDATE. Terminal rows
+cannot be resurrected; counters cannot decrease or jump by more than one. An
+admission updates the counter and appends its event in one transaction.
+Completions append separately and must retain the admission identity snapshot.
+Missing completion means unknown outcome, never permission to retry.
+
+The schema has owners, requests, leases, allowlisted security events, invocation
+events and a migration ledger. Schema v2 also stores encrypted wrappers and
+credential records; it contains no unwrapped keys or plaintext credential
+payloads. Request scopes are authorization metadata and can themselves contain
+sensitive resource identifiers; restrict database/backups accordingly. It is not
+the candidate spec's complete catalog schema and not a general history importer.
+
+## Migration command and roles
+
+The reviewed first migration is
+[`001_leases.sql`](../../internal/lease/postgres/migrations/001_leases.sql).
+`cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql`, verifying
+both SHA-256 hashes in an ordered ledger. Migration 001 is unchanged.
+There is no destructive down migration. Rerunning the same version is supported;
+checksum drift or a newer/unexpected ledger fails closed.
+
+Run migrations with a separate schema-owner role. Provision the runtime login
+beforehand; it must not be superuser, create databases/roles, replicate, bypass
+RLS, own the schema, or inherit the schema owner. The migration grants only schema
+usage, metadata reads, state inserts/updates and event inserts. It grants no event
+UPDATE/DELETE/TRUNCATE, schema DDL, or migration-ledger writes. Runtime startup
+checks those restrictions. Audit retention must use a separately reviewed
+maintenance role and workflow; no retention grant or deletion command ships here.
+
+```sh
+# Supply this environment variable through protected deployment configuration.
+# Remote PostgreSQL connections should use sslmode=verify-full and trusted CAs.
+go run ./cmd/mcpwarden-security-db -runtime-role mcpwarden_runtime
+```
+
+The command reads `MCPWARDEN_MIGRATION_DATABASE_URL`; it does not accept a DSN on
+the command line or print driver connection errors. The migration and lease
+executor contend for the same advisory lock, so a cooperating executor must stop
+before schema migration. This lock currently coordinates this lease component,
+not the legacy file gateway, which has no PostgreSQL connection.
+
+## Isolated local tests
+
+The separate Compose project binds PostgreSQL 18.6 to loopback port 55432 and a
+dedicated volume. The passwords below are public synthetic fixtures. They are not
+deployment credentials and are unrelated to the running gateway's configuration.
+
+```sh
+docker compose -f compose.postgres-test.yaml -p mcpwarden-security-test up -d --wait
+export MCPWARDEN_TEST_DATABASE_URL='postgres://mcpwarden_migrator:mcpwarden-test-only@127.0.0.1:55432/mcpwarden_security_test?sslmode=disable'
+go test -race ./internal/lease/... ./internal/jsoncodec ./internal/catalog ./internal/audit
+```
+
+Tests require that exact local fixture database name. Each test creates a random
+scratch database and restricted runtime role, then removes only its own fixtures.
+They do not copy application data. Without the environment variable, PostgreSQL
+tests explicitly skip; ordinary unit tests still run.
+
+Tests include real deferred commit rejection, a transport that consumes then
+drops a successful COMMIT response, backend termination/lock loss, competing
+executors/migration, cross-owner reads/FKs, immutable bindings, denied DDL/audit
+mutation, budget contention and timestamps after row-lock waits. A PostgreSQL
+database snapshot copy verifies restore suspension while preserving lease IDs,
+scope hashes and deadlines. This is not yet a full application pg_dump/restore
+drill or reconciliation of historical access revocations/OAuth rotations.
+
+The local base fixture is maintained at the current security schema version with the separate
+`mcpwarden_runtime_test` role, with public password `mcpwarden-runtime-test-only`,
+after running the migration CLI. No caller, lease, credential or invocation rows
+were imported there. Stop the fixture without deleting its volume with:
+
+```sh
+docker compose -f compose.postgres-test.yaml -p mcpwarden-security-test stop
+```
+
+## Next: encrypted file/catalog and history migration
+
+This is a design boundary, not an implemented conversion command. Before making
+PostgreSQL a gateway backend:
+
+1. Extend the reviewed schema for accounts, password verifiers/salts/iterations,
+   caller keys/public IDs/roles, browser/OAuth/MCP session lifecycle, connector
+   tombstones, cached tool definitions, visibility, policy and encrypted grants.
+   Implement the existing `catalog.Repository` and history query contracts,
+   including defensive cached reads, hard active limits, uniqueness and OAuth CAS.
+   Owner/caller revocation and lease admission must share database transactions.
+2. Quiesce the actual gateway and hold exclusive migration ownership over both
+   the source and target. Create a protected consistent file/config/audit backup;
+   keep decryption keys separately. Inventory source hashes, original physical
+   JSONL line positions, stable IDs and per-owner counts before importing.
+3. Preserve UUIDs, public IDs, verifiers, role/owner, timestamps, cached metadata,
+   revocations, tombstones and existing argument-hash bytes. Do not filter the
+   JSONL before deriving historical v0 event IDs: the current reader binds the
+   original physical line and raw bytes. Preserve v1/v2 event/invocation IDs and
+   unresolved admissions. The new leased-event table alone cannot accept all
+   legacy history; a versioned general history migration is still required.
+4. Keep an explicitly labelled legacy server-managed custody path for unconverted
+   records. Database backups must still encrypt secret-bearing legacy fields;
+   relocating server-decryptable ciphertext does not make it client encrypted.
+   Client conversion is a separate owner interaction that authenticates the
+   browser-created envelopes, establishes fresh CEKs/epochs, verifies decryptability
+   and recovery, then removes the old server unwrap route for converted records.
+   Migration must never receive a whole-vault root or invent a hidden server wrapper.
+5. Import to an isolated target with transactional checkpoints/manifest identity;
+   reject duplicate IDs and cross-owner references. Verify all source counts,
+   identities, hashes, lifecycle and constraints before an explicit cutover marker.
+   Trial failure and interruption at each boundary must leave the source intact
+   and target execution locked. Do not use repeated upserts to overwrite newer
+   revocations or OAuth grants.
+6. Start the new runtime locked with a new boot and empty material. Reconcile
+   access revocations and provider token rotations before enabling execution.
+   A rollback preserves new append-only audit and keeps execution stopped; it
+   must not revive old credentials/leases by restoring an older writable catalog.
+
+The browser lifecycle, encrypted envelope adapter, owner routes and actual
+runtime integration are prerequisites for that cutover, not optional follow-ups.
+
+## Sonic and reproducible measurements
+
+Sonic v1.15.4 is pinned and used for catalog snapshot encoding plus new lease/SQL
+metadata JSON. Settings retain HTML escaping and deterministic map order, copy
+decoded strings, preserve number tokens, validate Unicode/strings and match field
+names exactly. Strict decode additionally rejects unknown fields. Security input
+validation separately rejects duplicate decoded keys, malformed Unicode, extra
+roots, non-finite numbers and excessive size/depth before scope normalization.
+RFC 8785 canonicalization uses the pinned Cyberphone implementation; ordinary
+JSON encoding or PostgreSQL `jsonb::text` is never an approval hash.
+
+Legacy catalog decoding and audit argument hashing keep `encoding/json` for
+compatibility. No `encoding/json/v2` imports or experimental build settings remain.
+Catalog fixtures compare real SDK tool/snapshot bytes, reopen encrypted files and
+check stable IDs, verifiers and nanosecond timestamps. Sonic's native API is
+confirmed on the tested linux/amd64 Go 1.27.1 host.
+
+```sh
+go test ./internal/jsoncodec -run '^$' -bench BenchmarkMetadataCodec -benchmem -benchtime=300ms -count=3
+```
+
+Local 32-tool metadata fixture, median of three runs on the Ryzen AI 9 HX PRO 370:
+
+| Operation | Sonic | encoding/json | Allocated bytes/op (Sonic / standard) |
+|---|---:|---:|---:|
+| Encode | 17.4 µs | 36.1 µs | about 20.5 KB / 15.8 KB |
+| Decode | 41.1 µs | 72.9 µs | about 66.7 KB / 45.0 KB |
+
+This fixture shows roughly 2.1× faster encoding and 1.8× faster decoding, with
+higher allocated bytes. Strict duplicate/depth/Unicode validation costs another
+48 µs for this fixture and remains enabled at security boundaries. These are
+codec microbenchmarks, not gateway throughput or latency claims. No performance
+claim is made for architectures not executed here.
+
+Primary references inspected: [Sonic Go 1.27 compatibility](https://github.com/bytedance/sonic/blob/main/docs/sonic-go127-compatibility.md),
+[pinned Sonic settings](https://github.com/bytedance/sonic/blob/v1.15.4/api.go),
+[RFC 8785 implementation](https://github.com/cyberphone/json-canonicalization),
+[pgx v5.11.0](https://github.com/jackc/pgx/releases/tag/v5.11.0),
+[PostgreSQL session locks](https://www.postgresql.org/docs/18/explicit-locking.html),
+and [actual transaction clock](https://www.postgresql.org/docs/18/functions-datetime.html).

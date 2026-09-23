@@ -1,0 +1,23 @@
+{
+  "warning": "Public deterministic test inputs only; never use as credentials or production randomness.",
+  "reference": "argon2-cffi 25.1.0",
+  "parameters": {
+    "version": 19,
+    "memory_kib": 65536,
+    "iterations": 3,
+    "parallelism": 4,
+    "output_bytes": 32
+  },
+  "vectors": [
+    {
+      "passphrase": "EXAMPLE ONLY vault passphrase",
+      "salt_hex": "000102030405060708090a0b0c0d0e0f",
+      "argon2id_hex": "7eedf131d9c0111ce52c253121e5d1731a41b61d830687650df861e3035cf6c0"
+    },
+    {
+      "passphrase": "  密碼 é 🔐  ",
+      "salt_hex": "101112131415161718191a1b1c1d1e1f",
+      "argon2id_hex": "cabff2f5119ae990e98d173a322728aa98f7e493cf438190d6ba368d2b1bf5d1"
+    }
+  ]
+}

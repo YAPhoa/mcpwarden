@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backend:
+    name: Go and PostgreSQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_USER: mcpwarden_migrator
+          POSTGRES_PASSWORD: mcpwarden-test-only
+          POSTGRES_DB: mcpwarden_security_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcpwarden_migrator -d mcpwarden_security_test"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      MCPWARDEN_TEST_DATABASE_URL: postgres://mcpwarden_migrator:mcpwarden-test-only@127.0.0.1:55432/mcpwarden_security_test?sslmode=disable
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Format and dependency consistency
+        run: |
+          unformatted="$(gofmt -l cmd internal)"
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+          go mod tidy -diff
+          go mod verify
+          python3 scripts/ci/integrity.py
+      - name: Build and vet
+        run: |
+          go build ./...
+          go vet ./...
+      - name: Race tests with PostgreSQL and WebCrypto enabled
+        run: |
+          test -n "${MCPWARDEN_TEST_DATABASE_URL:?PostgreSQL tests must not skip}"
+          node --version
+          go test -race -count=1 -timeout=10m ./...
+      - name: Production CGO-disabled build and JSON/storage checks
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go build -o "${RUNNER_TEMP}/mcpwarden" ./cmd/mcpwarden
+          go test ./internal/jsoncodec ./internal/catalog
+      - name: Bounded parser fuzz checks
+        run: |
+          go test ./internal/lease -run='^$' -fuzz='^FuzzParseScope$' -fuzztime=10s -parallel=2
+          go test ./internal/secret -run='^$' -fuzz='^FuzzEnvelope$' -fuzztime=10s -parallel=2
+
+  browser:
+    name: UI and vault (${{ matrix.browser }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install locked test dependencies without lifecycle scripts
+        run: npm ci --prefix ui --ignore-scripts
+      - name: UI, crypto, asset-integrity and dependency checks
+        run: |
+          npm --prefix ui test
+          npm audit --prefix ui --audit-level=high
+          python3 scripts/ci/integrity.py
+      - name: Install browser and system dependencies
+        working-directory: ui
+        env:
+          TEST_BROWSER: ${{ matrix.browser }}
+        run: ./node_modules/.bin/playwright install --with-deps "$TEST_BROWSER"
+      - name: Worker, KDF, recovery, lock and CSP checks
+        env:
+          VAULT_BROWSER: ${{ matrix.browser }}
+        run: npm --prefix ui run test:browser
+
+  security:
+    name: Security and workflow checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .go-version
+          cache: false
+      - name: Validate GitHub Actions and embedded shell
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+      - name: Check reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Scan Git history for secrets (redacted)
+        run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --redact --no-banner --log-opts='--all'
+
+  containers:
+    name: Container build and smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build separate images and verify a disposable deployment
+        run: python3 scripts/ci/containers.py
+
+  required:
+    name: Required checks
+    if: always()
+    needs: [backend, browser, security, containers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every mandatory job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          failed = {job: value['result'] for job, value in json.loads(os.environ['RESULTS']).items() if value['result'] != 'success'}
+          if failed:
+              raise SystemExit('Required checks did not pass: ' + json.dumps(failed))
+          print('All mandatory checks passed.')
+          PY

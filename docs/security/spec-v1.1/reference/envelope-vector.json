@@ -1,0 +1,21 @@
+{
+  "warning": "PUBLIC SYNTHETIC FIXTURE. Never use this key, deterministic nonce, or fake token in production. This header is restricted to ASCII strings; its sorting is not a general JCS implementation.",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce_hex": "000102030405060708090a0b",
+  "aad_utf8": "{\"algorithm\":\"AES-256-GCM\",\"connector_id\":\"22222222-2222-4222-8222-222222222222\",\"credential_id\":\"33333333-3333-4333-8333-333333333333\",\"destination_profile_sha256\":\"fGOs3XJ6DijPce_hqM7xdr3-aQnhBQvGMA70wcMFbcQ\",\"epoch\":\"1\",\"format\":\"mcpwarden.secret.v1\",\"owner_id\":\"local\",\"purpose\":\"upstream-credential\",\"revision\":\"3\"}",
+  "plaintext_utf8": "{\"kind\":\"header_bundle\",\"headers\":[{\"name\":\"Authorization\",\"value\":\"Bearer EXAMPLE_ONLY\"}]}",
+  "ciphertext_and_tag_hex": "3c20bd72ab81e021af29f2ead58c0a32e1a3e9509c1e7d501a0f80e4790c72c1232af5878daf73f5118645cfc9f25c50812b09f73ba2cab551b5063b6e82999b951efc5891b4471379268a2bb7ce43b874cf962d382f0a4a80a0e325d081effe63fddbadc600b284747234",
+  "envelope": {
+    "format": "mcpwarden.secret.v1",
+    "algorithm": "AES-256-GCM",
+    "owner_id": "local",
+    "connector_id": "22222222-2222-4222-8222-222222222222",
+    "credential_id": "33333333-3333-4333-8333-333333333333",
+    "epoch": "1",
+    "revision": "3",
+    "purpose": "upstream-credential",
+    "destination_profile_sha256": "fGOs3XJ6DijPce_hqM7xdr3-aQnhBQvGMA70wcMFbcQ",
+    "nonce": "AAECAwQFBgcICQoL",
+    "ciphertext": "PCC9cquB4CGvKfLq1YwKMuGj6VCcHn1QGg-A5HkMcsEjKvWHja9z9RGGRc_J8lxQgSsJ9zuiyrVRtQY7boKZm5Ue_FiRtEcTeSaKK7fOQ7h0z5YtOC8KSoCg4yXQge_-Y_3brcYAsoR0cjQ"
+  }
+}

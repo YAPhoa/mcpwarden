@@ -1,0 +1,223 @@
+# Decisions
+
+## 2026-09-22 — Lease coordinator, PostgreSQL metadata and Sonic
+
+The user authorized PostgreSQL testing/migration design and selected Sonic after
+considering JSON v2. Pin Sonic v1.15.4 behind `internal/jsoncodec`, retaining strict
+validation on authorization inputs and byte-compatible catalog snapshot encoding.
+Keep the historical audit argument hash on its existing serializer. Use the pinned
+RFC 8785 implementation for approval hashes, after duplicate/Unicode/number
+validation. No experimental Go flags or MCP SDK dependency changes are required.
+
+Implement leases as a separate owner-coordinated state machine. All permissions
+for a call must come from one finite, caller/epoch/boot-bound lease. Owner `none`
+activation still requires an interactive browser identity and key release;
+`confirm` adds a separate bounded decision. Neither admin nor client MCP keys can
+self-confirm/activate. Material remains opaque and temporary; concrete credential
+decryption and the browser lifecycle are not implemented in this slice. Fixed
+deadlines survive retries unchanged; a database row never recreates activation.
+
+Use pgx v5.11.0 and a reviewed component schema instead of promoting the candidate
+spec SQL to a production catalog migration. One dedicated session holds executor
+ownership and serializes short transactions. Sample the database clock after
+owner locking, commit budget plus audit atomically, publish material only after
+commit, and stop execution on lock loss or ambiguous commit. Separate runtime and
+migration roles; grant no runtime audit mutations or DDL. Restore suspends prior
+leases. No automatic database or tool retry is added.
+
+The existing gateway remains on file custody/JSONL until the owner API, encrypted
+credential handles and all security mutations use this coordinator. The generic
+MCP SDK continues to own the wire protocol; this change introduces no custom
+JSON-RPC transport and no enabled client-release configuration. See the
+[storage/migration contract and validation boundaries](security/lease-storage.md).
+
+## 2026-09-22 — Security v1.1 baseline, caller IDs and durable admission
+
+Adopt the supplied timed, multi-call client-release specification as a staged
+roadmap, starting with exact caller attribution and admission durability. The
+gateway remains trusted with a released credential during execution; vault roots
+and recovery keys must stay client-side in the eventual mode. Initial interactive
+activation will use local-account owner sessions, separately from ordinary MCP
+admin keys. `none` must never mean self-activation, permanent decryption or traffic
+renewal. Push/TOTP remain optional and unselected. See the
+[review and milestone boundaries](security/implementation.md).
+
+New named keys carry independent random public IDs and 32-byte secrets, strictly
+parsed, retaining SHA-256 over the entire issued token. Legacy verifiers and token
+formats are preserved; display IDs are backfilled independently and persisted.
+Audit uses the authenticated record, never a secret suffix or claimed client name.
+Storeless legacy verifier-derived binding IDs do not enter audit actor metadata.
+
+Inspected pinned SDK v1.8.0 `mcp/streamable.go`, `mcp/requests.go`,
+`mcp/protocol.go` and connection context handling. Stateful handlers retain their
+initial context while HTTP verifies credential/role binding; re-read that exact
+access record in receiving middleware for current lifecycle and label snapshots.
+No custom JSON-RPC encoding is introduced. Admission failures use SDK tool errors
+with plain text and no fabricated `structuredContent` or automatic retry.
+
+Use schema-v2 append-only admitted/completed/denied events and stable invocation
+IDs. `audit.Appender.Write` now requires durable success for admitted events. Both
+MCP views and gateway-management tools sync admission before invoking the action.
+Reject stdout as configured dispatch audit storage. Completion errors preserve
+actual tool results. History joins by owner/invocation and shows unknown completion
+without inventing success, failure, or retry safety. V0/v1 history stays unchanged;
+the argument-hash algorithm and existing handler timing semantics are preserved,
+with admission persistence measured separately. This is not the future atomic
+lease/counter/revocation gate. See [history storage](history-storage.md).
+
+## 2026-09-22 — Portable immutable history events
+
+Keep JSONL behind append/query interfaces and version completed-call records with
+event ID, completion time and stable upstream ID. Order history by completion time
+then event ID, replacing reverse physical log order. Preserve call-start date filters
+and owner isolation. Legacy rows are normalized only in memory. Sync file writes,
+reject malformed history and incomplete tails, and surface management audit failures
+in logs without retrying MCP calls or changing already executed outcomes. No SDK calls
+change. See [history storage contract](history-storage.md) for migration, deduplication,
+single-writer and durability limits.
+
+## SDK and protocol
+
+- Pin the official Go MCP SDK to v1.8.0. Its stateful Streamable HTTP handler negotiates the legacy session protocol when needed, including the `initialize` and `Mcp-Session-Id` flow used by the smoke script. This preserves compatibility with existing clients. The SDK also handles newer protocol negotiation where the transport supports it.
+- Register all valid upstream tools with the SDK and filter denied or unhealthy tools in SDK `tools/list` middleware. The SDK's ordinary tool handler then returns a visible tool error for direct calls to denied or unhealthy names. SDK `AddTool`/`RemoveTools` sends downstream list change notifications.
+- Keep cached tool definitions while an upstream is unhealthy. Their list visibility changes immediately, and direct calls report that the upstream is unavailable. On refresh, removed tools are unregistered.
+- Use the SDK's `CommandTransport` for stdio child cleanup. Its source closes stdin, waits, then sends SIGTERM and SIGKILL if needed.
+
+## UI and search
+
+- The Go gateway is headless. The separate `ui/` component runs in its own Nginx container with Compose. Nginx serves the admin panel and proxies `/api/` to the server over the Compose network. The browser stores its access token only in session storage.
+- Panel-managed remote MCP connections are separate per user. In local mode the operator token selects the single `local` user. In OAuth mode the validated `sub` selects a user-specific MCP server, upstream sessions, headers, tool registry, and cached discovery. Static YAML upstreams are included in each user's registry.
+- Personal connection definitions, header values, and last successful tool discovery are saved in one AES-GCM encrypted file. A base64 32-byte environment key is required; the file is written atomically with mode 0600. Header values are never returned by the admin API.
+- Visibility is stored per user and provider. Providers default to showing all policy-allowed healthy tools. In selected mode, only explicitly enabled namespaced tools appear in MCP `tools/list`; direct calls to other tools return an audited tool error. The admin inventory continues to show hidden tools so they can be enabled again. Updating visibility re-registers one provider tool through the SDK to trigger its standard downstream list-change notification.
+- The API supports provider listing and provider-specific tool listing and search; the panel also filters loaded metadata locally. Meilisearch would add an external service and indexing lifecycle, so it is left as a future option if inventories grow. No MCP search meta-tool is exposed.
+
+## OAuth for ChatGPT
+
+- At the user's request, `/mcp` can act as an OAuth protected resource. An external OAuth 2.1 provider performs authorization-code + PKCE, client registration, and refresh-token issuance. mcpwarden publishes protected-resource metadata and validates each bearer token through the provider's introspection endpoint, checking activity, expiration, audience, optional issuer, and scopes.
+- The gateway does not mint OAuth tokens or host login pages. In OAuth mode, `/mcp` requires `mcp:tools` and `/api` requires `mcp:manage`; both use the same validated subject so personal connections match across clients. The panel currently accepts an access token supplied by the user. In local mode, one operator bearer token protects both endpoints.
+- The resource identifier and authorization-server issuer are explicit config values so they can match the HTTPS URLs exposed to ChatGPT through a public endpoint or a Secure MCP Tunnel.
+
+
+## Basic local panel accounts (2026-09-21)
+
+The user explicitly expanded the UI scope to basic account registration. Local accounts are optional (`accounts.allow_registration`), require encrypted managed storage, and are mutually exclusive with external OAuth mode. They use opaque internal owner IDs, so existing per-owner runtime, discovery, registration and visibility isolation also apply to these accounts. No new database or OAuth authorization server was introduced. The static operator token continues to select the existing `local` workspace.
+
+Passwords use the Go standard library PBKDF2-HMAC-SHA256 implementation, 600,000 iterations, independent random 16-byte salts, and constant-time comparison. This keeps dependencies unchanged while following the PBKDF2 work factor in the [OWASP password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). Browser sessions use random opaque values (only hashes retained in server memory), 12-hour expiry, HttpOnly/SameSite=Strict cookies and Secure outside loopback. State-changing browser requests require a custom header and JSON; the server does not permit cross-origin CORS reads, and retains origin checks, following [OWASP's custom-header CSRF pattern](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html#employing-custom-request-headers-for-ajaxapi).
+
+Personal MCP client tokens use random opaque bearer credentials, stored only as hashes and explicitly replaced by the user. They select the same owner as the panel account. Session cookies are intentionally not accepted at `/mcp`. These local bearer credentials do not implement an OAuth flow; external OAuth mode continues to use the external provider and management scope.
+
+Registration creates personal accounts, not global administrators. Existing config upstreams remain shared across users; that must be intentional in the gateway configuration. Password reset, account deletion, email delivery, user administration, and federation between local/OAuth identities remain outside this basic flow.
+
+
+## Stable tool identity and upstream authentication — 2026-09-21
+
+The user requested original UI tool names, UUID internal keys, unchanged MCP names, a provider switch, and different upstream authentication methods. Managed connector IDs are persisted UUIDv4 values, migrated atomically inside the existing encrypted catalog. Tool registry keys are UUIDv5 values derived from the connector UUID and exact original tool name, following [RFC 9562](https://www.rfc-editor.org/rfc/rfc9562.html#name-uuid-version-5). Static connector IDs are deterministic per owner/name. MCP name aliases continue to route calls and preserve policy/visibility compatibility. No database or tool rename API was added.
+
+Provider availability is persisted separately from tool selections within the owner/provider settings. The manager replaces connection generations when disabling/enabling, preventing late discovery callbacks from reviving disabled tools. The registry retains cached tool metadata while marking it unavailable, so list filtering and direct-call checks continue to enforce availability.
+
+Upstream OAuth uses the pinned Go SDK v1.8.0 `auth.AuthorizationCodeHandler`, inspected in local module source, with preregistered issuer-bound clients or dynamic registration. The existing pinned `golang.org/x/oauth2` module is now a direct dependency for token-source persistence; no new module was downloaded. The SDK handles resource/issuer validation, PKCE/state and code exchange. The application adds explicit browser initiation, a one-time HttpOnly/SameSite=Lax callback binding (without weakening the main Strict session cookie), five-minute expiry, per-owner encrypted grants, refresh-token rotation persistence, stale-grant write rejection and connection restart. Background connection attempts only report that sign-in is required. HTTP endpoints are limited to HTTPS or loopback HTTP for local upstreams; redirects are not followed with credentials. OAuth errors are sanitized rather than exposing token endpoint responses.
+
+The same panel origin hosts `/api/upstream-oauth/callback`. Its Origin is checked at initiation, and callback state plus browser binding are checked before code exchange; callbacks do not need the cross-site Strict account session cookie. Bundled nginx does not access-log this route. External proxies must apply equivalent query-string redaction. Generic MCP OAuth does not implement a Google Drive API adapter. See [MCP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) and [Google's separate API OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server).
+
+
+## 2026-09-21 — Access roles and transport sessions
+
+Use two SDK MCP servers per workspace: a client view with upstream tools plus `warden_refresh_provider`, and an admin view with the same tools plus `warden_list_providers`, `warden_add_provider`, `warden_remove_provider`, `warden_set_provider_enabled`, and `warden_set_tool_visibility`. Role selection occurs after credential validation. Management handlers retain owner isolation and reject client credentials; the refresh HTTP route permits clients.
+
+SDK v1.8.0 Streamable HTTP uses authenticated UserID to bind sessions. Bind it to credential ID plus role, preserving actual workspace owner separately in context. Track initialized ServerSessions, enforce the workspace cap, close them on revocation/expiry, and mark records ended on transport completion or process restart. Recheck credentials under the session lock to cover initialization/revocation races.
+
+Store hashed credentials and lifecycle metadata in the existing encrypted catalog. Browser sessions are persistent; OAuth access tokens are observed only after external validation and remain subject to that validation on every request. Revocation is gateway-local for the observed token. Limits are 10 active minted keys, 10 combined browser/OAuth sessions, and 10 concurrent MCP connections per owner. Static configuration operator credentials remain recovery credentials outside the minted-key list. Migrate legacy account MCP tokens to client-only records. No embedded OAuth authorization server is introduced.
+
+## 2026-09-21 — Refresh during connector initialization
+
+Each connector generation signals completion of its first connection/discovery attempt. Manual refresh waits for that signal with a bounded, cancellable timeout and checks the generation is still current. Disabled connectors still reject refresh. This closes the asynchronous enable-to-session-ready window without changing MCP tool visibility or permitting stale callbacks to restore disabled tools.
+
+
+## 2026-09-21 — Call history without a new database
+
+Add owner and tool identity to the existing JSONL audit records. History readers require the validated workspace owner and expose only safe response metadata. Tool filters derive from that owner's recorded identities, including removed connectors. From is inclusive and Until exclusive; records paginate in reverse log order. Older ownerless records are omitted. Retain stable UUIDs and name snapshots, avoiding cascade deletion; reserved management tool IDs are their stable names. The user discussed soft delete/foreign keys; append-only history provides retention now without adding a relational store. An indexed store and retention workflow should precede high-volume deployment.
+
+Password changes use the existing hashing/rate controls, require the current password and a browser session, atomically replace the password hash, and revoke other browser sessions. Keep the current session and API keys. Runtime shutdown now closes downstream sessions and joins their persistent cleanup to avoid storage writes after shutdown.
+
+## 2026-09-21 — Persistent proxy timings and request error isolation
+
+Every upstream tool invocation through either MCP role records microsecond handler, upstream and gateway durations in its existing owner-scoped audit event, including failures and denials. Upstream duration surrounds Manager.Call (SDK work, transport and remote execution); gateway duration is the remaining handler time, including argument hashing, policy and approval. These are not end-to-end client latency: credential verification before dispatch, audit persistence, SDK response encoding and client delivery are excluded. Timing presence distinguishes new records from legacy history; forwarded=false distinguishes denied/unavailable calls from upstream attempts. Gateway management tools keep their existing duration records and are excluded from proxy breakdown summaries.
+
+History aggregates all matching timed records while scanning the existing log, with constant-memory histograms, mean, maximum and p50/p95 upper bounds. Filters remain owner-scoped; API clients cannot obtain other users' metrics. Fixed powers-of-two microsecond buckets trade precision for bounded memory. The overflow bucket uses the observed maximum as a conservative bound. Per-record durations remain precise to microseconds. This adds no payload logging, remote exporter or database. At larger traffic volumes, index/rotate the audit store and export histograms to a metrics backend; repeated whole-log scans are not a high-volume metrics store.
+
+Pinned Go SDK v1.8.0 returns request decoding errors through CallTool without necessarily terminating the transport. Do not close the shared session on every CallTool error: the existing session.Wait connection loop handles actual transport termination. A malformed content response must fail that call without invalidating concurrent/following calls. Do not rewrite arbitrary upstream responses or retry tools automatically (tools may have side effects).
+
+## 2026-09-22 — Backend-neutral managed-state boundary
+
+The encrypted catalog was directly coupled to runtime, authentication, access management, and upstream OAuth through `*catalog.Store`. Introduce `catalog.Repository` as the managed-state boundary and make those consumers depend on it. Keep the existing encrypted file store as the default implementation and add a no-op close method for lifecycle parity with connection-pool-backed stores. The contract requires concurrency safety, owner isolation, defensive reads, durable atomic mutations, transactional uniqueness/limit/CAS behavior, stable identity and lifecycle preservation, and protection of all secret-bearing fields at rest. Audit history remains a separate existing `audit.Store` boundary. No PostgreSQL driver, schema, configuration, or migration is added; a future adapter can implement both contracts and be wired at startup without changing business/runtime code. See [catalog storage contract](catalog-storage.md).
+
+## 2026-09-23 — Encrypted material and leased SDK execution
+
+Keep real credential activation separate from coherent metadata reads. The
+header-bundle activator authenticates the exact current owner/connector/credential/
+epoch/revision/destination using the spec's AES-GCM/JCS envelope. It consumes only
+a selected CEK, clears its input, retains only opaque header material, and creates
+no permanent server unwrap key. No production encryption API ships before the
+browser lifecycle and durable CAS/nonce/cross-writer usage controls are ready.
+
+Use separate lease capabilities for connection maintenance and tool dispatch.
+Maintenance must already match a complete tool-use scope and counts against
+caller concurrency. Final admission rechecks the exact prepared activation and
+commits before a tool call. Context values alone are insufficient: the transport
+checks the original callback lifetime, live authority and clocks, including after
+DNS resolution. Admission records the material's authenticated revision; revision
+drift fails closed until a coordinated refresh/replacement implementation exists.
+
+Preserve legacy `audit.HashArgs` bytes. Its float64 normalization can map distinct
+large JSON integers to the same hash, so it is not used as a wire-dispatch
+capability. An ephemeral number-preserving Sonic encoding binds the actual
+arguments instead. This does not change RFC 8785 approval hashes or store raw
+arguments.
+
+Inspected the pinned SDK v1.8.0 `Client.Connect`, `ClientSession.CallTool`,
+`StreamableClientTransport.Connect/Write/Close`, and `ensureLogger` in local module
+source. Connect can negotiate `server/discover` or fall back to legacy initialize;
+call contexts reach HTTP POSTs, while connection context detachment preserves
+values and does not preserve our original lifetime. Negative `MaxRetries` disables
+SSE reconnect; `DisableStandaloneSSE`, no keepalive/subscription callbacks, no
+OAuth handler and one transport claim prevent autonomous credential use or replay.
+An OAuth handler can itself retry a request after authorization, so it is excluded
+from this first adapter until explicit refresh authority/CAS is implemented.
+
+Start with a bounded session per call and verify the actual selected tool
+definition under maintenance before admission. The optional proxy adapter bypasses
+per-call approval and lists cached visible tools while locked. The SDK's DELETE
+on closing an old session carries its expired maintenance context and is rejected
+locally; local session resources still close. Session pooling, remote cleanup and
+load qualification are explicit future work, not hidden background authority.
+Both legacy `2025-11-25` and modern `2026-07-28` downstreams are tested through
+both proxy views with actual encrypted headers and PostgreSQL durable admission.
+
+The versioned destination profile binds exact endpoint, header names and network
+policy. The dedicated transport uses checked IP dialing, rejects mixed unsafe DNS
+answers, disables proxies/redirects/replay, and permits HTTP only for explicit
+loopback development profiles. Primary IP policy references and the exact release
+boundary are recorded in [encrypted runtime](security/encrypted-runtime.md).
+Application startup remains on legacy custody until browser setup/recovery,
+encrypted persistence, owner APIs, catalog migration and coordinated mutation
+paths are complete. This adapter is not a new accepted configuration switch.
+
+## 2026-09-23 — Browser wrapping and atomic ciphertext storage
+
+Keep vault roots and passphrase/recovery derivation in a dedicated browser worker.
+Use the spec's exact AES-256-GCM/HKDF formats and fixed Argon2id profile. Vendor
+hash-wasm 4.12.0 with license, npm integrity and file hashes; independent ASCII and
+Unicode vectors verify its output. Its public API cannot wipe every WASM buffer,
+so each derivation gets a one-use child worker, terminated on completion/error.
+This does not claim guaranteed physical memory erasure or a completed dependency
+audit. Main-panel integration and broader device qualification remain pending.
+
+Add schema v2 without editing the deployed v1 SQL/checksum. Keep immutable encrypted
+versions, current pointers, tombstones and database-enforced nonce/write limits.
+Migrate only an exact pinned ledger prefix; unknown or incomplete runtime schemas
+fail closed. Place ciphertext mutations and lease revocation in `ChangeAtomic`'s
+owner transaction, then publish owned cache buffers and catalog authority after
+commit. Publication failure or uncertain commit locks access; no callback retries.
+The real MCP test now activates ciphertext read from PostgreSQL. No SDK call
+semantics, legacy argument hash, gateway configuration or production custody mode
+change. See [vault storage](security/vault-storage.md) for contracts and gates.

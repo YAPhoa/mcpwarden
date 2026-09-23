@@ -1,0 +1,12 @@
+{
+  "name": "mcpwarden-ui-checks",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Development-only tests for the separate static admin UI",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs tests/*.test.mjs",
+    "test:browser": "node tests/vault-browser.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": { "playwright": "1.63.0" }
+}

@@ -1,0 +1,20 @@
+# Disposable container smoke fixture. Never mounts local deployment config/data.
+services:
+  server:
+    build: .
+    command: ["--config", "/config/config.yaml"]
+    environment:
+      MCPWARDEN_TOKEN: ${MCPWARDEN_CI_TOKEN:?CI fixture token required}
+      MCPWARDEN_CREDENTIAL_KEY: ${MCPWARDEN_CI_KEY:?CI fixture key required}
+    volumes:
+      - ./examples/compose-config.yaml:/config/config.yaml:ro
+      - ci_data:/data
+    ports:
+      - "127.0.0.1::8787"
+  ui:
+    build: ./ui
+    depends_on: [server]
+    ports:
+      - "127.0.0.1::80"
+volumes:
+  ci_data:

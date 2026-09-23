@@ -1,0 +1,29 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["--config", "/config/config.yaml"]
+    environment:
+      MCPWARDEN_TOKEN: ${MCPWARDEN_TOKEN:?Set MCPWARDEN_TOKEN in your shell or .env}
+      MCPWARDEN_CREDENTIAL_KEY: ${MCPWARDEN_CREDENTIAL_KEY:?Set MCPWARDEN_CREDENTIAL_KEY in your shell or .env}
+      MCPWARDEN_INTROSPECTION_CLIENT_ID: ${MCPWARDEN_INTROSPECTION_CLIENT_ID:-}
+      MCPWARDEN_INTROSPECTION_CLIENT_SECRET: ${MCPWARDEN_INTROSPECTION_CLIENT_SECRET:-}
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - audit_data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ./ui
+    depends_on:
+      - server
+    ports:
+      - "127.0.0.1:8788:80"
+    restart: unless-stopped
+
+volumes:
+  audit_data:
