@@ -254,4 +254,5 @@ Dashboard stats (2026-09-24): the user reads the console on a 14" 1440p laptop
 and asked for 18px as the minimum on the stat cards. Each card now has an 18px
 label, a 36px number and an 18px line with live detail: enabled and disabled
 counts, "of N found" for tools agents can use, and the names of connectors that
-need attention (or "All connected").
+need attention (or "All connected"). That card turns amber when a connector needs
+attention and green when all are connected.

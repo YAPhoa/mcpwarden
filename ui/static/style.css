@@ -176,6 +176,10 @@ pre { overflow: auto; max-height: 230px; background: var(--canvas); padding: 16p
 .overview-stats dt { font-size: 18px; font-weight: 600; }
 .overview-stats dd { font-size: 36px; font-weight: 600; line-height: 1.2; margin: 6px 0; font-variant-numeric: tabular-nums; }
 .overview-stats .stat-help { font-size: 18px; margin: 0; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overview-stats > div[data-tone="warning"] { border-left: 4px solid var(--warning); }
+.overview-stats > div[data-tone="warning"] dd { color: var(--warning); }
+.overview-stats > div[data-tone="success"] { border-left: 4px solid var(--success); }
+.overview-stats > div[data-tone="success"] dd { color: var(--success); }
 .overview-row { color: var(--text); text-decoration: none; }
 .overview-row > .badge { flex: none; white-space: nowrap; }
 .overview-row:hover { background: var(--raised); }

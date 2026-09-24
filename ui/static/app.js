@@ -285,6 +285,7 @@ function renderDashboard() {
   $('overview-attention').textContent = loaded ? attention.length : '—';
   $('overview-attention-help').textContent = !loaded ? 'Not loaded' : attention.length ? attention.join(', ') : 'All connected';
   $('overview-attention-help').title = attention.join(', ');
+  const attentionCard = $('overview-attention').parentElement; if (attentionCard) attentionCard.dataset.tone = !loaded ? '' : attention.length ? 'warning' : 'success';
   $('dashboard-add').disabled = !access || !managedAvailable || mutating;
   const ordered = [...providers].sort((a, b) => Number(a.healthy) - Number(b.healthy) || a.name.localeCompare(b.name));
   $('overview-connections').innerHTML = ordered.length ? ordered.slice(0, 5).map(p => {
