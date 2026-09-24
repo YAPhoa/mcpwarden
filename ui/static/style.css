@@ -173,9 +173,9 @@ pre { overflow: auto; max-height: 230px; background: var(--canvas); padding: 16p
 .breadcrumbs strong { overflow-wrap: anywhere; }
 .overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 28px 0; }
 .overview-stats > div { background: var(--surface); padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-panel); }
-.overview-stats dt { font-size: 14px; }
-.overview-stats dd { font-size: 30px; font-weight: 600; margin: 6px 0; }
-.overview-stats .stat-help { font-size: 13px; margin: 0; font-weight: 400; color: var(--muted); }
+.overview-stats dt { font-size: 18px; font-weight: 600; }
+.overview-stats dd { font-size: 36px; font-weight: 600; line-height: 1.2; margin: 6px 0; font-variant-numeric: tabular-nums; }
+.overview-stats .stat-help { font-size: 18px; margin: 0; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .overview-row { color: var(--text); text-decoration: none; }
 .overview-row > .badge { flex: none; white-space: nowrap; }
 .overview-row:hover { background: var(--raised); }

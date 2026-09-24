@@ -249,3 +249,9 @@ Appearance and Security, matching the settings tabs. The 11px list headings and
 calendar labels moved to 12px. History drops the "How timings and retention
 work" disclosure, whose points were repeated elsewhere on the page, for one
 line defining the timing columns and stating that payloads are not kept.
+
+Dashboard stats (2026-09-24): the user reads the console on a 14" 1440p laptop
+and asked for 18px as the minimum on the stat cards. Each card now has an 18px
+label, a 36px number and an 18px line with live detail: enabled and disabled
+counts, "of N found" for tools agents can use, and the names of connectors that
+need attention (or "All connected").

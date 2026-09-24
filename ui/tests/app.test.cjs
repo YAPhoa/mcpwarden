@@ -137,6 +137,9 @@ test('default route opens the dashboard with real workspace totals', async () =>
   assert.equal(ui.node('overview-upstreams').textContent, 2);
   assert.equal(ui.node('overview-tools').textContent, 1);
   assert.equal(ui.node('overview-attention').textContent, 1);
+  assert.equal(ui.node('overview-upstreams-help').textContent, 'All enabled');
+  assert.equal(ui.node('overview-tools-help').textContent, 'of 1 found');
+  assert.equal(ui.node('overview-attention-help').textContent, 'offline');
 });
 test('connector tools paginate, search and filter using tool visibility and policy', async () => {
   const list = Array.from({length:71}, (_,i) => ({name:`docs__tool_${String(i).padStart(2,'0')}`,upstream:'docs',description:'Fixture',allowed:true,healthy:true,visible:i%2===0}));
