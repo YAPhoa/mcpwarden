@@ -15,6 +15,10 @@ for tools, and the names of connectors needing attention. That card is amber
 when something needs attention and green when all are connected. A console-wide
 18px minimum was tried and reverted after the user's review; the rest of the
 console keeps the 12–16px scale. Stylesheet version: `20260924-type-scale-4`.
+The user then set 15px as the console baseline: text that was 12–14px is 15px,
+except 13–14px uppercase captions and count pills. Stylesheet version:
+`20260924-base-15-1`. UI tests pass (61). Chromium checks covered every route at
+1440px and 390px plus the main dialogs, with no page errors or overflow.
 
 UI unit tests pass (61). Chromium checks against a synthetic API covered every
 workspace and settings route at 1440px and 390px, plus the account menu in both

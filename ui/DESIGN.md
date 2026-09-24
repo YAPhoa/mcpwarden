@@ -256,3 +256,10 @@ label, a 36px number and an 18px line with live detail: enabled and disabled
 counts, "of N found" for tools agents can use, and the names of connectors that
 need attention (or "All connected"). That card turns amber when a connector needs
 attention and green when all are connected.
+
+Minimum 15px (2026-09-24): after trying and reverting an 18px minimum, the user
+chose 15px as the baseline. Help text, metadata, labels, badges, menus and
+controls that were 12–14px are now 15px. Only uppercase captions, the tool-count
+tab pill, upstream tags and the "This session" tag are 13px, and view counts
+14px. h3 is 16px so headings stay above body text. The dashboard stat cards
+keep their 18px labels and detail lines.
