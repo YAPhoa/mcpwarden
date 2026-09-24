@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-09-24 — PR #5 merge and deployment
+
+Merged [PR #5](https://github.com/YAPhoa/mcpwarden/pull/5) at `3eff764` and
+deleted its feature branch. The source tree exactly matches reviewed head
+`325c97e`. The owner console is shipped at `/vault`, `/vault/credentials` and
+`/vault/settings`, with live `owner_security` still disabled. Ordinary tool
+execution continues under legacy server-managed credential custody.
+
+The [PR CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36003229000) and
+[post-merge CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36004503878)
+passed all mandatory jobs: Go build/vet, PostgreSQL-enabled race tests, all three
+browser engines, container smoke and security checks. Independent Chromium
+regressions against the real gateway and a disposable PostgreSQL database also
+passed for renewal review, cancellation and late credential-save outcomes.
+CodeQL remained skipped for this private repository.
+
+Rebuilt and redeployed both services after a consistent stopped-gateway backup
+at `/tmp/mcpwarden-predeploy-20260924-vault-console-1/`; keys are separate at
+`/tmp/mcpwarden-predeploy-keys-20260924-vault-console-1/`. Backup directories are
+mode 0700 and files mode 0600; recorded hashes remain valid. Gateway image
+`290503294d1a` and UI image `b1942eef4112` run in new containers with zero restarts.
+Health, API authorization/access/history boundaries, no-store, vault module
+MIME/CSP, source asset bytes and all 12 branding/favicon assets passed.
+
+The encrypted catalog changed during restart and live activity. A protected
+in-memory comparison verified unchanged accounts, connector definitions,
+credential headers/OAuth grants, visibility, deletion records and tool
+definitions. All existing access records, their credential verifiers and fixed
+metadata remain intact; usage timestamps advanced and two access records were
+added. Discovery timestamps refreshed. The audit log retained every byte of the
+backup history and appended new records. Deployment keys and mounts were
+preserved. No decrypted values were printed or written to disk.
+
 ## 2026-09-24 — PR #5 review fixes
 
 Fixed three owner-console findings from review. Each operation now captures its
