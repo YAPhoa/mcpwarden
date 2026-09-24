@@ -1,5 +1,60 @@
 # Progress
 
+## 2026-09-25 — PR #8 follow-up review, merge and deployment
+
+Reviewed head `5e61ae5` and confirmed both earlier findings are fixed. SSE events
+now have a shared, explicit 16 MiB wrapper/SDK budget, including unterminated
+lines and comments. Stdio tracking retires cancelled calls even when the peer
+never replies. Independent reproductions pass, including an open oversized SSE
+stream and eight cancelled calls followed by a successful ping with no retained
+IDs. The SSE reproduction uses the same limit as the production manager.
+
+Local `go build ./...`, `go vet ./...` and the full
+`go test -race -count=1 -timeout=10m ./...` passed with the isolated PostgreSQL
+fixture enabled, including the review reproductions. All mandatory
+[PR CI checks](https://github.com/YAPhoa/mcpwarden/actions/runs/36016092511)
+passed: Go/PostgreSQL, Chromium, Firefox, WebKit, security/workflow checks,
+container smoke and required checks. CodeQL remained skipped for the private
+repository. No blocking review findings remain.
+
+Merged [PR #8](https://github.com/YAPhoa/mcpwarden/pull/8) as `f50572d` and deleted
+`feature/kaggle-string-content`. The merged gateway source matches the reviewed
+head, and the UI matches approved PR #9. Built and deployed gateway image
+`5d30df8c88b3` and UI image `16de626c25b0` after a consistent protected backup at
+`/tmp/mcpwarden-predeploy-20260925-pr8-content-1/`; keys are separate at
+`/tmp/mcpwarden-predeploy-keys-20260925-pr8-content-1/`.
+
+Live health, exact source assets, branding/MIME/CSP, authorization/access/history
+boundaries and no-store checks passed. Both services have zero restarts. Protected
+comparison confirmed unchanged accounts, credentials, access records, discovery,
+visibility and audit history; backup hashes, deployment keys and volume mounts
+were preserved. Live `owner_security` remains disabled. Temporary previews are
+stopped, and no open pull requests remain.
+
+## 2026-09-25 — PR #9 merge and UI deployment
+
+The user approved the 15px console baseline in the preview. Merged
+[PR #9](https://github.com/YAPhoa/mcpwarden/pull/9) as `8fa3b76` and deleted
+`feature/ui-type-scale`. The merged runtime source matches reviewed head
+`3550bf5`; main also retains its earlier deployment notes.
+
+Local `go build ./...`, `go vet ./...` and the complete
+`go test -race -count=1 -timeout=10m ./...` passed with the isolated PostgreSQL
+fixture enabled. UI unit tests and the original-spec/vendor integrity check
+passed. All mandatory [PR CI checks](https://github.com/YAPhoa/mcpwarden/actions/runs/36021999101)
+passed, including Chromium, Firefox, WebKit, Go/PostgreSQL, security and container
+smoke. CodeQL remained skipped for the private repository.
+
+Deployed UI image `16de626c25b0` to port 8788 after a consistent protected backup
+at `/tmp/mcpwarden-predeploy-20260924-pr9-type-scale-1/`, with keys separate at
+`/tmp/mcpwarden-predeploy-keys-20260924-pr9-type-scale-1/`. Gateway image
+`290503294d1a` and its container were retained. Live health, source assets,
+branding/MIME/CSP, authorization/access/history and no-store checks passed;
+both services have zero restarts. Protected comparison confirmed unchanged
+accounts, access records, credentials, discovery, visibility and audit history.
+Backup hashes, deployment keys and mounts were preserved. Live `owner_security`
+remains disabled. The temporary UI preview on port 8792 was stopped.
+
 ## 2026-09-24 — Consistent console type scale
 
 Aligned text sizes to one scale (12/13/15/16/18px plus headings). The sidebar
