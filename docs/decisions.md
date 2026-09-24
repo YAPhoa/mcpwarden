@@ -310,7 +310,12 @@ every operation's submit control, so a cancelled operation never leaves one
 disabled. Unlock, renewal and credential entry also run as an operation that
 their Cancel control ends: closing the dialog in any way, or cancelling the
 unlock form, stops the flow before key release, approval or upload. After an
-activation or upload is sent, cancellation no longer discards its outcome.
+activation or upload is sent, cancellation no longer discards its outcome. A
+cancelled credential save reports that outcome on the page and leaves the dialog
+alone, because it may already hold a newer form. Only the operation that still
+owns the dialog closes it, clears it or shows field errors. A refresh clears only
+the page error it set itself, so an action's error survives the reload it
+triggers.
 
 Browser lock is separate from windows. Sign-out, account changes, leaving
 `/vault`, page hide and 10 minutes without input terminate the worker, clear

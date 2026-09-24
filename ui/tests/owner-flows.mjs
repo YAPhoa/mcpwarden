@@ -549,6 +549,50 @@ try {
   const replaced = (await owner2('GET', '/api/vault/wrappers')).data.credentials;
   assert.equal(replaced.length, 1); assert.equal(replaced[0].credential_id, credentialID); assert.equal(replaced[0].epoch, '2');
 
+  await step('a cancelled save finishing late leaves a newer credential form alone');
+  // Each save reaches the gateway, then its response is held while the owner
+  // cancels and starts typing into a new form. The late outcome is reported
+  // without closing, clearing or marking that form.
+  for (const outcome of ['success', 'failure']) {
+    await page.click('#vault-credentials button[data-connector-id]');
+    await page.locator('#vault-credential-dialog[open]').waitFor();
+    let releaseSave, sawSave;
+    const heldSave = new Promise(done => { releaseSave = done; }), saveSeen = new Promise(done => { sawSave = done; });
+    await page.route('**/api/vault/credentials/*', async route => {
+      if (route.request().method() !== 'PUT') return route.fallback();
+      let postData = route.request().postData();
+      // A stale expected version makes the gateway itself refuse the save.
+      if (outcome === 'failure') { const body = JSON.parse(postData); body.expected.revision = '999'; postData = JSON.stringify(body); }
+      const response = await route.fetch({postData});
+      sawSave(response.status()); await heldSave; await route.fulfill({response}).catch(() => {});
+    }, {times: 1});
+    await page.fill('#vault-header-0', SECRETS[0]);
+    await page.click('#vault-credential-save');
+    const status = await saveSeen;
+    assert.equal(status, outcome === 'success' ? 200 : 409, `held save returned ${status}`);
+    await page.click('#vault-credential-cancel');
+    await page.locator('#vault-credential-dialog').waitFor({state: 'hidden'});
+    await page.click('#vault-credentials button[data-connector-id]');
+    await page.locator('#vault-credential-dialog[open]').waitFor();
+    await page.fill('#vault-header-0', 'typed after cancel');
+    // Either outcome refreshes the page; the checks run after that reload.
+    const refreshed = page.waitForResponse(r => r.request().method() === 'GET' && new URL(r.url()).pathname === '/api/access');
+    releaseSave();
+    if (outcome === 'success') await waitText(page, '#vault-notice', 'saved as version 3');
+    else await waitText(page, '#vault-error', 'did not confirm an earlier save');
+    await refreshed; await sleep(500);
+    if (outcome === 'failure') assert((await page.textContent('#vault-error')).includes('did not confirm an earlier save'), 'the refresh erased the late failure');
+    assert(await page.locator('#vault-credential-dialog[open]').isVisible(), `a late ${outcome} closed the newer form`);
+    assert.equal(await page.inputValue('#vault-header-0'), 'typed after cancel', `a late ${outcome} cleared the newer form`);
+    assert.equal(await page.textContent('#vault-credential-error'), '', `a late ${outcome} marked the newer form`);
+    assert.equal(await page.isDisabled('#vault-credential-save'), false, `a late ${outcome} left the newer form busy`);
+    await page.click('#vault-credential-cancel');
+    await page.locator('#vault-credential-dialog').waitFor({state: 'hidden'});
+  }
+  await waitText(page, '#vault-credentials', 'Encrypted in vault · version 3');
+  const afterLate = (await owner2('GET', '/api/vault/wrappers')).data.credentials;
+  assert.equal(afterLate.length, 1); assert.equal(afterLate[0].credential_id, credentialID); assert.equal(afterLate[0].epoch, '3');
+
   await step('change the vault passphrase');
   await openVault(page, 'settings');
   await page.fill('#vault-change-passphrase', NEW_PASSPHRASE);

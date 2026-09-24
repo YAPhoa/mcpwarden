@@ -21,13 +21,26 @@ cancelled unlock terminates its worker and leaves the vault locked, and a
 cancelled credential save uploads nothing. Once an activation or credential
 upload has been sent, its outcome is still reported.
 
-The owner flows now have 30 steps. The new ones hold the page's Web Crypto
+A third review found that a credential save cancelled after its upload was sent
+still closed the shared dialog when its response arrived, discarding a newer
+form the owner had opened and started typing into. A late outcome is now reported
+on the page only, and only the operation that still owns the dialog closes it,
+clears it or shows field errors. While testing the late failure, its page error
+disappeared as soon as the reload it queued succeeded; the same happened to other
+page errors that queue a reload, such as a vanished request or an existing vault
+found during setup. A refresh now clears only its own "Could not refresh" error,
+and a new notice replaces an earlier error.
+
+The owner flows now have 31 steps. The new ones hold the page's Web Crypto
 digests or the wrapper read to cover leaving during a recovery unlock, retrying
 an interrupted passphrase unlock, cancelling setup mid-way, and a tool
 definition that changes while the renewal dialog is open. Each new check was
 confirmed to fail when its fix is reverted, including renewal Cancel, renewal
-Escape and unlock Cancel with the request held. A new unit test covers the reviewed
-scope comparison.
+Escape and unlock Cancel with the request held. The newest step holds a credential
+save's response after the gateway accepted or refused it, cancels, opens a new
+form and types into it, then releases the response: the form stays open,
+unchanged and usable, and the outcome is reported on the page. A new unit test
+covers the reviewed scope comparison.
 
 Two stalled runs, the first CI stall and one of four parallel local runs, both
 stopped at the first `page.route` on the owner's page, with no request issued and
@@ -37,7 +50,9 @@ interception once when each page is created, before any worker exists.
 
 Local validation: `gofmt`, `go build ./...`, `go vet ./...` and
 `go test -race -count=1 ./...` with the PostgreSQL fixture passed, as did 55 UI
-unit tests, the integrity check (18 files) and all 30 Chromium flow steps.
+unit tests, the integrity check (18 files) and all 31 Chromium flow steps. The
+late-save step failed as expected with either fix reverted: a late success
+closed the newer form, and the refresh erased the late failure.
 Firefox and WebKit run in CI.
 
 ## 2026-09-24 — Vault and access-window console (roadmap step 2)

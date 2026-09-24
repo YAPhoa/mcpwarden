@@ -54,8 +54,11 @@ function setError(id, message, input) {
   if (input) { if (message) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid'); }
   if (message && input) input.focus();
 }
-function notice(message) { $('vault-notice').textContent = message || ''; $('vault-notice').hidden = !message; }
-function pageError(message) { $('vault-error').textContent = message || ''; }
+// A new notice replaces an earlier page error. A refresh clears only the error
+// it reported itself, so an action's error outlives the reload it queues.
+let refreshError = false;
+function notice(message) { $('vault-notice').textContent = message || ''; $('vault-notice').hidden = !message; if (message) pageError(''); }
+function pageError(message, refresh = false) { $('vault-error').textContent = message || ''; refreshError = refresh && Boolean(message); }
 function unlocked() { return state.unlocked && vault.active; }
 function ownerCaller(id) { return state.accessItems.find(item => item.id === id); }
 function handleFor(publicID) { return publicHandle(publicID, state.accessItems.map(item => item.public_id).filter(Boolean)); }
@@ -192,12 +195,12 @@ async function load() {
     Object.assign(state, {vaultState, bootID: vaultState.gateway_boot_id, wrappers: wrappers.data, requests: requests.data || [], windows: leases.data || [],
       connections: connections || [], providers: providers || [], tools: tools || [], accessItems: access?.items || [], phase: 'ready', loaded: true});
     if (!vaultState.configured && state.unlocked) lockBrowser();
-    pageError('');
+    if (refreshError) pageError('');
   } catch (error) {
     if (error.code === 'discarded') return;
     if (error.code === 'sign_in_required') { authLost(); return; }
     state.phase = error.code === 'disabled' ? 'disabled' : error.code === 'secure_transport_required' ? 'insecure' : ['locked', 'unavailable'].includes(error.code) ? 'unavailable' : state.loaded ? 'ready' : 'failed';
-    if (state.phase === 'ready' || state.phase === 'failed') pageError(`Could not refresh. ${error.message}`);
+    if (state.phase === 'ready' || state.phase === 'failed') pageError(`Could not refresh. ${error.message}`, true);
   } finally {
     if (run === loadRun) { state.loading = false; render(); }
   }
@@ -729,15 +732,16 @@ $('vault-credential-form').addEventListener('submit', async event => {
     op.check();
     const record = {...context, revision: '1', destination, wrapped_key: sealed.wrapped_key, envelope: sealed.envelope};
     // Once the upload is sent it may land, so closing the dialog no longer
-    // discards the outcome; only a lock does.
+    // discards the outcome; only a lock does. A cancelled save still reports
+    // it, but the dialog may now hold a newer form, which it leaves alone.
     await client.request('PUT', `/api/vault/credentials/${context.credential_id}`, {body: JSON.stringify({expected: stored ? {epoch: stored.epoch, revision: stored.revision} : null, record})});
     guard(generation);
-    $('vault-credential-dialog').close();
+    if (op.alive) { endOperation(op, 'vault-credential-save'); $('vault-credential-dialog').close(); }
     notice(`${connection.name}: credential encrypted and saved as version ${context.epoch}. Pending requests and access windows for your account were ended.`);
     await load();
   } catch (error) {
-    if (error.code === 'encrypt') setError('vault-credential-error', error.message);
-    else if (error.code === 'conflict') { failed(error, 'vault-credential-error'); }
+    if (!op.alive) failed(error.code === 'discarded' ? error : new OwnerError(error.status, error.code, `The gateway did not confirm an earlier save for ${connection.name}. ${error.message || errorMessage('')}`));
+    else if (error.code === 'encrypt') setError('vault-credential-error', error.message);
     else failed(error, 'vault-credential-error');
   } finally { endOperation(op, 'vault-credential-save'); }
 });

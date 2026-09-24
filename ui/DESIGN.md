@@ -189,7 +189,9 @@ request and window. If the new request's scope differs from the one shown, for
 example after a tool definition changed, the dialog shows the new scope and
 starts nothing until the owner allows it again. Cancel or Escape while a
 renewal or unlock is pending stops it; nothing is approved, released or unlocked
-afterwards. "Lock browser" only terminates this browser's vault worker;
+afterwards. A credential save cancelled after its upload was sent reports the
+result as a page notice or error, and never closes or clears a credential form
+opened after it. "Lock browser" only terminates this browser's vault worker;
 "Stop access" ends one window; "Lock all execution" ends every window after a
 confirmation dialog. Browser lock also happens on sign-out, account change,
 leaving `/vault`, page hide and 10 minutes without input. Each lock discards any
