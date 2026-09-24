@@ -223,6 +223,167 @@ func TestRefreshImmediatelyAfterEnable(t *testing.T) {
 	}
 }
 
+// fakeToolServer serves echo tools over Streamable HTTP but answers
+// tools/call for any name in raw with that literal result, as JSON or SSE.
+func fakeToolServer(t *testing.T, sse bool, raw map[string]string) *httptest.Server {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "1"}, nil)
+	names := []string{"echo"}
+	for name := range raw {
+		names = append(names, name)
+	}
+	for _, name := range names {
+		server.AddTool(&mcp.Tool{Name: name, InputSchema: json.RawMessage(`{"type":"object"}`)}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+		})
+	}
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			r.Body.Close()
+			r.Body = io.NopCloser(strings.NewReader(string(body)))
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+				Params struct {
+					Name string `json:"name"`
+				} `json:"params"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if result, ok := raw[req.Params.Name]; ok && req.Method == "tools/call" {
+				msg := `{"jsonrpc":"2.0","id":` + string(req.ID) + `,"result":` + result + `}`
+				if sse {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "event: message\r\ndata: "+msg+"\r\n\r\n")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, msg)
+				}
+				return
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(remote.Close)
+	return remote
+}
+
+func startRemote(t *testing.T, url string) (*Manager, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	m := New([]config.Upstream{{Name: "remote", Transport: "http", URL: url, Timeout: time.Second}}, slog.New(slog.NewTextHandler(io.Discard, nil)), func(string, []*mcp.Tool, bool) {})
+	m.Start(ctx)
+	t.Cleanup(m.Close)
+	waitFor(t, 5*time.Second, m.Ready)
+	return m, ctx
+}
+
+func TestNonArrayToolContentIsWrapped(t *testing.T) {
+	for _, sse := range []bool{false, true} {
+		remote := fakeToolServer(t, sse, map[string]string{
+			"authorize": `{"content":"User is already authorized."}`,
+			"single":    `{"content":{"type":"text","text":"one"},"isError":true}`,
+		})
+		m, ctx := startRemote(t, remote.URL)
+		for name, want := range map[string]string{"authorize": "User is already authorized.", "single": "one"} {
+			result, err := m.Call(ctx, "remote", name, map[string]any{})
+			if err != nil {
+				t.Fatalf("sse=%v %s: %v", sse, name, err)
+			}
+			if len(result.Content) != 1 || result.Content[0].(*mcp.TextContent).Text != want {
+				t.Fatalf("sse=%v %s: content %#v", sse, name, result.Content)
+			}
+			if result.IsError != (name == "single") {
+				t.Fatalf("sse=%v %s: isError %v", sse, name, result.IsError)
+			}
+		}
+		if result, err := m.Call(ctx, "remote", "echo", map[string]any{}); err != nil || result.Content[0].(*mcp.TextContent).Text != "ok" {
+			t.Fatalf("sse=%v normal result changed: %v", sse, err)
+		}
+	}
+}
+
+func TestNormalizeToolResultLeavesOtherShapes(t *testing.T) {
+	for _, msg := range []string{
+		`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"x"}]}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"content":42}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{}}`,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"boom"}}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"content":"x"}}`,
+		`not json`,
+	} {
+		if out, changed := normalizeToolResult([]byte(msg)); changed || string(out) != msg {
+			t.Fatalf("rewrote %s to %s", msg, out)
+		}
+	}
+	out, changed := normalizeToolResult([]byte(`{"jsonrpc":"2.0","id":"a","result":{"content":"hi \u003c","structuredContent":{"n":1.50}}}`))
+	if !changed {
+		t.Fatal("string content not rewritten")
+	}
+	var got struct {
+		ID     string `json:"id"`
+		Result struct {
+			Content    []map[string]string `json:"content"`
+			Structured json.RawMessage     `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil || got.ID != "a" || len(got.Result.Content) != 1 || got.Result.Content[0]["type"] != "text" || got.Result.Content[0]["text"] != "hi <" || string(got.Result.Structured) != `{"n":1.50}` {
+		t.Fatalf("unexpected rewrite %s", out)
+	}
+}
+
+// TestStdioNonArrayToolContentIsWrapped drives the stdio connection wrapper
+// with a hand-written peer, because the SDK server cannot emit this shape.
+func TestStdioNonArrayToolContentIsWrapped(t *testing.T) {
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	go func() {
+		dec := json.NewDecoder(serverR)
+		for {
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			if dec.Decode(&req) != nil {
+				serverW.Close()
+				return
+			}
+			var result string
+			switch req.Method {
+			case "initialize":
+				result = `{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"raw","version":"1"}}`
+			case "tools/call":
+				result = `{"content":"User is already authorized."}`
+			case "ping":
+				result = `{"content":"not a tool result"}`
+			default:
+				if len(req.ID) > 0 {
+					_, _ = io.WriteString(serverW, `{"jsonrpc":"2.0","id":`+string(req.ID)+`,"error":{"code":-32601,"message":"method not found"}}`+"\n")
+				}
+				continue
+			}
+			_, _ = io.WriteString(serverW, `{"jsonrpc":"2.0","id":`+string(req.ID)+`,"result":`+result+"}\n")
+		}
+	}()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := client.Connect(ctx, compatTransport{&mcp.IOTransport{Reader: clientR, Writer: clientW}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "authorize", Arguments: map[string]any{}})
+	if err != nil || len(result.Content) != 1 || result.Content[0].(*mcp.TextContent).Text != "User is already authorized." {
+		t.Fatalf("call: %v %#v", err, result)
+	}
+	if err := session.Ping(ctx, nil); err != nil {
+		t.Fatalf("non tools/call response affected: %v", err)
+	}
+}
+
 func TestMalformedToolResponseDoesNotDisconnect(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "malformed", Version: "1"}, nil)
 	for _, name := range []string{"bad", "echo"} {
@@ -246,7 +407,7 @@ func TestMalformedToolResponseDoesNotDisconnect(t *testing.T) {
 			_ = json.Unmarshal(body, &req)
 			if req.Method == "tools/call" && req.Params.Name == "bad" {
 				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"content": "User is already authorized."}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"content": 42}})
 				return
 			}
 		}

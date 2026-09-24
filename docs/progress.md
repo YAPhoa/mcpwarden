@@ -996,3 +996,20 @@ the fixture. Chromium was checked against a synthetic API at 1440px dark and
 light and at 390px dark: bulk menu keyboard navigation and Escape, confirmation,
 pending switch, expanded row, empty search and the directory view, with no
 console errors and no horizontal overflow at 390px. Not redeployed.
+
+## 2026-09-24 — Kaggle tool-call triage and string content repair
+
+Triaged the Kaggle upstream issues by calling Kaggle's MCP server directly
+without the gateway. `search_datasets` ignores `pageSize` there too (20 results
+for 3 or 5), and `search_competition_submissions` returns `{}` directly as well.
+The same "Permission ... was denied" errors come back directly. The gateway
+forwards arguments as raw bytes and returns upstream results and error text
+unchanged, so those items are upstream behaviour. The generic "An error
+occurred invoking ..." text is not produced by the gateway or the SDK.
+
+`tools/call` results whose `content` is a bare string or single object are now
+wrapped into the array form before SDK decoding (see decisions.md). New tests
+cover Streamable HTTP JSON and SSE bodies, stdio, and unchanged shapes; the new
+HTTP and stdio tests fail without the change. `go build ./...`, `go vet ./...`
+and `go test -race ./...` passed locally; PostgreSQL-backed tests skipped
+without the fixture. Not redeployed.
