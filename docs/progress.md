@@ -4,7 +4,7 @@
 
 Aligned text sizes to one scale (12/13/15/16/18px plus headings). The sidebar
 account launcher and menu match the navigation, the menu item "My account" is now
-"Account" to match the settings tabs, settings and connection tabs, theme options
+"My Account" (the user's choice), settings and connection tabs, theme options
 and History filter selects use 15px, card headings 18px, and the last 11px text
 is 12px. History replaces its timings and retention disclosure with one help
 line. Stylesheet version: `20260924-type-scale-1`.
