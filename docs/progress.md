@@ -13,11 +13,20 @@ digests, constraints, duration and call limit with what the dialog showed. If
 any of them changed, it shows the new request and releases no key until the
 owner allows it again.
 
+A follow-up review found that Cancel did not stop a pending renewal or unlock.
+Flows with a Cancel control now run as an operation that Cancel, closing the
+dialog (including Escape), a browser lock or sign-out ends; each continuation
+rechecks it after every await. A cancelled renewal sends no approval or key, a
+cancelled unlock terminates its worker and leaves the vault locked, and a
+cancelled credential save uploads nothing. Once an activation or credential
+upload has been sent, its outcome is still reported.
+
 The owner flows now have 30 steps. The new ones hold the page's Web Crypto
 digests or the wrapper read to cover leaving during a recovery unlock, retrying
 an interrupted passphrase unlock, cancelling setup mid-way, and a tool
 definition that changes while the renewal dialog is open. Each new check was
-confirmed to fail when its fix is reverted. A new unit test covers the reviewed
+confirmed to fail when its fix is reverted, including renewal Cancel, renewal
+Escape and unlock Cancel with the request held. A new unit test covers the reviewed
 scope comparison.
 
 Two stalled runs, the first CI stall and one of four parallel local runs, both

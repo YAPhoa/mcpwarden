@@ -307,7 +307,10 @@ Every lock bumps a generation counter, and responses from an older generation
 are dropped. Each operation captures the generation and its vault worker before
 its first await and publishes results only after checking it. Locking restores
 every operation's submit control, so a cancelled operation never leaves one
-disabled.
+disabled. Unlock, renewal and credential entry also run as an operation that
+their Cancel control ends: closing the dialog in any way, or cancelling the
+unlock form, stops the flow before key release, approval or upload. After an
+activation or upload is sent, cancellation no longer discards its outcome.
 
 Browser lock is separate from windows. Sign-out, account changes, leaving
 `/vault`, page hide and 10 minutes without input terminate the worker, clear

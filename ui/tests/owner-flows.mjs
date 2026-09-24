@@ -456,7 +456,7 @@ try {
   await waitWindow(page, late.id, owner2);
   for (const l of (await owner2('GET', '/api/leases')).data) assert.equal((await owner2('DELETE', `/api/leases/${l.lease_id}`)).status, 204);
 
-  await step('renewal asks for a new review when a tool definition changed');
+  await step('renewal asks for a new review when a tool definition changed, and Cancel stops it');
   const base = await ask(agent);
   await reload(page);
   await unlock(page, PASSPHRASE);
@@ -482,7 +482,34 @@ try {
   assert.equal(releases(), releasesBefore, 'renewal released a key for a definition the owner had not reviewed');
   assert(!(await owner2('GET', '/api/leases')).data.some(l => l.request_id === changed.id), 'renewal started a window for an unreviewed definition');
   await page.click('#vault-renew-submit');
-  await waitWindow(page, changed.id, owner2);
+  const changedWindow = await waitWindow(page, changed.id, owner2);
+
+  // Cancel and Escape stop a renewal whose request is still in flight.
+  for (const dismiss of ['cancel', 'escape']) {
+    await page.click(`[data-window-card="${changedWindow.lease_id}"] button[data-action="renew"]`);
+    await page.locator('#vault-renew-dialog[open]').waitFor();
+    let releaseRenewal, sawRenewal;
+    const heldRenewal = new Promise(done => { releaseRenewal = done; }), renewalSeen = new Promise(done => { sawRenewal = done; });
+    await page.route('**/api/access-requests', async route => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      sawRenewal(); await heldRenewal; await route.continue().catch(() => {});
+    }, {times: 1});
+    const leasesBefore = (await owner2('GET', '/api/leases')).data.length;
+    await page.click('#vault-renew-submit');
+    await renewalSeen;
+    if (dismiss === 'cancel') await page.click('#vault-renew-cancel'); else await page.keyboard.press('Escape');
+    await page.locator('#vault-renew-dialog').waitFor({state: 'hidden'});
+    const releasesAtCancel = releases();
+    releaseRenewal();
+    await sleep(1500);
+    assert.equal(releases(), releasesAtCancel, `renewal released a key after ${dismiss}`);
+    assert.equal((await owner2('GET', '/api/leases')).data.length, leasesBefore, `renewal started a window after ${dismiss}`);
+    await page.click(`[data-window-card="${changedWindow.lease_id}"] button[data-action="renew"]`);
+    await page.locator('#vault-renew-dialog[open]').waitFor();
+    assert.equal(await page.isDisabled('#vault-renew-submit'), false, `renewal stayed busy after ${dismiss}`);
+    await page.click('#vault-renew-cancel');
+    await page.locator('#vault-renew-dialog').waitFor({state: 'hidden'});
+  }
   for (const l of (await owner2('GET', '/api/leases')).data) assert.equal((await owner2('DELETE', `/api/leases/${l.lease_id}`)).status, 204);
   await page.click('#vault-lock');
   await waitText(page, '#vault-status-title', 'Vault locked');
@@ -566,7 +593,7 @@ try {
   await page.click('#vault-lock');
   await waitText(page, '#vault-status-title', 'Vault locked');
 
-  await step('an interrupted passphrase unlock can be retried without reloading');
+  await step('interrupted and cancelled passphrase unlocks can be retried without reloading');
   let releaseWrappers;
   const heldWrappers = new Promise(done => { releaseWrappers = done; });
   await page.route('**/api/vault/wrappers', async route => { await heldWrappers; await route.continue().catch(() => {}); }, {times: 1});
@@ -584,6 +611,23 @@ try {
   await waitText(page, '#vault-status-title', 'Vault locked');
   await page.click('#vault-unlock-open');
   assert.equal(await page.textContent('#vault-unlock-submit'), 'Unlock');
+  assert.equal(await page.isDisabled('#vault-unlock-submit'), false);
+  // Cancel ends a pending unlock: a late wrapper response opens nothing.
+  let releaseCancelled;
+  const heldCancelled = new Promise(done => { releaseCancelled = done; });
+  await page.route('**/api/vault/wrappers', async route => { await heldCancelled; await route.continue().catch(() => {}); }, {times: 1});
+  await page.check('[name="vault-unlock-method"][value="passphrase"]');
+  await page.fill('#vault-unlock-secret', NEW_PASSPHRASE);
+  const cancelledRead = page.waitForRequest(r => r.url().endsWith('/api/vault/wrappers'));
+  await page.click('#vault-unlock-submit');
+  await cancelledRead;
+  await page.click('#vault-unlock-cancel');
+  assert(await page.locator('#vault-unlock').isHidden());
+  releaseCancelled();
+  await sleep(1500);
+  await waitText(page, '#vault-status-title', 'Vault locked');
+  assert(!(await page.textContent('#vault-notice')).includes('Vault unlocked'), 'a cancelled unlock opened the vault');
+  await page.click('#vault-unlock-open');
   assert.equal(await page.isDisabled('#vault-unlock-submit'), false);
   await unlockWith(page, NEW_PASSPHRASE);
   await waitText(page, '#vault-notice', 'Vault unlocked in this browser');
