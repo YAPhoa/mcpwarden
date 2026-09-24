@@ -238,3 +238,28 @@ Site-wide type (2026-09-24): the user asked for the same text-size increase acro
 the whole console. Every size outside the tool panel moved up one step (base 15px;
 11→12, 12→13, 13→14, 14→15px; larger headings unchanged). Dashboard status badges
 no longer wrap their arrow onto a second line on narrow screens.
+
+Type scale (2026-09-24): the main text sizes are as follows. 12px is
+for uppercase eyebrows, list headings and small counts; 13px for help text, row
+metadata, badges and field labels; 15px for body text, navigation, menu items,
+tabs and form values; 16px for tool and history rows; 18px for card and section
+headings. The sidebar account launcher and its menu now match the navigation
+(name and items 15px, secondary lines 13px). The menu items read Account,
+Appearance and Security, matching the settings tabs. The 11px list headings and
+calendar labels moved to 12px. History drops the "How timings and retention
+work" disclosure, whose points were repeated elsewhere on the page, for one
+line defining the timing columns and stating that payloads are not kept.
+
+Dashboard stats (2026-09-24): the user reads the console on a 14" 1440p laptop
+and asked for 18px as the minimum on the stat cards. Each card now has an 18px
+label, a 36px number and an 18px line with live detail: enabled and disabled
+counts, "of N found" for tools agents can use, and the names of connectors that
+need attention (or "All connected"). That card turns amber when a connector needs
+attention and green when all are connected.
+
+Minimum 15px (2026-09-24): after trying and reverting an 18px minimum, the user
+chose 15px as the baseline. Help text, metadata, labels, badges, menus and
+controls that were 12–14px are now 15px. Only uppercase captions, the tool-count
+tab pill, upstream tags and the "This session" tag are 13px, and view counts
+14px. h3 is 16px so headings stay above body text. The dashboard stat cards
+keep their 18px labels and detail lines.

@@ -276,9 +276,16 @@ function renderDetails() {
     ${entry ? `<section class="detail-section"><h3>Remove connection</h3><p class="help">Remove this upstream and its saved headers from your gateway identity.</p><button id="remove-upstream" class="danger" type="button" ${locked ? 'disabled' : ''}>Remove upstream</button></section>` : ''}`;
 }
 function renderDashboard() {
+  const disabled = providers.filter(p => p.enabled === false).length;
+  const attention = providers.filter(p => p.enabled !== false && (!p.healthy || refreshState.get(p.name)?.failed)).map(p => p.name);
   $('overview-upstreams').textContent = loaded ? providers.length : '—';
+  $('overview-upstreams-help').textContent = !loaded ? 'Not loaded' : !providers.length ? 'None added yet' : disabled ? `${providers.length - disabled} enabled · ${disabled} disabled` : 'All enabled';
   $('overview-tools').textContent = loaded ? tools.filter(isDiscoverable).length : '—';
-  $('overview-attention').textContent = loaded ? providers.filter(p => p.enabled !== false && (!p.healthy || refreshState.get(p.name)?.failed)).length : '—';
+  $('overview-tools-help').textContent = loaded ? `of ${tools.length} found` : 'Not loaded';
+  $('overview-attention').textContent = loaded ? attention.length : '—';
+  $('overview-attention-help').textContent = !loaded ? 'Not loaded' : attention.length ? attention.join(', ') : 'All connected';
+  $('overview-attention-help').title = attention.join(', ');
+  const attentionCard = $('overview-attention').parentElement; if (attentionCard) attentionCard.dataset.tone = !loaded ? '' : attention.length ? 'warning' : 'success';
   $('dashboard-add').disabled = !access || !managedAvailable || mutating;
   const ordered = [...providers].sort((a, b) => Number(a.healthy) - Number(b.healthy) || a.name.localeCompare(b.name));
   $('overview-connections').innerHTML = ordered.length ? ordered.slice(0, 5).map(p => {

@@ -1,5 +1,30 @@
 # Progress
 
+## 2026-09-24 — Consistent console type scale
+
+Aligned text sizes to one scale (12/13/15/16/18px plus headings). The sidebar
+account launcher and menu match the navigation, the menu item "My account" is now
+"Account" to match the settings tabs, settings and connection tabs, theme options
+and History filter selects use 15px, card headings 18px, and the last 11px text
+is 12px. History replaces its timings and retention disclosure with one help
+line. Stylesheet version: `20260924-type-scale-1`.
+
+Follow-up: the dashboard stat cards use 18px labels and detail lines with 36px
+numbers. The detail lines are live: enabled and disabled counts, "of N found"
+for tools, and the names of connectors needing attention. That card is amber
+when something needs attention and green when all are connected. A console-wide
+18px minimum was tried and reverted after the user's review; the rest of the
+console keeps the 12–16px scale. Stylesheet version: `20260924-type-scale-4`.
+The user then set 15px as the console baseline: text that was 12–14px is 15px,
+except 13–14px uppercase captions and count pills. Stylesheet version:
+`20260924-base-15-1`. UI tests pass (61). Chromium checks covered every route at
+1440px and 390px plus the main dialogs, with no page errors or overflow.
+
+UI unit tests pass (61). Chromium checks against a synthetic API covered every
+workspace and settings route at 1440px and 390px, plus the account menu in both
+themes on mobile: no page errors or horizontal overflow. Gateway behavior is
+unchanged.
+
 ## 2026-09-24 — Readable tool and history text
 
 Enlarged history headings, rows and status badges, tool names, visibility labels,
