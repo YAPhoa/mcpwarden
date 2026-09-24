@@ -9,6 +9,13 @@ and History filter selects use 15px, card headings 18px, and the last 11px text
 is 12px. History replaces its timings and retention disclosure with one help
 line. Stylesheet version: `20260924-type-scale-1`.
 
+Follow-up: the dashboard stat cards use 18px labels and detail lines with 36px
+numbers. The detail lines are live: enabled and disabled counts, "of N found"
+for tools, and the names of connectors needing attention. That card is amber
+when something needs attention and green when all are connected. A console-wide
+18px minimum was tried and reverted after the user's review; the rest of the
+console keeps the 12–16px scale. Stylesheet version: `20260924-type-scale-4`.
+
 UI unit tests pass (61). Chromium checks against a synthetic API covered every
 workspace and settings route at 1440px and 390px, plus the account menu in both
 themes on mobile: no page errors or horizontal overflow. Gateway behavior is
