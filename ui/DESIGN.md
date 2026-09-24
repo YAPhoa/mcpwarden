@@ -238,3 +238,14 @@ Site-wide type (2026-09-24): the user asked for the same text-size increase acro
 the whole console. Every size outside the tool panel moved up one step (base 15px;
 11→12, 12→13, 13→14, 14→15px; larger headings unchanged). Dashboard status badges
 no longer wrap their arrow onto a second line on narrow screens.
+
+Type scale (2026-09-24): the main text sizes are as follows. 12px is
+for uppercase eyebrows, list headings and small counts; 13px for help text, row
+metadata, badges and field labels; 15px for body text, navigation, menu items,
+tabs and form values; 16px for tool and history rows; 18px for card and section
+headings. The sidebar account launcher and its menu now match the navigation
+(name and items 15px, secondary lines 13px). The menu items read Account,
+Appearance and Security, matching the settings tabs. The 11px list headings and
+calendar labels moved to 12px. History drops the "How timings and retention
+work" disclosure, whose points were repeated elsewhere on the page, for one
+line defining the timing columns and stating that payloads are not kept.

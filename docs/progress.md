@@ -1,5 +1,19 @@
 # Progress
 
+## 2026-09-24 — Consistent console type scale
+
+Aligned text sizes to one scale (12/13/15/16/18px plus headings). The sidebar
+account launcher and menu match the navigation, the menu item "My account" is now
+"Account" to match the settings tabs, settings and connection tabs, theme options
+and History filter selects use 15px, card headings 18px, and the last 11px text
+is 12px. History replaces its timings and retention disclosure with one help
+line. Stylesheet version: `20260924-type-scale-1`.
+
+UI unit tests pass (61). Chromium checks against a synthetic API covered every
+workspace and settings route at 1440px and 390px, plus the account menu in both
+themes on mobile: no page errors or horizontal overflow. Gateway behavior is
+unchanged.
+
 ## 2026-09-24 — Readable tool and history text
 
 Enlarged history headings, rows and status badges, tool names, visibility labels,
