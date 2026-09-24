@@ -62,7 +62,9 @@ export async function startUpstream() {
     });
   });
   const port = await listen(server);
-  return {url: `http://127.0.0.1:${port}/mcp`, close: () => new Promise(done => server.close(done))};
+  return {url: `http://127.0.0.1:${port}/mcp`, close: () => new Promise(done => server.close(done)),
+    // Changes a tool definition as an upstream release would; discovery sees it on refresh.
+    change: (name, patch) => Object.assign(tools.find(t => t.name === name), patch)};
 }
 
 // Static UI plus an /api/ proxy that forwards only what nginx forwards. It adds
@@ -145,7 +147,7 @@ export async function startFixture() {
   }
   await start();
   return {
-    ui: ui.origin, gateway, upstream: upstream.url, logs: () => logs,
+    ui: ui.origin, gateway, upstream: upstream.url, changeTool: upstream.change, logs: () => logs,
     restart: async () => { await stop(); await start(); },
     // Diagnostics for a stalled run: the Go runtime prints every goroutine on SIGQUIT.
     dumpGoroutines: async () => {

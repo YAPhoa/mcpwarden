@@ -185,7 +185,9 @@ header, call counts, and approval details. They can be filtered by state, caller
 and connector. States are Active, Provider unavailable, Ended, Stopped and
 Suspended; requests show Waiting for your review and Approved · not active yet.
 Renew opens a dialog (5, 15, 30 or 60 minutes, default 15) and creates a new
-request and window. "Lock browser" only terminates this browser's vault worker;
+request and window. If the new request's scope differs from the one shown, for
+example after a tool definition changed, the dialog shows the new scope and
+starts nothing until the owner allows it again. "Lock browser" only terminates this browser's vault worker;
 "Stop access" ends one window; "Lock all execution" ends every window after a
 confirmation dialog. Browser lock also happens on sign-out, account change,
 leaving `/vault`, page hide and 10 minutes without input. Each lock discards any

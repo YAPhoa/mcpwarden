@@ -304,7 +304,10 @@ unchanged, apart from an `active` flag that reports whether a worker exists.
 Owner requests never carry an Authorization header. They refresh the CSRF token
 once on `csrf_required`, which the gateway checks before running the handler.
 Every lock bumps a generation counter, and responses from an older generation
-are dropped.
+are dropped. Each operation captures the generation and its vault worker before
+its first await and publishes results only after checking it. Locking restores
+every operation's submit control, so a cancelled operation never leaves one
+disabled.
 
 Browser lock is separate from windows. Sign-out, account changes, leaving
 `/vault`, page hide and 10 minutes without input terminate the worker, clear
@@ -330,7 +333,11 @@ is uncertain (network failure or 5xx), the console keeps that key in page memory
 and offers "Check status" and "Retry the same activation". It never creates a new
 request automatically. Renewal creates a new owner request with the same caller,
 credential, tools, constraints and call limit, then goes through the same
-explicit start. It defaults to 15 minutes, with 5, 30 and 60 as options.
+explicit start. The gateway binds that request to the current tool definitions
+and credential version, so the console compares the returned scope with the one
+the dialog showed. If anything the owner reviews differs (caller, credential
+version, definition digests, constraints, duration or call limit), it shows the
+new request and releases no key until the owner allows it again. It defaults to 15 minutes, with 5, 30 and 60 as options.
 
 Two small additive API changes support the page. GET `/api/vault/wrappers` now
 returns each live credential's current envelope, which the worker must

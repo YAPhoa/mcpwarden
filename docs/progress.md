@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-09-24 — PR #5 review fixes
+
+Fixed three owner-console findings from review. Each operation now captures its
+generation and vault worker before its first await, so leaving `/vault` during a
+recovery-key check can no longer unlock the vault in the background. A cancelled
+setup no longer restores its recovery material, because results are published
+only after the generation check. Locking now restores every operation's submit
+control, so an interrupted unlock or setup can be retried without reloading.
+Renewal compares the new request's caller, credential version, tool definition
+digests, constraints, duration and call limit with what the dialog showed. If
+any of them changed, it shows the new request and releases no key until the
+owner allows it again.
+
+The owner flows now have 30 steps. The new ones hold the page's Web Crypto
+digests or the wrapper read to cover leaving during a recovery unlock, retrying
+an interrupted passphrase unlock, cancelling setup mid-way, and a tool
+definition that changes while the renewal dialog is open. Each new check was
+confirmed to fail when its fix is reverted. A new unit test covers the reviewed
+scope comparison.
+
+Two stalled runs, the first CI stall and one of four parallel local runs, both
+stopped at the first `page.route` on the owner's page, with no request issued and
+the gateway idle. Enabling request interception later sends untimed protocol
+calls to every session, including vault workers. The flows now enable
+interception once when each page is created, before any worker exists.
+
+Local validation: `gofmt`, `go build ./...`, `go vet ./...` and
+`go test -race -count=1 ./...` with the PostgreSQL fixture passed, as did 55 UI
+unit tests, the integrity check (18 files) and all 30 Chromium flow steps.
+Firefox and WebKit run in CI.
+
 ## 2026-09-24 — Vault and access-window console (roadmap step 2)
 
 Added the owner console at `/vault`, `/vault/credentials` and `/vault/settings`
@@ -57,7 +88,7 @@ passed the flows in Chromium, Firefox and WebKit. An earlier WebKit run lost
 keyboard focus when a background reload redrew a list; the console now restores
 focus to the matching control. One earlier Chromium run stalled without an error
 at the uncertain-activation step and did not recur in four local runs or the next
-CI run. The flow script now bounds its request-budget wait, times out gateway
+CI run (see the PR #5 review fixes entry above for the likely cause). The flow script now bounds its request-budget wait, times out gateway
 calls after 30 seconds, and prints timestamped requests and a gateway goroutine
 dump if a step stalls, so a recurrence will show its cause.
 

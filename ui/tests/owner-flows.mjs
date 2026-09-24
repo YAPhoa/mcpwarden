@@ -25,15 +25,15 @@ let current = 'startup';
 // The gateway allows 120 owner-route requests per owner per minute. Steps wait
 // for headroom so the flows exercise the console, not the rate limiter.
 const OWNER_ROUTE = /^\/api\/(vault|access-requests|approvals|leases|security)(\/|\?|$)/;
-let watchdog, budgetWait = false;
+let watchdog, budgetWait = false, action = '';
 const began = Date.now();
 const stamp = () => ((Date.now() - began) / 1000).toFixed(1).padStart(6);
 async function step(name) {
-  current = name; console.log(`· ${stamp()} ${name}`);
+  current = name; action = ''; console.log(`· ${stamp()} ${name}`);
   clearTimeout(watchdog);
   // No step needs this long; report where it stalled instead of hanging CI.
   watchdog = setTimeout(async () => {
-    console.error(`owner flow stalled during: ${name} (${budgetWait ? 'waiting for owner-route budget' : 'running'}; ${recentOwner()} owner-route requests in the last 61 s)\nlast requests:\n${log.requests.slice(-15).map(r => `${r.at} ${r.page} ${r.method} ${r.path}`).join('\n')}\nlast responses:\n${log.responses.slice(-15).join('\n')}`);
+    console.error(`owner flow stalled during: ${name} (${budgetWait ? 'waiting for owner-route budget' : `last action: ${action || 'none'}`}; ${recentOwner()} owner-route requests in the last 61 s)\nlast requests:\n${log.requests.slice(-15).map(r => `${r.at} ${r.page} ${r.method} ${r.path}`).join('\n')}\nlast responses:\n${log.responses.slice(-15).join('\n')}`);
     if (proxyErrors.length) console.error('proxy errors:', proxyErrors);
     const dump = await fixture.dumpGoroutines().catch(error => `goroutine dump failed: ${error}`);
     console.error('gateway log and goroutines:\n' + dump.split('\n').slice(-2000).join('\n'));
@@ -49,11 +49,19 @@ async function step(name) {
   budgetWait = false;
   console.error(`owner-route rate stayed high before "${name}": ${recentOwner()} requests in the last 61 s`);
 }
+// Names the action a stalled step was on; only the watchdog reads it.
+function mark(label) { action = `${stamp()} ${label}`; }
 function recentOwner() { return log.owner.filter(at => at > Date.now() - 61000).length; }
 function counted(owner) { return (...args) => { log.owner.push(Date.now()); return owner(...args); }; }
 
-function watch(page, label) {
+// Request interception is switched on once, before the page starts any vault
+// worker, and never toggles. Switching it on later sends an untimed protocol
+// call to every session, including workers the console may be tearing down;
+// two stalled runs stopped at the first page.route after vault workers had come
+// and gone. Later routes sit on top of this pass-through.
+async function watch(page, label) {
   pages.push(page);
+  await page.route('**/*', route => route.fallback());
   page.setDefaultTimeout(45000);
   page.on('request', r => {
     const url = new URL(r.url());
@@ -82,6 +90,18 @@ function pageApi(page, method, path, body) {
     let data = null; try { data = JSON.parse(text); } catch { data = text; }
     return {status: response.status, data};
   }, [method, path, body ?? null]);
+}
+
+// Holds the page's Web Crypto digests, which recovery-key checksums use, until
+// released. Workers are unaffected.
+function holdDigests(page) {
+  return page.evaluate(() => {
+    let release;
+    const gate = new Promise(done => { release = done; }), original = crypto.subtle.digest.bind(crypto.subtle);
+    window.__digests = 0;
+    window.__releaseDigests = () => { delete crypto.subtle.digest; release(); };
+    crypto.subtle.digest = async (...args) => { window.__digests++; await gate; return original(...args); };
+  });
 }
 
 const fixture = await startFixture();
@@ -150,7 +170,7 @@ async function waitWindow(page, requestID, owner) {
 let failed = false;
 try {
   const alice = await browser.newContext({viewport: {width: 1280, height: 900}});
-  const page = watch(await alice.newPage(), 'alice');
+  const page = await watch(await alice.newPage(), 'alice');
 
   await step('register and prepare a header-authenticated connector and two agent keys');
   await register(page, ALICE);
@@ -399,13 +419,13 @@ try {
   assert.equal(window3.authorization_source, 'client_activation');
 
   await step('uncertain activation: check status after the gateway acted');
-  const acted = await ask(runner);
-  await reload(page);
-  await page.route('**/api/approvals/*/activate', async route => { await route.fetch(); await route.abort('failed'); }, {times: 1});
-  await page.click(`[data-request-card="${acted.id}"] button[data-action="start"]`);
-  await waitText(page, '#vault-error', 'did not confirm');
-  await page.click(`[data-request-card="${acted.id}"] button[data-action="check"]`);
-  await waitText(page, '#vault-notice', 'Access did start');
+  mark('ask'); const acted = await ask(runner);
+  mark('reload'); await reload(page);
+  mark('route'); await page.route('**/api/approvals/*/activate', async route => { mark('route.fetch'); await route.fetch(); mark('route.abort'); await route.abort('failed'); }, {times: 1});
+  mark('click start'); await page.click(`[data-request-card="${acted.id}"] button[data-action="start"]`);
+  mark('wait for uncertain'); await waitText(page, '#vault-error', 'did not confirm');
+  mark('click check'); await page.click(`[data-request-card="${acted.id}"] button[data-action="check"]`);
+  mark('wait for started'); await waitText(page, '#vault-notice', 'Access did start');
   assert.equal((await owner2('GET', '/api/leases')).data.filter(l => l.request_id === acted.id).length, 1);
 
   await step('uncertain activation: retry reuses the same Idempotency-Key');
@@ -436,6 +456,37 @@ try {
   await waitWindow(page, late.id, owner2);
   for (const l of (await owner2('GET', '/api/leases')).data) assert.equal((await owner2('DELETE', `/api/leases/${l.lease_id}`)).status, 204);
 
+  await step('renewal asks for a new review when a tool definition changed');
+  const base = await ask(agent);
+  await reload(page);
+  await unlock(page, PASSPHRASE);
+  await page.click(`[data-request-card="${base.id}"] button[data-action="start"]`);
+  const baseWindow = await waitWindow(page, base.id, owner2);
+  await page.click(`[data-window-card="${baseWindow.lease_id}"] button[data-action="renew"]`);
+  await page.locator('#vault-renew-dialog[open]').waitFor();
+  const reviewedDigest = base.tools[0].definition_sha256;
+  await waitText(page, '#vault-renew-scope', reviewedDigest.slice(0, 12));
+  fixture.changeTool('search', {description: 'Synthetic search that now also deletes branches', inputSchema: {type: 'object', properties: {repo: {type: 'string'}, branch: {type: 'string'}}}});
+  const refreshed = await pageApi(page, 'POST', '/api/discovery/synthetic/refresh');
+  assert(refreshed.status < 300, JSON.stringify(refreshed));
+  const releases = () => log.requests.filter(r => /^\/api\/approvals\/[^/]+\/(begin|activate)$/.test(r.path)).length;
+  const releasesBefore = releases();
+  const renewed = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/access-requests');
+  await page.click('#vault-renew-submit');
+  const changed = await (await renewed).json();
+  assert.notEqual(changed.tools[0].definition_sha256, reviewedDigest, 'discovery did not change the definition');
+  await waitText(page, '#vault-renew-error', 'changed after you opened it');
+  await waitText(page, '#vault-renew-scope', changed.tools[0].definition_sha256.slice(0, 12));
+  await waitText(page, '#vault-renew-scope', 'deletes branches');
+  assert(await page.locator('#vault-renew-dialog[open]').isVisible(), 'the renewal dialog closed without a new review');
+  assert.equal(releases(), releasesBefore, 'renewal released a key for a definition the owner had not reviewed');
+  assert(!(await owner2('GET', '/api/leases')).data.some(l => l.request_id === changed.id), 'renewal started a window for an unreviewed definition');
+  await page.click('#vault-renew-submit');
+  await waitWindow(page, changed.id, owner2);
+  for (const l of (await owner2('GET', '/api/leases')).data) assert.equal((await owner2('DELETE', `/api/leases/${l.lease_id}`)).status, 204);
+  await page.click('#vault-lock');
+  await waitText(page, '#vault-status-title', 'Vault locked');
+
   await step('a short window counts down and ends at the server expiry');
   const short = await ask(agent, {duration_seconds: 20});
   await reload(page);
@@ -452,7 +503,7 @@ try {
   await openVault(page, 'credentials');
   await page.click('#vault-credentials button[data-connector-id]');
   await page.locator('#vault-credential-dialog[open]').waitFor();
-  const tab = watch(await alice.newPage(), 'alice-tab');
+  const tab = await watch(await alice.newPage(), 'alice-tab');
   await tab.goto(ui + '/vault/credentials');
   await signedIn(tab);
   await tab.locator('#vault-credentials-panel').waitFor();
@@ -492,6 +543,53 @@ try {
   await waitText(page, '#vault-notice', 'Vault locked when you left the vault page');
   await waitText(page, '#vault-status-title', 'Vault locked');
 
+  await step('leaving during a recovery unlock keeps the vault locked');
+  const wrapperReads = () => log.requests.filter(r => r.page === 'alice' && r.path === '/api/vault/wrappers').length;
+  await page.click('#vault-unlock-open');
+  await page.check('[name="vault-unlock-method"][value="recovery"]');
+  await page.fill('#vault-unlock-secret', recovery);
+  await holdDigests(page);
+  const readsBefore = wrapperReads();
+  await page.click('#vault-unlock-submit');
+  await page.waitForFunction(() => window.__digests > 0);
+  await page.click('a.nav-item[data-view="access"]');
+  await page.evaluate(() => window.__releaseDigests());
+  await sleep(1000);
+  assert.equal(wrapperReads(), readsBefore, 'a cancelled recovery unlock continued after the page was left');
+  await page.click('a.nav-item[data-view="vault"]');
+  await waitText(page, '#vault-status-title', 'Vault locked');
+  await page.click('#vault-unlock-open');
+  assert.equal(await page.textContent('#vault-unlock-submit'), 'Unlock');
+  assert.equal(await page.isDisabled('#vault-unlock-submit'), false);
+  await unlockWith(page, recovery, 'recovery');
+  await waitText(page, '#vault-notice', 'Unlocked with your recovery key');
+  await page.click('#vault-lock');
+  await waitText(page, '#vault-status-title', 'Vault locked');
+
+  await step('an interrupted passphrase unlock can be retried without reloading');
+  let releaseWrappers;
+  const heldWrappers = new Promise(done => { releaseWrappers = done; });
+  await page.route('**/api/vault/wrappers', async route => { await heldWrappers; await route.continue().catch(() => {}); }, {times: 1});
+  await page.click('#vault-unlock-open');
+  await page.check('[name="vault-unlock-method"][value="passphrase"]');
+  await page.fill('#vault-unlock-secret', NEW_PASSPHRASE);
+  const wrappersRead = page.waitForRequest(r => r.url().endsWith('/api/vault/wrappers'));
+  await page.click('#vault-unlock-submit');
+  await wrappersRead;
+  assert.equal(await page.textContent('#vault-unlock-submit'), 'Unlocking…');
+  await page.click('a.nav-item[data-view="access"]');
+  releaseWrappers();
+  await sleep(1000);
+  await page.click('a.nav-item[data-view="vault"]');
+  await waitText(page, '#vault-status-title', 'Vault locked');
+  await page.click('#vault-unlock-open');
+  assert.equal(await page.textContent('#vault-unlock-submit'), 'Unlock');
+  assert.equal(await page.isDisabled('#vault-unlock-submit'), false);
+  await unlockWith(page, NEW_PASSPHRASE);
+  await waitText(page, '#vault-notice', 'Vault unlocked in this browser');
+  await page.click('#vault-lock');
+  await waitText(page, '#vault-status-title', 'Vault locked');
+
   await step('gateway restart suspends windows and expires pending requests');
   await openVault(page, 'access');
   const beforeRestart = await ask(agent);
@@ -521,7 +619,7 @@ try {
   await openVault(page);
 
   await step('idle time locks the browser vault');
-  const idle = watch(await alice.newPage(), 'alice-idle');
+  const idle = await watch(await alice.newPage(), 'alice-idle');
   await idle.clock.install();
   await idle.goto(ui + '/vault');
   await signedIn(idle);
@@ -545,12 +643,34 @@ try {
 
   await step('another account sees none of this owner’s vault');
   const bobContext = await browser.newContext({viewport: {width: 1280, height: 900}});
-  const bobPage = watch(await bobContext.newPage(), 'bob');
+  const bobPage = await watch(await bobContext.newPage(), 'bob');
   await register(bobPage, BOB);
   await openVault(bobPage);
   await waitText(bobPage, '#vault-status-title', 'Vault not set up');
   await waitText(bobPage, '#vault-requests', 'No access requests');
   await waitText(bobPage, '#vault-windows', 'No access windows yet');
+  // Cancelling setup while its recovery key is being formatted discards the result.
+  await bobPage.click('#vault-setup-open');
+  await bobPage.fill('#vault-new-passphrase', PASSPHRASE);
+  await bobPage.fill('#vault-new-confirm', PASSPHRASE);
+  await holdDigests(bobPage);
+  await bobPage.click('#vault-setup-create');
+  await bobPage.waitForFunction(() => window.__digests > 0);
+  await bobPage.click('#vault-setup-cancel');
+  await bobPage.evaluate(() => window.__releaseDigests());
+  await sleep(1000);
+  assert(await bobPage.locator('#vault-setup').isHidden(), 'cancelled setup came back');
+  assert.equal(await bobPage.textContent('#vault-recovery-key'), '');
+  // Leaving announces a lock only if setup material were still held.
+  await bobPage.click('a.nav-item[data-view="access"]');
+  await bobPage.click('a.nav-item[data-view="vault"]');
+  await waitText(bobPage, '#vault-status-title', 'Vault not set up');
+  assert((await bobPage.textContent('#vault-notice')).includes('Setup cancelled'), 'cancelled setup still held recovery material');
+  await bobPage.click('#vault-setup-open');
+  assert(await bobPage.locator('#vault-setup-form').isVisible(), 'setup reopened at a stale step');
+  assert.equal(await bobPage.textContent('#vault-setup-create'), 'Create recovery key');
+  assert.equal(await bobPage.isDisabled('#vault-setup-create'), false);
+  await bobPage.click('#vault-setup-cancel');
   const bob = counted(fixture.owner(await cookieHeader(bobContext)));
   assert.equal((await bob('GET', `/api/access-requests/${beforeRestart.id}`)).status, 404);
   assert.deepEqual((await bob('GET', '/api/leases?include=ended')).data, []);

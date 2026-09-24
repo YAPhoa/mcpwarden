@@ -33,7 +33,7 @@ Totals: 3 Live, 16 Opt-in, 21 Library, 19 Partial, 2 Open, 7 Unselected.
 | L05 | Library | `TestConcurrencyRejectsAndUnusedAdmissionExpires` (delayed permit after expiry is not dispatched) | Startup wiring |
 | L06 | Library | `TestActivationCommitFailureAndExpiredConfirmation`, `TestActivationClockAndOwnerExpiryDuringStage`; browser flows start windows only after review and leave pre-restart requests unstartable | Startup wiring |
 | L07 | Library | `TestWorkingWindowRepeatedCallsAndFixedExpiry` (traffic does not move the deadline) | Startup wiring |
-| L08 | Opt-in | `TestRenewalBrowserClosureAndExecutionLock`; browser flow "unlock failures, then unlock and renew" (a new request and window with its own end time; the earlier window's expiry is unchanged) | Guarded execution at startup (step 4) |
+| L08 | Opt-in | `TestRenewalBrowserClosureAndExecutionLock`; browser flow "unlock failures, then unlock and renew" (a new request and window with its own end time; the earlier window's expiry is unchanged); browser flow "renewal asks for a new review when a tool definition changed" (no key release until the changed scope is reviewed) | Guarded execution at startup (step 4) |
 | L09 | Opt-in | `TestRenewalBrowserClosureAndExecutionLock`; browser flows (sign-out, Lock browser, leaving the page and idle lock keep windows; Lock all execution ends them) | Guarded execution at startup (step 4) |
 | L10 | Library | `TestRevocationDoesNotHoldGateAcrossNetwork`, `TestPreparationDrainsOnRevocationAndRechecksBeforeDispatch`, `TestMaterialRechecksClockAndCallerAtInjection` | Startup wiring |
 | L11 | Library | `TestClockDiscontinuityRestartAndLostLock`, `TestPostgresClockAfterOwnerLock`, `TestPostgresSnapshotRestartLocksExecution` | Suspend/resume on real hosts |

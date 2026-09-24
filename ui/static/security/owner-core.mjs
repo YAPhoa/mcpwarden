@@ -242,6 +242,14 @@ export function windowPhase(l, now, providerHealthy = true) {
   if (!providerHealthy) return {key: 'provider', label: 'Access approved · provider unavailable', tone: 'warning'};
   return {key: 'active', label: 'Active', tone: 'success'};
 }
+// What the owner reviews before a key is released: the caller, the credential
+// version, each tool's exact definition and constraints, the duration and the
+// call limit. Request IDs, digests and deadlines differ between requests.
+export function reviewedScope(r, durationSeconds = r.duration_seconds) {
+  const tools = (r.tools || []).map(t => [t.tool_id, t.definition_sha256, t.constraints || []]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  return JSON.stringify({requester: r.requester?.access_id, credential: [r.credential?.credential_id, r.credential?.connector_id, String(r.credential?.epoch)],
+    duration_seconds: durationSeconds, max_calls: r.max_calls ?? null, tools});
+}
 export function callsLabel(l) {
   const used = Number(l.admitted_calls) || 0;
   const base = l.max_calls == null ? `${used} call${used === 1 ? '' : 's'} · no call limit` : `${used} of ${l.max_calls} calls used`;

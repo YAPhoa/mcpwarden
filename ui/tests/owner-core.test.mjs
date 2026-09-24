@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {webcrypto, randomBytes} from 'node:crypto';
 import {OwnerClient, OwnerError, b64url, callsLabel, destinationDigest, destinationFor, durationLabel, formatRecoveryKey, headerBundle,
-  headerValueProblem, jcs, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, windowPhase} from '../static/security/owner-core.mjs';
+  headerValueProblem, jcs, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, reviewedScope, windowPhase} from '../static/security/owner-core.mjs';
 
 globalThis.crypto ??= webcrypto;
 
@@ -83,6 +83,19 @@ test('request and window phases distinguish every state', () => {
   assert.equal(windowPhase({...live, state: 'revoked'}, now).key, 'revoked');
   assert.equal(windowPhase({...live, state: 'suspended'}, now).key, 'suspended');
   assert.equal(windowPhase({...live, state: 'expired'}, now).key, 'expired');
+});
+
+test('reviewed scopes change with definitions, constraints, credentials and limits only', () => {
+  const tools = [{tool_id: 'b', name: 'write', definition_sha256: 'd2', constraints: []}, {tool_id: 'a', name: 'search', definition_sha256: 'd1', constraints: [{pointer: '/repo', operator: 'equals', value: 'x'}]}];
+  const reviewed = {id: 'r1', request_digest: 'x', expires_at: 'e1', requester: {access_id: 'k', label: 'Agent'}, credential: {credential_id: 'c', connector_id: 'n', epoch: '1'}, duration_seconds: 900, max_calls: null, tools};
+  const same = {...reviewed, id: 'r2', request_digest: 'y', expires_at: 'e2', requester: {access_id: 'k', label: 'Renamed'}, tools: [...tools].reverse()};
+  assert.equal(reviewedScope(same), reviewedScope(reviewed));
+  assert.equal(reviewedScope({...same, duration_seconds: 300}), reviewedScope(reviewed, 300));
+  assert.notEqual(reviewedScope(same), reviewedScope(reviewed, 300));
+  for (const changed of [{tools: [{...tools[0]}, {...tools[1], definition_sha256: 'd3'}]}, {tools: [tools[0], {...tools[1], constraints: []}]}, {tools: [tools[1]]},
+    {credential: {...reviewed.credential, epoch: '2'}}, {requester: {access_id: 'other'}}, {max_calls: 5}]) {
+    assert.notEqual(reviewedScope({...same, ...changed}), reviewedScope(reviewed), JSON.stringify(changed));
+  }
 });
 
 function fakeFetch(responses) {

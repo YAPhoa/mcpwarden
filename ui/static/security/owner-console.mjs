@@ -5,7 +5,7 @@
 // terminate the worker and discard results that arrive afterwards.
 import {VaultClient} from './vault-client.mjs';
 import {OwnerClient, OwnerError, b64url, callsLabel, destinationDigest, destinationFor, durationLabel, errorMessage, formatRecoveryKey,
-  headerBundle, headerValueProblem, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, windowPhase} from './owner-core.mjs';
+  headerBundle, headerValueProblem, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, reviewedScope, windowPhase} from './owner-core.mjs';
 
 const $ = id => document.getElementById(id);
 export const IDLE_LOCK_MS = 10 * 60 * 1000;
@@ -74,6 +74,7 @@ function lockBrowser(reason = '') {
   vault = new VaultClient();
   const wasUnlocked = state.unlocked || state.setup;
   state.unlocked = false; state.setup = null; state.busy = ''; state.renew = null; state.credential = null;
+  idleControls();
   clearSensitiveInputs();
   $('vault-recovery-key').textContent = '';
   for (const id of ['vault-credential-dialog', 'vault-renew-dialog', 'vault-lock-all-dialog']) if ($(id).open) $(id).close();
@@ -91,8 +92,14 @@ function authLost() {
   resetAll();
   window.MCPWardenWorkspace?.authLost();
 }
-// Every async flow captures the generation first and stops if it changed.
+// Every async flow captures the generation before its first await and stops
+// if it changed. A changed generation means the operation was cancelled.
 function guard(generation) { if (generation !== state.generation) throw new OwnerError(0, 'discarded', errorMessage('discarded')); }
+// Submit controls owned by one operation. Locking ends every operation, so it
+// restores them all; a cancelled operation never touches them again.
+function busyControl(id, label) { const button = $(id); button.dataset.idleLabel ??= button.textContent; button.disabled = true; if (label) button.textContent = label; }
+function idleControl(button) { if (button.dataset.idleLabel === undefined) return; button.disabled = false; button.textContent = button.dataset.idleLabel; delete button.dataset.idleLabel; }
+function idleControls() { for (const button of document.querySelectorAll('[data-idle-label]')) idleControl(button); }
 function failed(error, target = 'vault-error', input) {
   if (error?.code === 'discarded') return;
   if (error?.code === 'sign_in_required') { authLost(); return; }
@@ -370,19 +377,20 @@ $('vault-setup-form').addEventListener('submit', async event => {
   if (problem) { setError('vault-setup-error', problem, $('vault-new-passphrase')); return; }
   setError('vault-setup-error', '', $('vault-new-passphrase'));
   clearSensitiveInputs();
-  const generation = state.generation; state.busy = 'setup'; $('vault-setup-create').disabled = true; $('vault-setup-create').textContent = 'Creating…';
+  const generation = state.generation, worker = vault; state.busy = 'setup'; busyControl('vault-setup-create', 'Creating…');
   try {
-    const result = await vault.setup({owner_id: state.subject, passphrase});
+    const result = await worker.setup({owner_id: state.subject, passphrase});
     guard(generation);
     const {recovery_key: recoveryKey, ...root} = result;
-    state.setup = {root, recoveryKey, formatted: await formatRecoveryKey(recoveryKey)};
+    const formatted = await formatRecoveryKey(recoveryKey);
     guard(generation);
-    $('vault-recovery-key').textContent = state.setup.formatted; $('vault-recovery-copy-status').textContent = '';
+    state.setup = {root, recoveryKey, formatted};
+    $('vault-recovery-key').textContent = formatted; $('vault-recovery-copy-status').textContent = '';
     showSetupStep(2); $('vault-recovery-key').focus();
   } catch (error) {
-    if (error.code !== 'discarded') { vault.lock(); setError('vault-setup-error', 'The vault could not be created in this browser. Try again.', $('vault-new-passphrase')); }
+    if (error.code !== 'discarded') { worker.lock(); setError('vault-setup-error', 'The vault could not be created in this browser. Try again.', $('vault-new-passphrase')); }
   } finally {
-    if (generation === state.generation) { state.busy = ''; $('vault-setup-create').disabled = false; $('vault-setup-create').textContent = 'Create recovery key'; render(); }
+    if (generation === state.generation) { state.busy = ''; idleControl($('vault-setup-create')); render(); }
   }
 });
 $('vault-recovery-copy').addEventListener('click', async () => {
@@ -396,14 +404,15 @@ $('vault-verify-form').addEventListener('submit', async event => {
   if (state.busy || !state.setup) return;
   const typed = $('vault-verify-key').value, password = $('vault-setup-password').value;
   if (!password) { setError('vault-verify-error', 'Enter your account password.', $('vault-setup-password')); return; }
-  let encoded;
-  try { encoded = await parseRecoveryKey(typed); } catch (error) { setError('vault-verify-error', error.message, $('vault-verify-key')); return; }
-  if (encoded !== state.setup.recoveryKey) { setError('vault-verify-error', 'This is not the recovery key shown for this vault. Check each group and try again.', $('vault-verify-key')); return; }
-  setError('vault-verify-error', '', $('vault-verify-key'));
-  $('vault-setup-password').value = ''; $('vault-verify-key').value = '';
-  const generation = state.generation, {root} = state.setup; state.busy = 'setup'; $('vault-verify-submit').disabled = true; $('vault-verify-submit').textContent = 'Verifying…';
+  const generation = state.generation, {root, recoveryKey} = state.setup; state.busy = 'setup'; busyControl('vault-verify-submit', 'Verifying…');
   const check = new VaultClient();
   try {
+    let encoded;
+    try { encoded = await parseRecoveryKey(typed); } catch (error) { guard(generation); throw new OwnerError(0, 'verify', error.message); }
+    guard(generation);
+    if (encoded !== recoveryKey) throw new OwnerError(0, 'verify', 'This is not the recovery key shown for this vault. Check each group and try again.');
+    setError('vault-verify-error', '', $('vault-verify-key'));
+    $('vault-setup-password').value = ''; $('vault-verify-key').value = '';
     // Prove the typed key opens the recovery wrapper before anything is saved.
     const w = root.recovery;
     await check.unlockRecovery({context: {owner_id: w.owner_id, root_id: w.root_id, root_version: w.root_version, wrapper_id: w.wrapper_id, method: 'recovery'}, wrapper: JSON.stringify(w), recovery_key: encoded});
@@ -416,11 +425,12 @@ $('vault-verify-form').addEventListener('submit', async event => {
   } catch (error) {
     check.lock();
     if (error.code === 'discarded') return;
+    if (error.code === 'verify') { setError('vault-verify-error', error.message, $('vault-verify-key')); return; }
     if (error.code === 'conflict' || error.code === 'invalid') { lockBrowser(); pageError('A vault already exists for this account, perhaps from another browser. Unlock it instead.'); load(); return; }
     if (error instanceof OwnerError) failed(error, 'vault-verify-error', $('vault-setup-password'));
     else setError('vault-verify-error', 'The recovery key could not be verified. Try again.', $('vault-verify-key'));
   } finally {
-    if (generation === state.generation) { state.busy = ''; $('vault-verify-submit').disabled = false; $('vault-verify-submit').textContent = 'Verify and finish setup'; render(); }
+    if (generation === state.generation) { state.busy = ''; idleControl($('vault-verify-submit')); render(); }
   }
 });
 
@@ -441,20 +451,23 @@ $('vault-unlock-form').addEventListener('submit', async event => {
   const method = document.querySelector('[name="vault-unlock-method"]:checked')?.value === 'recovery' ? 'recovery' : 'passphrase';
   const secret = $('vault-unlock-secret').value;
   if (!secret) { setError('vault-unlock-error', method === 'recovery' ? 'Enter your recovery key.' : 'Enter your vault passphrase.', $('vault-unlock-secret')); return; }
-  let recoveryKey = '';
-  if (method === 'recovery') { try { recoveryKey = await parseRecoveryKey(secret); } catch (error) { setError('vault-unlock-error', error.message, $('vault-unlock-secret')); return; } }
-  $('vault-unlock-secret').value = '';
-  const generation = state.generation; state.busy = 'unlock'; $('vault-unlock-submit').disabled = true; $('vault-unlock-submit').textContent = 'Unlocking…';
+  // Leaving the page while this runs locks the vault and replaces the worker;
+  // this operation keeps its own worker and generation and never unlocks later.
+  const generation = state.generation, worker = vault; state.busy = 'unlock'; busyControl('vault-unlock-submit', 'Unlocking…');
   try {
+    let recoveryKey = '';
+    if (method === 'recovery') { try { recoveryKey = await parseRecoveryKey(secret); } catch (error) { guard(generation); throw new OwnerError(0, 'unlock', error.message); } }
+    guard(generation);
+    $('vault-unlock-secret').value = '';
     const wrappers = (await client.request('GET', '/api/vault/wrappers')).data;
     guard(generation);
     const w = wrappers.root?.[method];
     if (!w || w.owner_id !== state.subject) throw new OwnerError(404, 'not_found', 'No vault is set up for this account.');
     const context = {owner_id: w.owner_id, root_id: w.root_id, root_version: w.root_version, wrapper_id: w.wrapper_id, method};
     try {
-      if (method === 'recovery') await vault.unlockRecovery({context, wrapper: JSON.stringify(w), recovery_key: recoveryKey});
-      else await vault.unlockPassphrase({context, wrapper: JSON.stringify(w), passphrase: secret});
-    } catch { guard(generation); vault.lock(); vault = new VaultClient(); throw new OwnerError(0, 'unlock', method === 'recovery' ? 'That recovery key did not unlock the vault.' : 'That passphrase did not unlock the vault.'); }
+      if (method === 'recovery') await worker.unlockRecovery({context, wrapper: JSON.stringify(w), recovery_key: recoveryKey});
+      else await worker.unlockPassphrase({context, wrapper: JSON.stringify(w), passphrase: secret});
+    } catch { guard(generation); worker.lock(); vault = new VaultClient(); throw new OwnerError(0, 'unlock', method === 'recovery' ? 'That recovery key did not unlock the vault.' : 'That passphrase did not unlock the vault.'); }
     guard(generation);
     state.unlocked = true; state.wrappers = wrappers; state.lastActivity = Date.now();
     $('vault-unlock').hidden = true; setError('vault-unlock-error', '');
@@ -464,7 +477,7 @@ $('vault-unlock-form').addEventListener('submit', async event => {
     if (error.code === 'unlock') setError('vault-unlock-error', error.message, $('vault-unlock-secret'));
     else failed(error, 'vault-unlock-error', $('vault-unlock-secret'));
   } finally {
-    if (generation === state.generation) { state.busy = ''; $('vault-unlock-submit').disabled = false; $('vault-unlock-submit').textContent = 'Unlock'; render(); }
+    if (generation === state.generation) { state.busy = ''; idleControl($('vault-unlock-submit')); render(); }
   }
 });
 $('vault-lock').addEventListener('click', () => { lockBrowser('Vault locked in this browser. Access windows you started keep running until they end.'); load(); $('vault-status-title').focus(); });
@@ -477,7 +490,7 @@ $('vault-lock-all-dialog').addEventListener('close', () => $('vault-lock-all').f
 $('vault-lock-all-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (state.busy) return;
-  const generation = state.generation; state.busy = 'lock-all'; $('vault-lock-all-confirm').disabled = true;
+  const generation = state.generation; state.busy = 'lock-all'; busyControl('vault-lock-all-confirm');
   try {
     await client.request('POST', '/api/vault/lock-execution', {body: '{}'});
     guard(generation);
@@ -485,7 +498,7 @@ $('vault-lock-all-form').addEventListener('submit', async event => {
     notice('All access windows for your account were stopped. Your vault in this browser was not changed.');
     await load();
   } catch (error) { failed(error, 'vault-lock-all-error'); }
-  finally { if (generation === state.generation) { state.busy = ''; $('vault-lock-all-confirm').disabled = false; render(); if (!$('vault-lock-all-dialog').open) $('vault-lock-all').focus(); } }
+  finally { if (generation === state.generation) { state.busy = ''; idleControl($('vault-lock-all-confirm')); render(); if (!$('vault-lock-all-dialog').open) $('vault-lock-all').focus(); } }
 });
 
 // ---- Requests: deny, confirm and explicit activation ----
@@ -616,17 +629,29 @@ $('vault-renew-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (state.busy || !state.renew) return;
   if (!unlocked()) { setError('vault-renew-error', 'Unlock your vault first. Renewal releases this credential’s key when access starts.'); return; }
-  const {request} = state.renew, generation = state.generation; state.busy = 'renew'; $('vault-renew-submit').disabled = true;
+  const {request} = state.renew, duration = Number($('vault-renew-duration').value), generation = state.generation; state.busy = 'renew'; busyControl('vault-renew-submit');
   try {
-    const body = {requester_access_id: request.requester.access_id, credential_id: request.credential.credential_id, duration_seconds: Number($('vault-renew-duration').value), max_calls: request.max_calls,
+    const body = {requester_access_id: request.requester.access_id, credential_id: request.credential.credential_id, duration_seconds: duration, max_calls: request.max_calls,
       tools: request.tools.map(t => ({tool_id: t.tool_id, constraints: t.constraints}))};
     const created = (await client.request('POST', '/api/access-requests', {body: JSON.stringify(body)})).data;
     guard(generation);
+    // The gateway binds the new request to current tool definitions and the
+    // current credential version. If those moved since this dialog was drawn,
+    // show the new request and release nothing until the owner reviews it.
+    if (reviewedScope(created) !== reviewedScope(request, duration)) {
+      await load();
+      guard(generation);
+      if (!state.renew) return;
+      state.renew.request = created;
+      $('vault-renew-scope').replaceChildren(scopeFacts(created));
+      setError('vault-renew-error', 'This request changed after you opened it, for example a tool definition or the credential version. Review it below, then allow it again.');
+      return;
+    }
     $('vault-renew-dialog').close();
     state.busy = '';
     await start(created);
   } catch (error) { failed(error, 'vault-renew-error'); }
-  finally { if (generation === state.generation) { state.busy = ''; $('vault-renew-submit').disabled = false; render(); } }
+  finally { if (generation === state.generation) { state.busy = ''; idleControl($('vault-renew-submit')); render(); } }
 });
 
 // ---- Credentials ----
@@ -666,12 +691,13 @@ $('vault-credential-form').addEventListener('submit', async event => {
   const bundle = headerBundle(connection, values);
   for (const input of $('vault-credential-fields').querySelectorAll('input')) input.value = '';
   for (const name of Object.keys(values)) values[name] = '';
-  const generation = state.generation; state.busy = 'credential'; $('vault-credential-save').disabled = true; $('vault-credential-save').textContent = 'Encrypting…';
+  const generation = state.generation, worker = vault; state.busy = 'credential'; busyControl('vault-credential-save', 'Encrypting…');
   try {
     const context = {owner_id: state.subject, root_id: root.root_id, root_version: root.root_version, connector_id: connection.id, credential_id: stored?.credential_id || crypto.randomUUID(), epoch: stored ? String(BigInt(stored.epoch) + 1n) : '1'};
     const digest = await destinationDigest(destination);
+    guard(generation);
     let sealed;
-    try { sealed = await vault.createCredential({context, revision: '1', destination_profile_sha256: digest, bundle}); }
+    try { sealed = await worker.createCredential({context, revision: '1', destination_profile_sha256: digest, bundle}); }
     catch { guard(generation); throw new OwnerError(0, 'encrypt', 'This browser could not encrypt the credential. Unlock the vault again and retry.'); }
     guard(generation);
     const record = {...context, revision: '1', destination, wrapped_key: sealed.wrapped_key, envelope: sealed.envelope};
@@ -684,7 +710,7 @@ $('vault-credential-form').addEventListener('submit', async event => {
     if (error.code === 'encrypt') setError('vault-credential-error', error.message);
     else if (error.code === 'conflict') { failed(error, 'vault-credential-error'); }
     else failed(error, 'vault-credential-error');
-  } finally { if (generation === state.generation) { state.busy = ''; $('vault-credential-save').disabled = false; $('vault-credential-save').textContent = 'Encrypt and save'; render(); } }
+  } finally { if (generation === state.generation) { state.busy = ''; idleControl($('vault-credential-save')); render(); } }
 });
 
 // ---- Settings: approval mode and passphrase ----
