@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-09-24 — Readable tool and history text
+
+Enlarged history headings, rows and status badges, tool names, visibility labels,
+filters and expanded tool details to 16px. Breadcrumbs, history timezone text and
+tool pagination are 15px. Expanded details stack on narrow screens; tool filters
+wrap without horizontal overflow, and mobile pagination controls are at least
+44px tall. Stylesheet version: `20260924-readable-tables-2`.
+
+The user reviewed a sample-data preview and approved publishing this batch.
+Local UI unit tests and Chromium checks passed for tool visibility/retry behavior
+and history/tool layouts at 1440, 1280, 1152, 1024, 390 and 320px across both
+themes. Expanded details, breadcrumbs and pagination passed at 1440, 390 and
+320px on both the tool directory and provider detail page, with no page errors
+or horizontal overflow. Screenshots were inspected. Gateway behavior is unchanged;
+the previous main CI passed Go build/vet and PostgreSQL-enabled race tests.
+
+## 2026-09-24 — PR #7 merge and UI deployment
+
+Merged [PR #7](https://github.com/YAPhoa/mcpwarden/pull/7) at `6878bfb` and
+deleted its feature branch. Merging current main into the PR required only a
+stylesheet cache-version conflict resolution; the vault console remains intact.
+The merged tree exactly matches reviewed head `b4efe79`. Text is larger across
+the console, the tool panel fills the available width, and narrow-screen
+dashboard badges stay on one line. Stylesheet version: `20260924-vault-text-1`.
+
+All mandatory [PR CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36008742358)
+jobs passed: Go build/vet and PostgreSQL-enabled race tests, Chromium, Firefox,
+WebKit, container smoke and security checks. Local UI tests and independent
+Chromium checks passed for tool controls and console routes at 1440px/390px in
+both themes and 320px dark. Real-gateway/PostgreSQL vault pages and credential
+and renewal dialogs also passed at 1440px/390px in both themes. Screenshots were
+inspected; no page errors or horizontal overflow occurred. The
+[post-merge CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36009754678) also
+passed all mandatory checks. CodeQL remains skipped for this private repository.
+
+Redeployed UI image `5204559f95b1` after a consistent protected backup at
+`/tmp/mcpwarden-predeploy-20260924-text-size-1/`, with keys separate at
+`/tmp/mcpwarden-predeploy-keys-20260924-text-size-1/` (directories 0700, files 0600).
+The gateway resumed in its existing container with image `290503294d1a`.
+Both services have zero restarts. Live health, API authorization/access/history
+boundaries, no-store, vault module MIME/CSP, exact served source assets and all
+12 branding/favicon assets passed verification. Backup hashes remain valid.
+
+Protected comparison confirmed unchanged accounts, connector credentials,
+visibility, deletion records, tool definitions, access records and audit history.
+Deployment keys and mounts were preserved. Live `owner_security` remains disabled;
+credential custody and ordinary tool execution are still server managed.
+
 ## 2026-09-24 — PR #5 merge and deployment
 
 Merged [PR #5](https://github.com/YAPhoa/mcpwarden/pull/5) at `3eff764` and
