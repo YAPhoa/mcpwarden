@@ -1128,3 +1128,29 @@ The one-step text increase now applies to every page (base 15px). Dashboard stat
 badges stay on one line at 390px. CSS only. UI tests pass (50). Chromium screenshots
 of every route at 1440px dark and light and 390px dark, plus the dialogs and sign-in,
 showed no page errors and no horizontal overflow. Not redeployed.
+
+## 2026-09-24 — Kaggle tool-call triage and string content repair
+
+Triaged the Kaggle upstream issues by calling Kaggle's MCP server directly
+without the gateway. `search_datasets` ignores `pageSize` there too (20 results
+for 3 or 5), and `search_competition_submissions` returns `{}` directly as well.
+The same "Permission ... was denied" errors come back directly. The gateway
+forwards arguments as raw bytes and returns upstream results and error text
+unchanged, so those items are upstream behaviour. The generic "An error
+occurred invoking ..." text is not produced by the gateway or the SDK.
+
+`tools/call` results whose `content` is a bare string or single object are now
+wrapped into the array form before SDK decoding (see decisions.md). New tests
+cover Streamable HTTP JSON and SSE bodies, stdio, and unchanged shapes; the new
+HTTP and stdio tests fail without the change.
+
+Review follow-up: the SSE wrapper buffers at most one event of
+`mcp.DefaultMaxEventSize` (16 MiB), counting comment and unknown-field lines, and
+the Streamable HTTP transport now sets the same `MaxEventSize` explicitly (the
+pinned SDK treats zero as uncapped there). Stdio tracking retires a `tools/call`
+ID on its response, on the outgoing `notifications/cancelled` for it, or on a
+failed write. Regressions cover an unterminated long line, many short comment
+lines, an oversized event held open over HTTP, and eight cancelled stdio calls
+the peer never answers; each fails with its fix reverted. `go build ./...`,
+`go vet ./...` and `go test -race ./...` passed locally; PostgreSQL-backed tests
+skipped without the fixture. Not redeployed.
