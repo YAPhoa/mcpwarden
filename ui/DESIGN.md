@@ -138,3 +138,35 @@ The supplied `logo-horizontal-dark.svg` and `logo-horizontal-light.svg` have
 identical light-background artwork. Both original files are retained; the UI
 uses the separate, correctly colored monogram/wordmark pairs. Monochrome variants
 are also available for future uses.
+
+## Tool visibility panel (2026-09-24)
+
+The connector Tools tab follows the user's supplied tool-visibility mockup. The
+heading gains a connection icon, and the Tools tab shows its count as a pill.
+The panel is titled Tool visibility and uses a search field with a clear button,
+an All / Shown / Hidden segmented view with counts, a Bulk actions menu, a
+Tool / Show to clients list head, and rows with the tool name, description,
+state word and switch. Footer text gives the tool total; pagination (10/25/50)
+stays in the footer.
+
+Shown means discoverable (`allowed && visible`), as before. Policy-denied tools
+read “Blocked” with a disabled switch, count as hidden and are never changed by
+bulk actions. Rows expand in place to show the MCP wire name, upstream (in the
+directory) and status, with a button that opens the existing schema and history
+dialog.
+
+Bulk actions now apply to the current view: every tool matching the search and
+view across all pages, not only the visible page. The menu names the scope and
+counts; a confirmation dialog states what changes and what stays. Every bulk
+save keeps policy-blocked tools' saved choices. On the unfiltered view, Show
+sends `mode: all` (tools found later are shown) only when no blocked tool is
+saved as hidden; otherwise, and for Hide and narrowed views, it sends
+`mode: selected` with the full enabled set for the upstream. The directory hides bulk actions unless a single upstream is selected.
+
+A switch save marks its row “Updating…” with a spinning knob. A failed save keeps
+the previous state and shows an inline error with Retry. The error remembers the
+requested visibility, so Retry repeats that request, and it clears once a later
+switch, bulk save or reload reaches that value. Successful changes post
+a short toast. A note above the list explains read-only snapshots, missing
+managed storage, and disabled or disconnected connections. Panel tokens are
+defined for both Dark and Light themes. Connection settings are unchanged.

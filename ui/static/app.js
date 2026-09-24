@@ -11,6 +11,10 @@ const refreshState = new Map();
 const dialogTriggers = new Map();
 const toolViews = new Map();
 const connectorScroll = new Map();
+// Row expansion is kept per tool key until the workspace changes. A failed save keeps the visibility
+// it asked for, so Retry repeats that request; it clears once any save or reload reaches that value.
+const expandedTools = new Set(), toolErrors = new Map();
+let bulkRequest = null, toastTimer = 0;
 function toolScope() {
   const route = readRoute();
   return route.view === 'detail' ? route.name : route.view === 'tools' ? route.provider : '';
@@ -28,7 +32,7 @@ function isDiscoverable(t) { return Boolean(t.allowed && t.healthy && t.visible 
 function clearWorkspace() {
   clearPasswordForm();
   callsLoaded=false;callsLoading=false;callsPage=1;callsRequest++;callsToolOptions=[]; appliedRange={from:'',to:'',fromTime:'',toTime:'',fromISO:'',toISO:''}; $('calls-rows').innerHTML=''; $('calls-filters').reset();
-  identityEpoch++; loading = false; accessData = null; accessLoading = false; accessAction = null; token = ''; session = null; toolViews.clear();
+  identityEpoch++; loading = false; accessData = null; accessLoading = false; accessAction = null; token = ''; session = null; toolViews.clear(); expandedTools.clear(); toolErrors.clear(); bulkRequest = null;
   providers = []; tools = []; connections.clear(); selected = ''; loaded = false; access = false; refreshState.clear();
   $('search').value = ''; $('upstream-search').value = ''; $('provider-filter').value = '';
   $('tool-title').textContent = ''; $('tool-identity').textContent = ''; $('tool-description').textContent = '';
@@ -94,10 +98,10 @@ function applyRoute(focus = false) {
   if ($('tool-panel').parentElement !== slot) slot.appendChild($('tool-panel'));
   $('provider-filter').hidden = route.view === 'detail';
   renderProviderFilter();
-  $('tool-panel-title').textContent = route.view === 'detail' ? 'Connector tools' : 'Tools';
+  $('tool-intro').hidden = route.view !== 'detail';
+  closeBulkMenu();
   const state = toolView();
   $('search').value = state.query;
-  $('discoverability-filter').value = state.filter;
   $('tool-page-size').value = String(state.size);
   for (const link of document.querySelectorAll('.nav-item')) {
     const active = link.dataset.view === (route.view === 'detail' ? 'upstreams' : route.view);
@@ -232,7 +236,7 @@ function renderDetails() {
   const base = '/upstreams/'+encodeURIComponent(selected);
   $('connection-tools-link').href = base;
   $('connection-settings-link').href = base+'/settings';
-  $('connection-tools-link').textContent = 'Tools'+(p?' · '+p.tool_count:'');
+  $('connection-tool-count').textContent = p ? p.tool_count : ''; $('connection-tool-count').hidden = !p;
   for(const [id,active] of [['connection-tools-link',!settings],['connection-settings-link',settings]]) { if(active)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current'); }
   $('provider-enabled-control').hidden = !p;
   const authEntry = connections.get(p?.name);
@@ -278,30 +282,68 @@ function renderProviderFilter() {
   $('provider-filter-label').textContent = names.length === 1 ? names[0] : names.length ? `${names.length} upstreams` : 'All upstreams';
   $('provider-options').innerHTML = providers.map(p => `<label><input type="checkbox" data-provider="${escapeHTML(p.name)}" ${names.includes(p.name) ? 'checked' : ''}>${escapeHTML(p.name)}</label>`).join('');
 }
+function queriedTools() {
+  const query = toolView().query.trim().toLowerCase();
+  return tools.filter(t => matchesToolScope(t) && `${toolLabel(t)} ${t.name} ${t.upstream} ${t.description || ''}`.toLowerCase().includes(query));
+}
 function filteredTools() {
-  const state = toolView(), provider = toolScope(), query = state.query.trim().toLowerCase();
-  return tools.filter(t => matchesToolScope(t) && `${toolLabel(t)} ${t.name} ${t.upstream} ${t.description || ''}`.toLowerCase().includes(query) && (state.filter === 'all' || (state.filter === 'discoverable' ? isToolDiscoverable(t) : !isToolDiscoverable(t))));
+  const filter = toolView().filter;
+  return queriedTools().filter(t => filter === 'all' || (filter === 'discoverable' ? isToolDiscoverable(t) : !isToolDiscoverable(t)));
+}
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+function visibilityViewLabel(filter) { return filter === 'discoverable' ? 'Shown only' : filter === 'not-discoverable' ? 'Hidden only' : 'All tools'; }
+function toolStateWord(t) { return !t.allowed ? 'Blocked' : t.visible ? 'Shown' : 'Hidden'; }
+function toolStatusDetail(t) {
+  if (!t.allowed) return `Denied by gateway policy. Clients cannot see it${t.visible ? ' even though your setting shows it' : ''}.`;
+  return t.visible ? 'Shown to clients while this connection is enabled and connected.' : 'Hidden from clients by your visibility setting.';
+}
+const chevronIcon = '<svg aria-hidden="true" class="icon" focusable="false" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>';
+function renderToolRow(t, detailId, provider) {
+  const key = escapeHTML(toolKey(t)), label = escapeHTML(toolLabel(t)), open = expandedTools.has(toolKey(t)), failed = toolErrors.get(toolKey(t));
+  const error = failed && `Not saved. ${toolLabel(t)} is still ${t.visible ? 'shown' : 'hidden'}.`;
+  return `<li class="tool-row"><div class="tool-main"><div class="tool-identity"><button class="tool-expand" type="button" data-expand="${key}" aria-expanded="${open}" aria-controls="${detailId}">${chevronIcon}<span class="tool-label">${label}</span></button>${provider ? '' : `<span class="tool-upstream">${escapeHTML(t.upstream)}</span>`}<p class="tool-description">${escapeHTML(t.description || 'No description supplied.')}</p></div><div class="switch-area"><span class="state-word${t.allowed ? '' : ' blocked'}"${t.allowed ? ' aria-hidden="true"' : ''}>${toolStateWord(t)}</span><label class="switch"><input class="tool-visibility" role="switch" type="checkbox" data-tool="${key}" ${t.visible ? 'checked' : ''} ${!access || !t.allowed || !managedAvailable || mutating ? 'disabled' : ''} aria-label="Show ${label}${provider ? '' : ` from ${escapeHTML(t.upstream)}`} to clients"><span class="switch-track"></span></label></div></div>${error ? `<div class="row-error" role="alert"><span>${escapeHTML(error)}</span><button class="retry" type="button" data-retry="${key}">Retry</button></div>` : ''}<div class="tool-extra" id="${detailId}"${open ? '' : ' hidden'}><dl><dt>MCP name</dt><dd><code>${escapeHTML(t.name)}</code></dd>${provider ? '' : `<dt>Upstream</dt><dd>${escapeHTML(t.upstream)}</dd>`}<dt>Status</dt><dd>${toolStatusDetail(t)}</dd></dl><button class="tool-name" type="button" data-tool="${key}">Schema and call history</button></div></li>`;
+}
+function renderToolEmpty(scoped, queried, provider, filter) {
+  const plain = text => `<li class="tool-empty">${text}</li>`;
+  if (!access) return plain('Management access is required to view tools.');
+  if (!loaded) return plain('Loading tools…');
+  if (!scoped.length) return plain(provider && !providers.some(p => p.name === provider) ? 'No tools match your filters.' : 'No tools have been discovered for this selection.');
+  const noMatches = !queried.length;
+  const title = noMatches ? 'No tools match your search' : filter === 'not-discoverable' ? 'No hidden tools in this view' : 'No shown tools in this view';
+  const copy = noMatches ? 'Try a different name or description.' : 'Switch to All to browse the matching tools.';
+  return `<li class="tool-empty"><span aria-hidden="true" class="empty-icon"><svg class="icon" focusable="false" viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.7"/><path d="m16 16 4 4"/></svg></span><h3>${title}</h3><p>${copy}</p><button type="button" data-empty-action="${noMatches ? 'clear' : 'all'}">${noMatches ? 'Clear search' : 'View all matching tools'}</button></li>`;
+}
+function renderToolNote(provider) {
+  const p = readRoute().view === 'detail' ? providers.find(x => x.name === provider) : null;
+  const note = !loaded ? '' : !access ? 'Showing the last loaded snapshot. Reload to change tool visibility.' : !managedAvailable ? 'Visibility settings are not configured on this gateway, so these switches are read-only.' : p?.enabled === false ? 'This connection is disabled. Clients receive none of its tools until you enable it; the choices below are kept.' : p && !p.healthy ? 'This connection is not connected right now. Clients receive its shown tools once it reconnects.' : '';
+  $('tool-panel-note').textContent = note; $('tool-panel-note').hidden = !note;
+}
+function reconcileToolErrors() {
+  for (const [key, failed] of toolErrors) { const tool = tools.find(t => toolKey(t) === key); if (!tool || tool.visible === failed.visible) toolErrors.delete(key); }
 }
 function renderTools() {
-  const state = toolView(), provider = toolScope();
-  $('tool-upstream-heading').hidden = Boolean(provider);
-  $('bulk-tool-actions').hidden = !provider;
-  $('enable-all-tools').disabled = $('disable-all-tools').disabled = !provider || !access || !managedAvailable || mutating;
-
-  const scoped = tools.filter(matchesToolScope);
-  const matching = filteredTools();
+  reconcileToolErrors();
+  const state = toolView(), provider = toolScope(), detail = readRoute().view === 'detail';
+  const scoped = tools.filter(matchesToolScope), queried = queriedTools(), matching = filteredTools();
+  const shownCount = queried.filter(isToolDiscoverable).length;
+  for (const [id, value] of [['count-all', queried.length], ['count-shown', shownCount], ['count-hidden', queried.length - shownCount]]) $(id).textContent = loaded ? value : '—';
+  for (const filter of ['all', 'discoverable', 'not-discoverable']) $('filter-' + filter).checked = state.filter === filter;
   const pages = Math.max(1, Math.ceil(matching.length / state.size));
   state.page = Math.min(Math.max(1, state.page), pages);
   const start = (state.page - 1) * state.size, visible = matching.slice(start, start + state.size);
-  const counts = loaded ? `${scoped.filter(isToolDiscoverable).length} / ${scoped.length} discoverable` : '—';
-  $('tool-count').textContent = counts; $('tool-summary-count').textContent = counts;
+  const query = state.query.trim(), narrowed = Boolean(query) || state.filter !== 'all';
+  $('tool-count').textContent = loaded ? `${scoped.filter(isToolDiscoverable).length} / ${scoped.length} shown` : '—';
+  $('tool-summary-count').textContent = !loaded ? '' : narrowed ? `${matching.length} of ${plural(scoped.length, 'tool')} in this view` : `${plural(scoped.length, 'tool')}${detail ? ' in this connection' : ''}`;
+  $('tool-result-caption').hidden = !loaded || !narrowed;
+  $('tool-result-caption').textContent = `${plural(matching.length, 'tool')}${query ? ` matching “${query}”` : ''} · ${visibilityViewLabel(state.filter)}`;
+  $('clear-search').hidden = !state.query;
   $('tool-page-status').textContent = loaded ? `${matching.length ? start + 1 : 0}–${Math.min(start + state.size, matching.length)} of ${matching.length} tools · Page ${state.page} of ${pages}` : 'Inventory unavailable';
   $('tool-previous').disabled = state.page <= 1; $('tool-next').disabled = state.page >= pages;
-  $('tools').innerHTML = visible.length ? visible.map(t => {
-    const discoverable = isToolDiscoverable(t);
-    const reason = !t.allowed ? 'Denied by policy' : !t.visible ? 'Hidden by you' : '';
-    return `<tr><td><button class="tool-name" type="button" data-tool="${escapeHTML(toolKey(t))}">${escapeHTML(toolLabel(t))}</button><span class="tool-summary">${escapeHTML(t.description || 'No description supplied.')}</span></td>${provider ? '' : `<td data-label="Upstream">${escapeHTML(t.upstream)}</td>`}<td data-label="Discovery"><span class="badge ${discoverable ? 'success' : !t.allowed ? 'failure' : 'warning'}">${discoverable ? 'Discoverable' : 'Not discoverable'}</span>${reason ? `<span class="tool-summary">${reason}</span>` : ''}</td><td data-label="Enabled"><label class="visibility-toggle"><input class="tool-visibility" role="switch" type="checkbox" data-tool="${escapeHTML(toolKey(t))}" ${t.visible ? 'checked' : ''} ${!access || !t.allowed || !managedAvailable || mutating ? 'disabled' : ''} aria-label="Enable ${escapeHTML(toolLabel(t))} from ${escapeHTML(t.upstream)} for discovery"><span>${t.visible ? 'On' : 'Off'}</span></label></td></tr>`;
-  }).join('') : `<tr><td colspan="${provider ? 3 : 4}" class="empty">${!access ? 'Management access is required to view tools.' : !loaded ? 'Loading tools…' : scoped.length || provider && !providers.some(p => p.name === provider) ? 'No tools match your filters.' : 'No tools have been discovered for this selection.'}</td></tr>`;
+  $('bulk-tool-actions').hidden = !provider;
+  $('bulk-button').disabled = !provider || !access || !managedAvailable || mutating || !matching.length;
+  if ($('bulk-button').disabled) closeBulkMenu();
+  renderToolNote(provider);
+  $('tools').innerHTML = visible.length ? visible.map((t, i) => renderToolRow(t, `tool-detail-${start + i}`, provider)).join('') : renderToolEmpty(scoped, queried, provider, state.filter);
 }
 function render() {
   $('add-upstream').disabled = !access || !managedAvailable || mutating;
@@ -350,8 +392,11 @@ $('refresh').addEventListener('click', async () => {
   } finally {mutating=false;$('refresh').disabled=!access;$('refresh').classList.remove('saving-control');$('refresh').setAttribute('aria-busy','false');render();}
 });
 $('upstream-search').addEventListener('input', renderUpstreams);
-$('search').addEventListener('input', () => { const state = toolView(); state.query = $('search').value; state.page = 1; renderTools(); });
-$('discoverability-filter').addEventListener('change', () => { const state = toolView(); state.filter = $('discoverability-filter').value; state.page = 1; renderTools(); });
+$('search').addEventListener('input', () => { const state = toolView(); state.query = $('search').value; state.page = 1; closeBulkMenu(); renderTools(); });
+function clearToolSearch() { const state = toolView(); state.query = ''; state.page = 1; $('search').value = ''; renderTools(); $('search').focus(); }
+$('clear-search').addEventListener('click', clearToolSearch);
+function setToolFilter(filter) { const state = toolView(); state.filter = filter; state.page = 1; closeBulkMenu(); renderTools(); }
+$('visibility-filters').addEventListener('change', event => { if (event.target.name === 'tool-visibility-filter') setToolFilter(event.target.value); });
 $('tool-page-size').addEventListener('change', () => { const state = toolView(); state.size = Number($('tool-page-size').value); state.page = 1; renderTools(); });
 $('tool-previous').addEventListener('click', () => { toolView().page--; renderTools(); });
 $('tool-next').addEventListener('click', () => { toolView().page++; renderTools(); });
@@ -417,12 +462,12 @@ $('upstream-details').addEventListener('click', async event => {
 });
 function lockMutationControls() {
   // Keep the native switch and its new checked state mounted until the save completes.
-  document.querySelectorAll('.tool-visibility, .provider-toggle, .provider-refresh, #provider-enabled, #refresh-tools, #visibility-mode, #enable-all-tools, #disable-all-tools, #add-upstream, #dashboard-add, #remove-upstream, #connect-upstream-account').forEach(el => { el.disabled = true; });
+  document.querySelectorAll('.tool-visibility, .provider-toggle, .provider-refresh, #provider-enabled, #refresh-tools, #visibility-mode, #bulk-button, #add-upstream, #dashboard-add, #remove-upstream, #connect-upstream-account').forEach(el => { el.disabled = true; });
 }
 async function updateVisibility(name, mode, enabled) {
   if (!access || !managedAvailable || mutating) return;
   const epoch = identityEpoch;
-  const controls = [...document.querySelectorAll('.tool-visibility, #visibility-mode, #enable-all-tools, #disable-all-tools')].map(el => [el, el.disabled]);
+  const controls = [...document.querySelectorAll('.tool-visibility, #visibility-mode, #bulk-button')].map(el => [el, el.disabled]);
   mutating = true;
   for (const [el] of controls) { el.classList.add('saving-control'); el.disabled = true; }
   try {
@@ -434,8 +479,9 @@ async function updateVisibility(name, mode, enabled) {
     const names = new Set(actualEnabled);
     for (const tool of tools) if (tool.upstream === name) tool.visible = actualMode === 'all' || names.has(tool.name);
     if (selected === name && $('visibility-mode')) $('visibility-mode').value = actualMode;
+    return true;
   }
-  catch (error) { notice(`Visibility was not saved. ${error.message}`); }
+  catch (error) { notice(`Visibility was not saved. ${error.message}`); return false; }
   finally {
     mutating = false;
     for (const [el, disabled] of controls) { el.disabled = disabled; el.classList.remove('saving-control'); }
@@ -449,19 +495,127 @@ $('upstream-details').addEventListener('change', async event => {
   await updateVisibility(p.name, event.target.value, p.enabled_tools || []);
   $('visibility-mode')?.focus();
 });
-$('enable-all-tools').addEventListener('click', () => updateVisibility(toolScope(), 'all', []));
-$('disable-all-tools').addEventListener('click', () => updateVisibility(toolScope(), 'selected', []));
+function toast(message) {
+  clearTimeout(toastTimer); $('toast').textContent = message;
+  toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 4500);
+}
+// Enabled names for one upstream after changing the given tools, starting from the saved selection.
+function enabledAfter(name, changes) {
+  const p = providers.find(p => p.name === name);
+  const enabled = new Set(p?.visibility_mode === 'selected' ? p.enabled_tools || [] : tools.filter(t => t.upstream === name).map(t => t.name));
+  for (const [tool, visible] of changes) { if (visible) enabled.add(tool.name); else enabled.delete(tool.name); }
+  return [...enabled];
+}
+async function setToolVisible(item, visible) {
+  const key = toolKey(item);
+  const saved = await updateVisibility(item.upstream, 'selected', enabledAfter(item.upstream, [[item, visible]]));
+  if (saved) { toolErrors.delete(key); toast(`${toolLabel(item)} is now ${visible ? 'shown to' : 'hidden from'} clients.`); }
+  else if (access) toolErrors.set(key, {visible});
+  if (access) renderTools();
+  [...$('tools').querySelectorAll('.tool-visibility')].find(el => el.dataset.tool === key)?.focus();
+  if (!document.activeElement || document.activeElement === document.body) $('filter-' + toolView().filter).focus();
+}
+// Policy-denied tools stay in the view but bulk actions leave them alone, like their disabled switches.
+function bulkCounts() {
+  const rows = filteredTools(), editable = rows.filter(t => t.allowed);
+  return {rows, blocked: rows.length - editable.length, hidden: editable.filter(t => !t.visible), shown: editable.filter(t => t.visible)};
+}
+function closeBulkMenu(returnFocus = false) {
+  const open = !$('bulk-menu').hidden;
+  $('bulk-menu').hidden = true; $('bulk-button').setAttribute('aria-expanded', 'false');
+  if (returnFocus && open) $('bulk-button').focus();
+}
+function openBulkMenu(last = false) {
+  if ($('bulk-button').disabled) return;
+  const state = toolView(), query = state.query.trim(), {rows, hidden, shown} = bulkCounts();
+  $('bulk-scope').textContent = `Current view · ${plural(rows.length, query ? 'matching tool' : 'tool')}`;
+  $('bulk-query').textContent = `${toolScope()} · ${query ? `“${query}” · ` : ''}${visibilityViewLabel(state.filter)}`;
+  $('bulk-show-label').textContent = hidden.length ? `Show ${plural(hidden.length, 'hidden tool')}…` : 'No hidden tools to show';
+  $('bulk-hide-label').textContent = shown.length ? `Hide ${plural(shown.length, 'shown tool')}…` : 'No shown tools to hide';
+  $('bulk-show').disabled = !hidden.length; $('bulk-hide').disabled = !shown.length;
+  $('bulk-menu').hidden = false; $('bulk-button').setAttribute('aria-expanded', 'true');
+  const items = [...$('bulk-menu').querySelectorAll('.menu-action:not(:disabled)')];
+  (last ? items.at(-1) : items[0])?.focus();
+}
+// A bulk change covers every allowed tool in the current search and filter, across all pages.
+// Policy-blocked tools keep their saved choice. Showing everything on the unfiltered view sends
+// mode all, so tools found later are shown too, but only when that leaves no blocked tool changed.
+function prepareBulk(show) {
+  const state = toolView(), name = toolScope(), {hidden, shown, blocked} = bulkCounts();
+  const targets = show ? hidden : shown, whole = !state.query.trim() && state.filter === 'all';
+  const enabled = enabledAfter(name, targets.map(t => [t, show]));
+  const everything = tools.filter(t => t.upstream === name).every(t => enabled.includes(t.name));
+  const body = whole && show && everything ? {mode: 'all', enabled: []} : {mode: 'selected', enabled};
+  return {name, show, count: targets.length, unchanged: (show ? shown : hidden).length, blocked, query: state.query.trim(), filter: state.filter, body};
+}
+function beginBulk(show) {
+  const request = prepareBulk(show);
+  if (!request.count) return;
+  bulkRequest = request; closeBulkMenu(); $('bulk-button').focus();
+  const verb = show ? 'Show' : 'Hide', tools = plural(request.count, 'tool');
+  $('bulk-confirm-title').textContent = `${verb} ${tools} ${show ? 'to' : 'from'} clients?`;
+  $('bulk-confirm-description').textContent = `${show ? 'Include' : 'Exclude'} ${plural(request.count, show ? 'hidden tool' : 'shown tool')} ${show ? 'in' : 'from'} this connection’s client-facing tool list.`;
+  $('bulk-confirm-connection').textContent = request.name;
+  $('bulk-confirm-scope').textContent = `${request.query ? `Search “${request.query}” · ` : ''}${visibilityViewLabel(request.filter)}`;
+  const already = request.unchanged ? `${plural(request.unchanged, 'tool')} in this view ${request.unchanged === 1 ? 'is' : 'are'} already ${show ? 'shown' : 'hidden'}. ` : '';
+  const blocked = request.blocked ? `${plural(request.blocked, 'tool')} blocked by gateway policy will not change. ` : '';
+  $('bulk-confirm-unchanged').textContent = `${already}${blocked}Tools outside this view will not change.`;
+  $('bulk-confirm-error').textContent = '';
+  $('bulk-submit').textContent = `${verb} ${tools}`;
+  openDialog('bulk-confirm'); $('bulk-cancel').focus();
+}
+async function applyBulk() {
+  const request = bulkRequest;
+  if (!request || mutating) return false;
+  $('bulk-submit').disabled = $('bulk-cancel').disabled = true;
+  try {
+    const saved = await updateVisibility(request.name, request.body.mode, request.body.enabled);
+    if (!saved) { $('bulk-confirm-error').textContent = 'Visibility was not saved. No tools changed.'; return false; }
+    bulkRequest = null; $('bulk-confirm').close?.();
+    toast(`${plural(request.count, 'tool')} ${request.show ? 'shown' : 'hidden'}. Other tools unchanged.`);
+    return true;
+  } finally { $('bulk-submit').disabled = $('bulk-cancel').disabled = false; }
+}
+$('bulk-button').addEventListener('click', () => $('bulk-menu').hidden ? openBulkMenu() : closeBulkMenu(true));
+$('bulk-button').addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openBulkMenu(event.key === 'ArrowUp'); }
+  else if (event.key === 'Escape' && !$('bulk-menu').hidden) { event.preventDefault(); event.stopPropagation(); closeBulkMenu(true); }
+});
+$('bulk-menu').addEventListener('keydown', event => {
+  const items = [...$('bulk-menu').querySelectorAll('.menu-action:not(:disabled)')], index = items.indexOf(document.activeElement);
+  const move = {ArrowDown: index + 1, ArrowUp: index - 1 + items.length, Home: 0, End: items.length - 1}[event.key];
+  if (move !== undefined) { event.preventDefault(); items[move % items.length]?.focus(); }
+  else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeBulkMenu(true); }
+  else if (event.key === 'Tab') closeBulkMenu();
+});
+$('bulk-show').addEventListener('click', () => beginBulk(true));
+$('bulk-hide').addEventListener('click', () => beginBulk(false));
+$('bulk-cancel').addEventListener('click', () => $('bulk-confirm').close());
+$('bulk-confirm').addEventListener('close', () => { bulkRequest = null; });
+$('bulk-confirm-form').addEventListener('submit', async event => { event.preventDefault(); await applyBulk(); });
+document.addEventListener('pointerdown', event => { if (!event.target.closest?.('.bulk-wrap')) closeBulkMenu(); });
 $('tools').addEventListener('change', async event => {
   const input = event.target.closest('.tool-visibility'); if (!input) return;
-  const item = tools.find(t => toolKey(t) === input.dataset.tool), p = providers.find(p => p.name === item.upstream);
-  const enabled = new Set(p.visibility_mode === 'selected' ? p.enabled_tools || [] : tools.filter(t => t.upstream === item.upstream).map(t => t.name));
-  if (input.checked) enabled.add(item.name); else enabled.delete(item.name);
-  if (input.nextElementSibling) input.nextElementSibling.textContent = input.checked ? 'On' : 'Off';
-  await updateVisibility(p.name, 'selected', [...enabled]);
-  [...$('tools').querySelectorAll('.tool-visibility')].find(el => el.dataset.tool === toolKey(item))?.focus();
-  if (!document.activeElement || document.activeElement === document.body) $('discoverability-filter').focus();
+  const item = tools.find(t => toolKey(t) === input.dataset.tool);
+  const row = input.closest?.('.tool-row');
+  if (row) { row.classList.add('pending'); row.querySelector('.state-word').textContent = 'Updating…'; }
+  await setToolVisible(item, input.checked);
 });
 $('tools').addEventListener('click', event => {
+  const expand = event.target.closest('.tool-expand');
+  if (expand) {
+    const key = expand.dataset.expand;
+    if (expandedTools.has(key)) expandedTools.delete(key); else expandedTools.add(key);
+    renderTools(); [...$('tools').querySelectorAll('.tool-expand')].find(el => el.dataset.expand === key)?.focus();
+    return;
+  }
+  const retry = event.target.closest('.retry');
+  if (retry) { const item = tools.find(t => toolKey(t) === retry.dataset.retry), failed = toolErrors.get(retry.dataset.retry); if (item && failed && !mutating) setToolVisible(item, failed.visible); return; }
+  const empty = event.target.closest('[data-empty-action]');
+  if (empty) {
+    if (empty.dataset.emptyAction === 'clear') clearToolSearch(); else { setToolFilter('all'); $('filter-all').focus(); }
+    return;
+  }
   const button = event.target.closest('.tool-name'); if (!button) return;
   const item = tools.find(t => toolKey(t) === button.dataset.tool);
   $('tool-title').textContent = toolLabel(item); $('tool-identity').textContent = `${item.upstream} · MCP name: ${item.name}`; $('tool-description').textContent = item.description || 'No description supplied.';

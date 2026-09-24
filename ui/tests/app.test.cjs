@@ -12,7 +12,7 @@ async function app({authGate, providers = [], tools = [], connections = [], stat
   };
   const payload = {'/api/auth/options': {mode: 'accounts', registration: true}, '/api/status': {ready: providers.some(p => p.healthy), session}, '/api/tools': tools, '/api/providers': providers, '/api/connections': connections};
   let responseStatus = status;
-  const context = vm.createContext({location: {hash, pathname:'/', search:''}, history:{replaceState(_state,_title,path){context.location.pathname=path;context.location.hash='';},pushState(_state,_title,path){context.location.pathname=path;context.location.hash='';}}, window: {addEventListener() {}}, document: {addEventListener() {}, body: {classList: {toggle() {}}}, getElementById: node, querySelectorAll() {return [];}}, sessionStorage: {removeItem(key) {assert.equal(key, 'mcpwarden-token');}}, URL, setTimeout,
+  const context = vm.createContext({location: {hash, pathname:'/', search:''}, history:{replaceState(_state,_title,path){context.location.pathname=path;context.location.hash='';},pushState(_state,_title,path){context.location.pathname=path;context.location.hash='';}}, window: {addEventListener() {}}, document: {addEventListener() {}, body: {classList: {toggle() {}}}, getElementById: node, querySelectorAll() {return [];}}, sessionStorage: {removeItem(key) {assert.equal(key, 'mcpwarden-token');}}, URL, setTimeout, clearTimeout,
     fetch: async (path, options) => {
       requests.push({path, options});
       if(path==='/api/auth/options' && authGate)await authGate;
@@ -144,7 +144,7 @@ test('connector tools paginate, search and filter using tool visibility and poli
   const ui = await app({providers:[provider({tool_count:71})],tools:list,hash:'#/upstreams/docs'});
   assert.equal(ui.node('breadcrumb-upstreams').hidden,false);
   assert.equal(ui.node('tool-panel').parentElement, ui.node('connector-tool-slot'));
-  assert.equal((ui.node('tools').innerHTML.match(/<tr>/g)||[]).length,10);
+  assert.equal((ui.node('tools').innerHTML.match(/class="tool-row"/g)||[]).length,10);
   assert.match(ui.node('tool-page-status').textContent,/1–10 of 71 tools · Page 1 of 8/);
   ui.run('toolView().page=8; renderTools()');
   assert.match(ui.node('tool-page-status').textContent,/71–71 of 71/);
@@ -171,8 +171,9 @@ test('connector toggle preserves tools outside current search and page', async (
 test('short labels use UUID actions and retain MCP wire names', async () => {
  const list=['docs','other'].map((upstream,i)=>({id:`uuid-${i}`,display_name:'read',name:`${upstream}__read`,upstream,allowed:true,healthy:true,visible:true}));
  const ui=await app({providers:[provider(),provider({name:'other'})],tools:list,hash:'#/tools'});
- assert.match(ui.node('tools').innerHTML,/data-tool="uuid-0">read<\/button>/);
- assert.match(ui.node('tools').innerHTML,/data-tool="uuid-1">read<\/button>/);
+ assert.match(ui.node('tools').innerHTML,/data-expand="uuid-0"[^>]*>.*?<span class="tool-label">read<\/span>/);
+ assert.match(ui.node('tools').innerHTML,/data-expand="uuid-1"[^>]*>.*?<span class="tool-label">read<\/span>/);
+ assert.match(ui.node('tools').innerHTML,/<code>other__read<\/code>/);
  await ui.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'uuid-1'},checked:false})}});
  const request=ui.requests.find(r=>r.options.method==='PUT');
  assert.equal(request.path,'/api/providers/other/visibility');
@@ -204,16 +205,30 @@ test('upstream summary distinguishes provider state from saved tool choices', as
  assert.equal(ui.node('upstream-summary').textContent,'1 enabled · 1 disabled · 2 total upstreams');
  assert.match(ui.node('upstreams').innerHTML,/1 enabled · 1 disabled · 2 total tools/);
 });
-test('bulk controls apply to the entire scoped provider despite filters',async()=>{
- const ui=await app({providers:[provider()],hash:'#/upstreams/docs'});
- ui.run("toolView().query='not-matching'; toolView().page=4; renderTools()");
- await ui.node('disable-all-tools').handlers.click();
- await ui.node('enable-all-tools').handlers.click();
+test('bulk actions change only tools in the current view, across pages',async()=>{
+ const list=Array.from({length:30},(_,i)=>({name:`docs__${i<12?'issue':'repo'}_${String(i).padStart(2,'0')}`,upstream:'docs',allowed:i!==1,healthy:true,visible:i%3===0}));
+ const ui=await app({providers:[provider({visibility_mode:'selected',enabled_tools:list.filter(t=>t.visible).map(t=>t.name)})],tools:list,hash:'#/upstreams/docs'});
+ ui.run("toolView().query='issue'; toolView().page=2; renderTools()");
+ assert.equal(ui.node('count-all').textContent,12);
+ assert.equal(ui.node('count-shown').textContent,4);
+ const show=ui.run('prepareBulk(true)');
+ assert.equal(show.count,7);
+ assert.equal(show.unchanged,4);
+ ui.run('bulkRequest=prepareBulk(true)');
+ assert.equal(await ui.run('applyBulk()'),true);
+ const body=JSON.parse(ui.requests.find(r=>r.options.method==='PUT').options.body);
+ assert.equal(body.mode,'selected');
+ assert.deepEqual(body.enabled.sort(),[...list.filter((t,i)=>i<12&&i!==1).map(t=>t.name),...list.filter((t,i)=>i>=12&&t.visible).map(t=>t.name)].sort());
+ ui.run("location.hash='#/tools'; applyRoute()");
+ assert.equal(ui.node('bulk-tool-actions').hidden,true);
+});
+test('bulk actions on the unfiltered view set the whole upstream',async()=>{
+ const ui=await app({providers:[provider({visibility_mode:'selected',enabled_tools:['docs__read']})],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__write',upstream:'docs',visible:false,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ ui.run('bulkRequest=prepareBulk(false)'); await ui.run('applyBulk()');
+ ui.run('bulkRequest=prepareBulk(true)'); await ui.run('applyBulk()');
  const writes=ui.requests.filter(r=>r.options.method==='PUT');
  assert.deepEqual(writes.map(r=>JSON.parse(r.options.body)),[{mode:'selected',enabled:[]},{mode:'all',enabled:[]}]);
  assert.ok(writes.every(r=>r.path==='/api/providers/docs/visibility'));
- ui.run("location.hash='#/tools'; applyRoute()");
- assert.equal(ui.node('bulk-tool-actions').hidden,true);
 });
 test('visibility switch does not repaint stale state while save is pending',async()=>{
  const ui=await app({providers:[provider()],hash:'#/upstreams/docs'});
@@ -244,18 +259,88 @@ test('connector state does not change tool discovery badges or filter counts', a
  const before=ui.node('tools').innerHTML;
  ui.run("providers[0].enabled=false;tools[0].healthy=false;render()");
  assert.equal(ui.node('tools').innerHTML,before);
- assert.equal(ui.node('tool-summary-count').textContent,'1 / 1 discoverable');
+ assert.equal(ui.node('count-shown').textContent,1);
+ assert.equal(ui.node('tool-summary-count').textContent,'1 tool in this connection');
  assert.equal(ui.node('overview-tools').textContent,0);
 });
 
 test('bulk visibility updates only the tool view without reloading inventory',async()=>{
  const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
  const previous=ui.requests.length;
- await ui.node('disable-all-tools').handlers.click();
+ ui.run('bulkRequest=prepareBulk(false)'); await ui.run('applyBulk()');
  assert.equal(ui.requests.length,previous+1);
- assert.equal(ui.node('tool-summary-count').textContent,'0 / 1 discoverable');
- await ui.node('enable-all-tools').handlers.click();
- assert.equal(ui.node('tool-summary-count').textContent,'1 / 1 discoverable');
+ assert.equal(ui.node('count-shown').textContent,0);
+ assert.equal(ui.node('count-hidden').textContent,1);
+ ui.run('bulkRequest=prepareBulk(true)'); await ui.run('applyBulk()');
+ assert.equal(ui.node('count-shown').textContent,1);
+});
+test('failed switch saves keep the previous state and offer a retry',async()=>{
+ const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ ui.fail(500);
+ await ui.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ assert.equal(ui.run('tools[0].visible'),true);
+ assert.match(ui.node('tools').innerHTML,/role="alert"><span>Not saved\. docs__read is still shown\.<\/span><button class="retry" type="button" data-retry="docs__read">/);
+ ui.fail(200);
+ await ui.node('tools').handlers.click({target:{closest:selector=>selector==='.retry'?{dataset:{retry:'docs__read'}}:null}});
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ui.run('tools[0].visible'),false);
+ assert.doesNotMatch(ui.node('tools').innerHTML,/role="alert"/);
+});
+test('retry repeats the failed request and clears once a bulk save fulfils it',async()=>{
+ const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__list',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ ui.fail(500);
+ await ui.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ assert.match(ui.node('tools').innerHTML,/data-retry="docs__read"/);
+ assert.deepEqual({...ui.run("toolErrors.get('docs__read')")},{visible:false});
+ ui.fail(200);
+ ui.run("toolView().query='read'; bulkRequest=prepareBulk(false)"); assert.equal(await ui.run('applyBulk()'),true);
+ assert.equal(ui.run('tools.find(t=>t.name==="docs__read").visible'),false);
+ assert.doesNotMatch(ui.node('tools').innerHTML,/role="alert"/);
+ assert.equal(ui.run("toolErrors.size"),0);
+ const puts=ui.requests.filter(r=>r.options.method==='PUT').length;
+ await ui.node('tools').handlers.click({target:{closest:selector=>selector==='.retry'?{dataset:{retry:'docs__read'}}:null}});
+ assert.equal(ui.requests.filter(r=>r.options.method==='PUT').length,puts);
+});
+test('a stale retry sends the originally requested visibility and a reload clears it',async()=>{
+ const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ ui.fail(500);
+ await ui.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ ui.fail(200);
+ await ui.node('tools').handlers.click({target:{closest:selector=>selector==='.retry'?{dataset:{retry:'docs__read'}}:null}});
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(JSON.parse(ui.requests.filter(r=>r.options.method==='PUT').at(-1).options.body),{mode:'selected',enabled:[]});
+ const reloaded=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ reloaded.fail(500);
+ await reloaded.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ reloaded.run("tools[0].visible=false; renderTools()");
+ assert.doesNotMatch(reloaded.node('tools').innerHTML,/role="alert"/);
+ assert.equal(reloaded.run('toolErrors.size'),0);
+});
+test('unfiltered bulk actions keep policy-blocked tools saved choices',async()=>{
+ const mixed=blockedVisible=>[{name:'docs__open',upstream:'docs',visible:false,allowed:true,healthy:true},{name:'docs__shown',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__blocked',upstream:'docs',visible:blockedVisible,allowed:false,healthy:true}];
+ const saved=list=>provider({visibility_mode:'selected',enabled_tools:list.filter(t=>t.visible).map(t=>t.name)});
+ const hiddenBlocked=mixed(false), ui=await app({providers:[saved(hiddenBlocked)],tools:hiddenBlocked,hash:'#/upstreams/docs'});
+ const show=ui.run('prepareBulk(true)');
+ assert.equal(show.blocked,1);
+ assert.deepEqual({mode:show.body.mode,enabled:JSON.parse(JSON.stringify(show.body.enabled)).sort()},{mode:'selected',enabled:['docs__open','docs__shown']});
+ ui.run('bulkRequest=prepareBulk(true)'); await ui.run('applyBulk()');
+ assert.equal(ui.run('tools.find(t=>t.name==="docs__blocked").visible'),false);
+ const hide=ui.run('prepareBulk(false)');
+ assert.deepEqual(JSON.parse(JSON.stringify(hide.body)),{mode:'selected',enabled:[]});
+ const shownBlocked=mixed(true), other=await app({providers:[saved(shownBlocked)],tools:shownBlocked,hash:'#/upstreams/docs'});
+ assert.deepEqual(JSON.parse(JSON.stringify(other.run('prepareBulk(true)').body)),{mode:'all',enabled:[]});
+ other.run('bulkRequest=prepareBulk(false)'); await other.run('applyBulk()');
+ const body=JSON.parse(other.requests.filter(r=>r.options.method==='PUT').at(-1).options.body);
+ assert.deepEqual(body,{mode:'selected',enabled:['docs__blocked']});
+ assert.equal(other.run('tools.find(t=>t.name==="docs__blocked").visible'),true);
+ assert.equal(other.run('tools.find(t=>t.name==="docs__shown").visible'),false);
+});
+test('policy-denied tools read as blocked and cannot be switched',async()=>{
+ const ui=await app({providers:[provider()],tools:[{name:'docs__drop',upstream:'docs',visible:true,allowed:false,healthy:true}],hash:'#/upstreams/docs'});
+ assert.match(ui.node('tools').innerHTML,/<span class="state-word blocked">Blocked<\/span>/);
+ assert.match(ui.node('tools').innerHTML,/data-tool="docs__drop" checked disabled/);
+ assert.equal(ui.node('count-hidden').textContent,1);
+ assert.equal(ui.run('prepareBulk(true).count'),0);
 });
 
 test('unchanged inventory reload does not redraw the workspace',async()=>{
