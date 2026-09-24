@@ -228,3 +228,13 @@ switch, bulk save or reload reaches that value. Successful changes post
 a short toast. A note above the list explains read-only snapshots, missing
 managed storage, and disabled or disconnected connections. Panel tokens are
 defined for both Dark and Light themes. Connection settings are unchanged.
+
+Follow-up (2026-09-24): after using the merged panel, the user found the text too
+small and the page too empty. The panel now fills the content width, lining up with
+the heading actions, and its type is one step larger: tool names 14px, descriptions,
+view options and search 14px, secondary labels 12–13px.
+
+Site-wide type (2026-09-24): the user asked for the same text-size increase across
+the whole console. Every size outside the tool panel moved up one step (base 15px;
+11→12, 12→13, 13→14, 14→15px; larger headings unchanged). Dashboard status badges
+no longer wrap their arrow onto a second line on narrow screens.
