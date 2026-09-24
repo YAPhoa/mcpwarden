@@ -157,14 +157,16 @@ dialog.
 
 Bulk actions now apply to the current view: every tool matching the search and
 view across all pages, not only the visible page. The menu names the scope and
-counts; a confirmation dialog states what changes and what stays. On the
-unfiltered view, Show sends `mode: all` (tools found later are shown) and Hide
-sends `mode: selected` with no tools, matching the earlier Enable/Disable all
-buttons. Narrowed views send `mode: selected` with the full enabled set for the
-upstream. The directory hides bulk actions unless a single upstream is selected.
+counts; a confirmation dialog states what changes and what stays. Every bulk
+save keeps policy-blocked tools' saved choices. On the unfiltered view, Show
+sends `mode: all` (tools found later are shown) only when no blocked tool is
+saved as hidden; otherwise, and for Hide and narrowed views, it sends
+`mode: selected` with the full enabled set for the upstream. The directory hides bulk actions unless a single upstream is selected.
 
 A switch save marks its row “Updating…” with a spinning knob. A failed save keeps
-the previous state and shows an inline error with Retry. Successful changes post
+the previous state and shows an inline error with Retry. The error remembers the
+requested visibility, so Retry repeats that request, and it clears once a later
+switch, bulk save or reload reaches that value. Successful changes post
 a short toast. A note above the list explains read-only snapshots, missing
 managed storage, and disabled or disconnected connections. Panel tokens are
 defined for both Dark and Light themes. Connection settings are unchanged.

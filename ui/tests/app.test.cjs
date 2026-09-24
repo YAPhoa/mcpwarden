@@ -223,7 +223,7 @@ test('bulk actions change only tools in the current view, across pages',async()=
  assert.equal(ui.node('bulk-tool-actions').hidden,true);
 });
 test('bulk actions on the unfiltered view set the whole upstream',async()=>{
- const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__write',upstream:'docs',visible:false,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ const ui=await app({providers:[provider({visibility_mode:'selected',enabled_tools:['docs__read']})],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__write',upstream:'docs',visible:false,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
  ui.run('bulkRequest=prepareBulk(false)'); await ui.run('applyBulk()');
  ui.run('bulkRequest=prepareBulk(true)'); await ui.run('applyBulk()');
  const writes=ui.requests.filter(r=>r.options.method==='PUT');
@@ -285,6 +285,55 @@ test('failed switch saves keep the previous state and offer a retry',async()=>{
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(ui.run('tools[0].visible'),false);
  assert.doesNotMatch(ui.node('tools').innerHTML,/role="alert"/);
+});
+test('retry repeats the failed request and clears once a bulk save fulfils it',async()=>{
+ const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__list',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ ui.fail(500);
+ await ui.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ assert.match(ui.node('tools').innerHTML,/data-retry="docs__read"/);
+ assert.deepEqual({...ui.run("toolErrors.get('docs__read')")},{visible:false});
+ ui.fail(200);
+ ui.run("toolView().query='read'; bulkRequest=prepareBulk(false)"); assert.equal(await ui.run('applyBulk()'),true);
+ assert.equal(ui.run('tools.find(t=>t.name==="docs__read").visible'),false);
+ assert.doesNotMatch(ui.node('tools').innerHTML,/role="alert"/);
+ assert.equal(ui.run("toolErrors.size"),0);
+ const puts=ui.requests.filter(r=>r.options.method==='PUT').length;
+ await ui.node('tools').handlers.click({target:{closest:selector=>selector==='.retry'?{dataset:{retry:'docs__read'}}:null}});
+ assert.equal(ui.requests.filter(r=>r.options.method==='PUT').length,puts);
+});
+test('a stale retry sends the originally requested visibility and a reload clears it',async()=>{
+ const ui=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ ui.fail(500);
+ await ui.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ ui.fail(200);
+ await ui.node('tools').handlers.click({target:{closest:selector=>selector==='.retry'?{dataset:{retry:'docs__read'}}:null}});
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(JSON.parse(ui.requests.filter(r=>r.options.method==='PUT').at(-1).options.body),{mode:'selected',enabled:[]});
+ const reloaded=await app({providers:[provider()],tools:[{name:'docs__read',upstream:'docs',visible:true,allowed:true,healthy:true}],hash:'#/upstreams/docs'});
+ reloaded.fail(500);
+ await reloaded.node('tools').handlers.change({target:{closest:()=>({dataset:{tool:'docs__read'},checked:false})}});
+ reloaded.run("tools[0].visible=false; renderTools()");
+ assert.doesNotMatch(reloaded.node('tools').innerHTML,/role="alert"/);
+ assert.equal(reloaded.run('toolErrors.size'),0);
+});
+test('unfiltered bulk actions keep policy-blocked tools saved choices',async()=>{
+ const mixed=blockedVisible=>[{name:'docs__open',upstream:'docs',visible:false,allowed:true,healthy:true},{name:'docs__shown',upstream:'docs',visible:true,allowed:true,healthy:true},{name:'docs__blocked',upstream:'docs',visible:blockedVisible,allowed:false,healthy:true}];
+ const saved=list=>provider({visibility_mode:'selected',enabled_tools:list.filter(t=>t.visible).map(t=>t.name)});
+ const hiddenBlocked=mixed(false), ui=await app({providers:[saved(hiddenBlocked)],tools:hiddenBlocked,hash:'#/upstreams/docs'});
+ const show=ui.run('prepareBulk(true)');
+ assert.equal(show.blocked,1);
+ assert.deepEqual({mode:show.body.mode,enabled:JSON.parse(JSON.stringify(show.body.enabled)).sort()},{mode:'selected',enabled:['docs__open','docs__shown']});
+ ui.run('bulkRequest=prepareBulk(true)'); await ui.run('applyBulk()');
+ assert.equal(ui.run('tools.find(t=>t.name==="docs__blocked").visible'),false);
+ const hide=ui.run('prepareBulk(false)');
+ assert.deepEqual(JSON.parse(JSON.stringify(hide.body)),{mode:'selected',enabled:[]});
+ const shownBlocked=mixed(true), other=await app({providers:[saved(shownBlocked)],tools:shownBlocked,hash:'#/upstreams/docs'});
+ assert.deepEqual(JSON.parse(JSON.stringify(other.run('prepareBulk(true)').body)),{mode:'all',enabled:[]});
+ other.run('bulkRequest=prepareBulk(false)'); await other.run('applyBulk()');
+ const body=JSON.parse(other.requests.filter(r=>r.options.method==='PUT').at(-1).options.body);
+ assert.deepEqual(body,{mode:'selected',enabled:['docs__blocked']});
+ assert.equal(other.run('tools.find(t=>t.name==="docs__blocked").visible'),true);
+ assert.equal(other.run('tools.find(t=>t.name==="docs__shown").visible'),false);
 });
 test('policy-denied tools read as blocked and cannot be switched',async()=>{
  const ui=await app({providers:[provider()],tools:[{name:'docs__drop',upstream:'docs',visible:true,allowed:false,healthy:true}],hash:'#/upstreams/docs'});

@@ -11,7 +11,8 @@ const refreshState = new Map();
 const dialogTriggers = new Map();
 const toolViews = new Map();
 const connectorScroll = new Map();
-// Row expansion and failed saves are kept per tool key until the next successful save or workspace change.
+// Row expansion is kept per tool key until the workspace changes. A failed save keeps the visibility
+// it asked for, so Retry repeats that request; it clears once any save or reload reaches that value.
 const expandedTools = new Set(), toolErrors = new Map();
 let bulkRequest = null, toastTimer = 0;
 function toolScope() {
@@ -298,7 +299,8 @@ function toolStatusDetail(t) {
 }
 const chevronIcon = '<svg aria-hidden="true" class="icon" focusable="false" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>';
 function renderToolRow(t, detailId, provider) {
-  const key = escapeHTML(toolKey(t)), label = escapeHTML(toolLabel(t)), open = expandedTools.has(toolKey(t)), error = toolErrors.get(toolKey(t));
+  const key = escapeHTML(toolKey(t)), label = escapeHTML(toolLabel(t)), open = expandedTools.has(toolKey(t)), failed = toolErrors.get(toolKey(t));
+  const error = failed && `Not saved. ${toolLabel(t)} is still ${t.visible ? 'shown' : 'hidden'}.`;
   return `<li class="tool-row"><div class="tool-main"><div class="tool-identity"><button class="tool-expand" type="button" data-expand="${key}" aria-expanded="${open}" aria-controls="${detailId}">${chevronIcon}<span class="tool-label">${label}</span></button>${provider ? '' : `<span class="tool-upstream">${escapeHTML(t.upstream)}</span>`}<p class="tool-description">${escapeHTML(t.description || 'No description supplied.')}</p></div><div class="switch-area"><span class="state-word${t.allowed ? '' : ' blocked'}"${t.allowed ? ' aria-hidden="true"' : ''}>${toolStateWord(t)}</span><label class="switch"><input class="tool-visibility" role="switch" type="checkbox" data-tool="${key}" ${t.visible ? 'checked' : ''} ${!access || !t.allowed || !managedAvailable || mutating ? 'disabled' : ''} aria-label="Show ${label}${provider ? '' : ` from ${escapeHTML(t.upstream)}`} to clients"><span class="switch-track"></span></label></div></div>${error ? `<div class="row-error" role="alert"><span>${escapeHTML(error)}</span><button class="retry" type="button" data-retry="${key}">Retry</button></div>` : ''}<div class="tool-extra" id="${detailId}"${open ? '' : ' hidden'}><dl><dt>MCP name</dt><dd><code>${escapeHTML(t.name)}</code></dd>${provider ? '' : `<dt>Upstream</dt><dd>${escapeHTML(t.upstream)}</dd>`}<dt>Status</dt><dd>${toolStatusDetail(t)}</dd></dl><button class="tool-name" type="button" data-tool="${key}">Schema and call history</button></div></li>`;
 }
 function renderToolEmpty(scoped, queried, provider, filter) {
@@ -316,7 +318,11 @@ function renderToolNote(provider) {
   const note = !loaded ? '' : !access ? 'Showing the last loaded snapshot. Reload to change tool visibility.' : !managedAvailable ? 'Visibility settings are not configured on this gateway, so these switches are read-only.' : p?.enabled === false ? 'This connection is disabled. Clients receive none of its tools until you enable it; the choices below are kept.' : p && !p.healthy ? 'This connection is not connected right now. Clients receive its shown tools once it reconnects.' : '';
   $('tool-panel-note').textContent = note; $('tool-panel-note').hidden = !note;
 }
+function reconcileToolErrors() {
+  for (const [key, failed] of toolErrors) { const tool = tools.find(t => toolKey(t) === key); if (!tool || tool.visible === failed.visible) toolErrors.delete(key); }
+}
 function renderTools() {
+  reconcileToolErrors();
   const state = toolView(), provider = toolScope(), detail = readRoute().view === 'detail';
   const scoped = tools.filter(matchesToolScope), queried = queriedTools(), matching = filteredTools();
   const shownCount = queried.filter(isToolDiscoverable).length;
@@ -504,7 +510,7 @@ async function setToolVisible(item, visible) {
   const key = toolKey(item);
   const saved = await updateVisibility(item.upstream, 'selected', enabledAfter(item.upstream, [[item, visible]]));
   if (saved) { toolErrors.delete(key); toast(`${toolLabel(item)} is now ${visible ? 'shown to' : 'hidden from'} clients.`); }
-  else if (access) toolErrors.set(key, `Not saved. ${toolLabel(item)} is still ${item.visible ? 'shown' : 'hidden'}.`);
+  else if (access) toolErrors.set(key, {visible});
   if (access) renderTools();
   [...$('tools').querySelectorAll('.tool-visibility')].find(el => el.dataset.tool === key)?.focus();
   if (!document.activeElement || document.activeElement === document.body) $('filter-' + toolView().filter).focus();
@@ -531,12 +537,15 @@ function openBulkMenu(last = false) {
   const items = [...$('bulk-menu').querySelectorAll('.menu-action:not(:disabled)')];
   (last ? items.at(-1) : items[0])?.focus();
 }
-// A bulk change covers every tool in the current search and filter, across all pages. With no
-// search or filter it sets the whole upstream, so showing everything also shows tools found later.
+// A bulk change covers every allowed tool in the current search and filter, across all pages.
+// Policy-blocked tools keep their saved choice. Showing everything on the unfiltered view sends
+// mode all, so tools found later are shown too, but only when that leaves no blocked tool changed.
 function prepareBulk(show) {
   const state = toolView(), name = toolScope(), {hidden, shown, blocked} = bulkCounts();
   const targets = show ? hidden : shown, whole = !state.query.trim() && state.filter === 'all';
-  const body = whole ? {mode: show ? 'all' : 'selected', enabled: []} : {mode: 'selected', enabled: enabledAfter(name, targets.map(t => [t, show]))};
+  const enabled = enabledAfter(name, targets.map(t => [t, show]));
+  const everything = tools.filter(t => t.upstream === name).every(t => enabled.includes(t.name));
+  const body = whole && show && everything ? {mode: 'all', enabled: []} : {mode: 'selected', enabled};
   return {name, show, count: targets.length, unchanged: (show ? shown : hidden).length, blocked, query: state.query.trim(), filter: state.filter, body};
 }
 function beginBulk(show) {
@@ -601,7 +610,7 @@ $('tools').addEventListener('click', event => {
     return;
   }
   const retry = event.target.closest('.retry');
-  if (retry) { const item = tools.find(t => toolKey(t) === retry.dataset.retry); if (item && !mutating) setToolVisible(item, !item.visible); return; }
+  if (retry) { const item = tools.find(t => toolKey(t) === retry.dataset.retry), failed = toolErrors.get(retry.dataset.retry); if (item && failed && !mutating) setToolVisible(item, failed.visible); return; }
   const empty = event.target.closest('[data-empty-action]');
   if (empty) {
     if (empty.dataset.emptyAction === 'clear') clearToolSearch(); else { setToolFilter('all'); $('filter-all').focus(); }
