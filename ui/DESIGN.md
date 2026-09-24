@@ -244,8 +244,8 @@ for uppercase eyebrows, list headings and small counts; 13px for help text, row
 metadata, badges and field labels; 15px for body text, navigation, menu items,
 tabs and form values; 16px for tool and history rows; 18px for card and section
 headings. The sidebar account launcher and its menu now match the navigation
-(name and items 15px, secondary lines 13px). The menu items read My Account,
-Appearance and Security. The 11px list headings and
+(name and items 15px, secondary lines 13px). The menu items read Account,
+Appearance and Security, matching the settings tabs. The 11px list headings and
 calendar labels moved to 12px. History drops the "How timings and retention
 work" disclosure, whose points were repeated elsewhere on the page, for one
 line defining the timing columns and stating that payloads are not kept.
