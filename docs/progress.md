@@ -13,8 +13,21 @@ Local UI unit tests and Chromium checks passed for tool visibility/retry behavio
 and history/tool layouts at 1440, 1280, 1152, 1024, 390 and 320px across both
 themes. Expanded details, breadcrumbs and pagination passed at 1440, 390 and
 320px on both the tool directory and provider detail page, with no page errors
-or horizontal overflow. Screenshots were inspected. Gateway behavior is unchanged;
-the previous main CI passed Go build/vet and PostgreSQL-enabled race tests.
+or horizontal overflow. Screenshots were inspected. All mandatory
+[main CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36013974218) checks passed:
+Go build/vet and PostgreSQL-enabled race tests, Chromium, Firefox, WebKit,
+container smoke, security and required checks. CodeQL remains skipped for this
+private repository. Gateway behavior is unchanged.
+
+Published as `182a958` and redeployed UI image `939c23e95ef5`. A consistent
+protected backup is at `/tmp/mcpwarden-predeploy-20260924-readable-tables-1/`,
+with keys separate at `/tmp/mcpwarden-predeploy-keys-20260924-readable-tables-1/`.
+Gateway image `290503294d1a` and its container were retained. Live health, exact
+source assets, branding/MIME/CSP, authorization/access/history boundaries and
+no-store checks passed. Both services have zero restarts. Protected comparison
+verified unchanged accounts, credentials, tool discovery, visibility, access
+records and audit history; backup hashes, keys and mounts are preserved.
+Live `owner_security` remains disabled.
 
 ## 2026-09-24 — PR #7 merge and UI deployment
 
