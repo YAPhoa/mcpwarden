@@ -9,6 +9,15 @@ and History filter selects use 15px, card headings 18px, and the last 11px text
 is 12px. History replaces its timings and retention disclosure with one help
 line. Stylesheet version: `20260924-type-scale-1`.
 
+Follow-up: the dashboard stat cards now show live detail lines (enabled and
+disabled counts, "of N found" for tools, and the names of connectors needing
+attention, colored amber or green). The user then chose an 18px minimum for the
+whole console: all body, control, help and row text is 18px, uppercase captions
+and count pills are 16px, and headings scale up to match. Stylesheet version:
+`20260924-type-18-1`. UI tests pass (61). Chromium checks covered every route at
+1440px and 390px, plus the add-upstream dialog, bulk menu, expanded tool row and
+date picker, with no page errors or horizontal overflow.
+
 UI unit tests pass (61). Chromium checks against a synthetic API covered every
 workspace and settings route at 1440px and 390px, plus the account menu in both
 themes on mobile: no page errors or horizontal overflow. Gateway behavior is

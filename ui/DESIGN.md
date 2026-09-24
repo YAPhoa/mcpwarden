@@ -256,3 +256,11 @@ label, a 36px number and an 18px line with live detail: enabled and disabled
 counts, "of N found" for tools agents can use, and the names of connectors that
 need attention (or "All connected"). That card turns amber when a connector needs
 attention and green when all are connected.
+
+Minimum 18px (2026-09-24): the user chose 18px as the minimum for the whole
+console. Body, navigation, controls, help text, metadata, badges, table and
+tool rows are all 18px. Only uppercase eyebrows, column captions and small count
+pills are 16px. Headings: h3 and group headings 20px, card and section headings
+22px, page h2 24px, dialog titles 26px, h1 30px, dashboard numbers 40px. Icon
+glyphs keep their sizes. The sidebar eyebrow no longer wraps, and the tool list's
+"Show to clients" caption stays on one line on phones.
