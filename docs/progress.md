@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-09-24 — PR #6 merge and deployment
+
+Merged [PR #6](https://github.com/YAPhoa/mcpwarden/pull/6) at `266b329` and
+deleted its feature branch. The deployed UI has searchable connector tools,
+visibility filters, scoped bulk actions, expandable rows and retry controls.
+Review fixes preserve policy-blocked choices during bulk changes and retain the
+original requested visibility when retrying a failed save.
+
+The merged runtime source matches reviewed head `c7e511b`. Both the
+[PR CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35999110481) and
+[post-merge CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36001785180) passed
+`go build ./...`, `go vet ./...`, the full PostgreSQL-enabled race suite,
+Chromium/Firefox/WebKit, container smoke and security checks. Local UI tests and
+independent Chromium regressions passed for blocked choices and stale retries;
+the browser checks also found no page errors or mobile horizontal overflow.
+CodeQL remained skipped for this private repository.
+
+Redeployed the UI after a consistent stopped-gateway backup at
+`/tmp/mcpwarden-predeploy-20260924-tool-visibility-1/`; keys are stored separately
+at `/tmp/mcpwarden-predeploy-keys-20260924-tool-visibility-1/`. Backup directories
+are mode 0700 and files mode 0600; hashes were rechecked after deployment.
+UI image `533f127ca59b` runs in a new container. The gateway resumed in its
+existing container with image `2a9cd8050e77`; both have zero restarts.
+
+Live health, authorization/access/history boundaries, no-store, worker MIME/CSP,
+UI source bytes and all 12 branding/favicon assets passed verification. The
+encrypted account/provider catalog and audit history are unchanged byte-for-byte.
+Deployment keys and gateway mounts were preserved. Live `owner_security` remains
+disabled, and credential custody remains server managed. PR #5 was not merged.
+
 ## 2026-09-24 — Documentation and nginx PRs resolved
 
 Merged [PR #4](https://github.com/YAPhoa/mcpwarden/pull/4) at `7eda80f` and
