@@ -1,10 +1,12 @@
 # Browser vault primitives and encrypted storage
 
-This development slice implements the spec's root/credential wrapping formats,
-browser cryptographic primitives, and PostgreSQL ciphertext storage. The owner
-HTTP API, setup/unlock/recovery screens and application custody switch are still
-pending. The running gateway continues using its legacy encrypted file. Merely
-serving the new JavaScript assets does not activate client-release custody.
+This document covers the spec's root/credential wrapping formats, browser
+cryptographic primitives, and PostgreSQL ciphertext storage. The owner HTTP API
+(`docs/security/owner-api.md`) and the owner console's setup, recovery, unlock,
+credential and access-window screens (`/vault`, see `ui/DESIGN.md`) now use them
+when `owner_security` is enabled. The application custody switch is still
+pending: ordinary tool calls keep using the legacy encrypted file, and merely
+serving these assets does not activate client-release custody.
 
 ## Browser boundary
 
@@ -14,8 +16,9 @@ passphrase or recovery key, wrap independently random credential keys, authentic
 and release one selected key, change the passphrase wrapper, and lock. Lock
 terminates the worker and rejects outstanding operations. A new worker starts
 locked. There are no HTTP calls, local/session storage, IndexedDB writes, automatic
-key release, or whole-vault export operation in these modules. The returned
-recovery key belongs only in the future explicit owner recovery/save flow.
+key release, or whole-vault export operation in these modules. The owner console
+shows the returned recovery key once, requires the owner to type it back, and
+proves it opens the recovery wrapper before anything is uploaded.
 
 Passphrases use UTF-8 without trimming or Unicode normalization; malformed Unicode
 is rejected. Input is bounded to 1–1024 UTF-8 bytes. The sole supported profile is
@@ -43,8 +46,9 @@ dependency review remain release gates.
 
 The nginx `/security/` path explicitly serves JavaScript module MIME types and a
 worker CSP with same-origin scripts/workers, `wasm-unsafe-eval`, and no network
-connections. It does not add `unsafe-eval` to the main panel. Future owner-page CSP
-must allow those workers. Worker isolation does not protect against a compromised
+connections. It does not add `unsafe-eval` to the main panel. The owner-console
+browser flows run the page under a strict same-origin CSP that allows those
+workers; nginx does not yet send a page CSP. Worker isolation does not protect against a compromised
 same-origin application that receives user input or asks the worker for a key.
 
 Passphrase changes rewrap the same root; credential keys and ciphertext need not
@@ -124,7 +128,7 @@ the isolated PostgreSQL fixture enabled. For the real-browser check, supply
 `PLAYWRIGHT_MODULE` (installed package's `index.mjs`) and optionally
 `FIREFOX_EXECUTABLE`, then run `node ui/tests/vault-browser.mjs`.
 
-Live rollout still needs the authenticated owner API/UI, setup discovery, OAuth
+Live rollout still needs setup discovery for new providers, OAuth
 bundle/refresh lifecycle, full catalog/history migration, restore/restart and
 load qualification, and explicit startup installation of the guarded adapter.
 No new gateway configuration switch is exposed by this slice.

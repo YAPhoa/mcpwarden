@@ -759,3 +759,50 @@ button.retry:hover { background:none; }
 .calendar-dialog .calendar-table tr:hover td { background:transparent; }
 
 .calendar-dialog .cal-nav svg { display:block; width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round; }
+
+/* Vault and access windows (owner console). */
+.vault-page { max-width:980px; }
+.vault-page > .page-heading { margin-bottom:12px; }
+.vault-scope-note { margin:0 0 16px; border-left:3px solid var(--border); padding-left:12px; }
+.vault-status, .vault-flow { margin:16px 0; }
+.vault-status-row { display:flex; justify-content:space-between; align-items:start; gap:20px; }
+.vault-status-row p { margin:0; }
+.vault-controls { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+.vault-status > .help { margin:14px 0 0; }
+.vault-flow label, .vault-page .settings-card form > label { display:block; font-size:13px; margin:16px 0 6px; }
+.vault-flow input[type=password], .vault-flow input[type=text], .vault-page .settings-card input[type=password] { width:100%; max-width:480px; }
+.vault-flow .heading-actions, .vault-page .settings-card .heading-actions { margin-top:16px; }
+.vault-steps { display:flex; flex-wrap:wrap; gap:6px 18px; padding:0; margin:0 0 16px; list-style:none; counter-reset:step; font-size:12px; color:var(--muted); }
+.vault-steps li { counter-increment:step; }
+.vault-steps li::before { content:counter(step) '. '; }
+.vault-steps li[aria-current=step] { color:var(--text); font-weight:650; }
+.recovery-key { display:block; padding:16px; background:var(--canvas); border:1px solid var(--control-border); border-radius:6px; font-size:16px; line-height:1.8; letter-spacing:.06em; overflow-wrap:anywhere; color:var(--text); user-select:all; }
+.vault-method { border:0; padding:0; margin:8px 0 0; display:flex; flex-wrap:wrap; gap:6px 20px; }
+.vault-method label { display:flex; gap:8px; align-items:center; margin:0; font-size:13px; }
+.vault-method input { min-height:auto; }
+.vault-nav { margin-top:24px; }
+.vault-facts { display:grid; grid-template-columns:minmax(110px, 150px) minmax(0, 1fr); gap:8px 16px; margin:14px 0; }
+.vault-facts dt { margin:0; }
+.vault-facts dd { font-size:13px; }
+.vault-tools { margin:0; padding-left:18px; }
+.vault-tools li + li { margin-top:8px; }
+.vault-tools li > span { display:block; }
+.untrusted-label { overflow-wrap:anywhere; white-space:pre-wrap; }
+.vault-request .access-record, .vault-window .access-record { min-width:0; flex:1; }
+.vault-request .access-row-actions, .vault-window .access-row-actions { flex-wrap:wrap; justify-content:flex-end; max-width:320px; }
+.vault-request .access-row-actions .help { flex-basis:100%; margin:0; text-align:right; }
+.vault-window[data-state=expired], .vault-window[data-state=revoked], .vault-window[data-state=suspended] { opacity:.86; }
+[role=timer] { font-variant-numeric:tabular-nums; }
+.vault-filters { margin:12px 0; }
+.vault-facts ~ .help { margin-bottom:0; }
+@media(max-width:700px) {
+ .vault-status-row { flex-direction:column; }
+ .vault-controls { justify-content:flex-start; width:100%; }
+ .vault-controls button { flex:1; }
+ .vault-facts { grid-template-columns:1fr; gap:2px; }
+ .vault-facts dd { margin-bottom:8px; }
+ .vault-request .access-row-actions, .vault-window .access-row-actions { max-width:none; width:100%; justify-content:stretch; }
+ .vault-request .access-row-actions button, .vault-window .access-row-actions button { flex:1; }
+ .vault-request .access-row-actions .help { text-align:left; }
+ .recovery-key { font-size:15px; }
+}

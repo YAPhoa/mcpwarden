@@ -1,5 +1,187 @@
 # Progress
 
+## 2026-09-24 — PR #5 merge and deployment
+
+Merged [PR #5](https://github.com/YAPhoa/mcpwarden/pull/5) at `3eff764` and
+deleted its feature branch. The source tree exactly matches reviewed head
+`325c97e`. The owner console is shipped at `/vault`, `/vault/credentials` and
+`/vault/settings`, with live `owner_security` still disabled. Ordinary tool
+execution continues under legacy server-managed credential custody.
+
+The [PR CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36003229000) and
+[post-merge CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36004503878)
+passed all mandatory jobs: Go build/vet, PostgreSQL-enabled race tests, all three
+browser engines, container smoke and security checks. Independent Chromium
+regressions against the real gateway and a disposable PostgreSQL database also
+passed for renewal review, cancellation and late credential-save outcomes.
+CodeQL remained skipped for this private repository.
+
+Rebuilt and redeployed both services after a consistent stopped-gateway backup
+at `/tmp/mcpwarden-predeploy-20260924-vault-console-1/`; keys are separate at
+`/tmp/mcpwarden-predeploy-keys-20260924-vault-console-1/`. Backup directories are
+mode 0700 and files mode 0600; recorded hashes remain valid. Gateway image
+`290503294d1a` and UI image `b1942eef4112` run in new containers with zero restarts.
+Health, API authorization/access/history boundaries, no-store, vault module
+MIME/CSP, source asset bytes and all 12 branding/favicon assets passed.
+
+The encrypted catalog changed during restart and live activity. A protected
+in-memory comparison verified unchanged accounts, connector definitions,
+credential headers/OAuth grants, visibility, deletion records and tool
+definitions. All existing access records, their credential verifiers and fixed
+metadata remain intact; usage timestamps advanced and two access records were
+added. Discovery timestamps refreshed. The audit log retained every byte of the
+backup history and appended new records. Deployment keys and mounts were
+preserved. No decrypted values were printed or written to disk.
+
+## 2026-09-24 — PR #5 review fixes
+
+Fixed three owner-console findings from review. Each operation now captures its
+generation and vault worker before its first await, so leaving `/vault` during a
+recovery-key check can no longer unlock the vault in the background. A cancelled
+setup no longer restores its recovery material, because results are published
+only after the generation check. Locking now restores every operation's submit
+control, so an interrupted unlock or setup can be retried without reloading.
+Renewal compares the new request's caller, credential version, tool definition
+digests, constraints, duration and call limit with what the dialog showed. If
+any of them changed, it shows the new request and releases no key until the
+owner allows it again.
+
+A follow-up review found that Cancel did not stop a pending renewal or unlock.
+Flows with a Cancel control now run as an operation that Cancel, closing the
+dialog (including Escape), a browser lock or sign-out ends; each continuation
+rechecks it after every await. A cancelled renewal sends no approval or key, a
+cancelled unlock terminates its worker and leaves the vault locked, and a
+cancelled credential save uploads nothing. Once an activation or credential
+upload has been sent, its outcome is still reported.
+
+A third review found that a credential save cancelled after its upload was sent
+still closed the shared dialog when its response arrived, discarding a newer
+form the owner had opened and started typing into. A late outcome is now reported
+on the page only, and only the operation that still owns the dialog closes it,
+clears it or shows field errors. While testing the late failure, its page error
+disappeared as soon as the reload it queued succeeded; the same happened to other
+page errors that queue a reload, such as a vanished request or an existing vault
+found during setup. A refresh now clears only its own "Could not refresh" error,
+and a new notice replaces an earlier error.
+
+The owner flows now have 31 steps. The new ones hold the page's Web Crypto
+digests or the wrapper read to cover leaving during a recovery unlock, retrying
+an interrupted passphrase unlock, cancelling setup mid-way, and a tool
+definition that changes while the renewal dialog is open. Each new check was
+confirmed to fail when its fix is reverted, including renewal Cancel, renewal
+Escape and unlock Cancel with the request held. The newest step holds a credential
+save's response after the gateway accepted or refused it, cancels, opens a new
+form and types into it, then releases the response: the form stays open,
+unchanged and usable, and the outcome is reported on the page. A new unit test
+covers the reviewed scope comparison.
+
+Two stalled runs, the first CI stall and one of four parallel local runs, both
+stopped at the first `page.route` on the owner's page, with no request issued and
+the gateway idle. Enabling request interception later sends untimed protocol
+calls to every session, including vault workers. The flows now enable
+interception once when each page is created, before any worker exists.
+
+Local validation: `gofmt`, `go build ./...`, `go vet ./...` and
+`go test -race -count=1 ./...` with the PostgreSQL fixture passed, as did 55 UI
+unit tests, the integrity check (18 files) and all 31 Chromium flow steps. The
+late-save step failed as expected with either fix reverted: a late success
+closed the newer form, and the refresh erased the late failure.
+Firefox and WebKit run in CI.
+
+## 2026-09-24 — Vault and access-window console (roadmap step 2)
+
+Added the owner console at `/vault`, `/vault/credentials` and `/vault/settings`
+for gateways with the opt-in owner API. It covers vault setup with a separate
+passphrase and a recovery key that must be typed back and proven before upload,
+plus passphrase or recovery unlock and passphrase changes. Owners can enter and
+replace browser-encrypted header credentials for existing HTTP connectors.
+Requests are reviewed with the exact caller, handle, credential, destination,
+tools, constraints, duration and limits. Owners start access explicitly in both
+`confirm` and `none` modes and can renew. Windows show fixed countdowns, exact
+end times, call counts and filters. "Lock browser", "Stop access" and "Lock all
+execution" stay separate. Live providers, their legacy headers and tool execution
+are unchanged. No deployment or live configuration change was made in this
+slice, and `owner_security` stays off in production.
+
+Two additive reads support it: wrapper listings now return each live credential's
+current envelope, and `GET /api/leases?include=ended` returns windows ended in the
+last 24 hours. `TestOwnerLeaseHistoryAndWrapperEnvelopes` covers both, including
+key and owner isolation and restart. `TestDestinationDigestVectorsSharedWithUI`
+pins the browser's destination digest to the gateway's.
+
+`ui/tests/owner-flows.mjs` runs 25 steps in a real browser against a built
+gateway, a scratch PostgreSQL database, a synthetic MCP upstream and a static UI
+proxy. It covers:
+
+- setup errors and recovery confirmation, including a wrong account password
+- credential encryption, a replacement conflict from a second tab, and a
+  passphrase change
+- untrusted labels and tool descriptions rendered as text
+- explicit activation headers and body, `none` mode and renewal
+- uncertain activation handled by checking status or retrying with the same key
+- locking while an activation is in flight
+- a 20-second window expiring, a gateway restart, and an expired session
+- idle, navigation and sign-out locks that keep windows running
+- another account's isolation and the disabled, untrusted and unavailable states
+- responsive widths, focus return and CSP violations
+- a scan of every request body, gateway log and browser storage for vault
+  material
+
+Running the flows found and fixed four bugs: a load that a lock discarded could
+leave the page unable to refresh, stale lists stayed rendered after sign-out,
+focus was lost after lock-all and dialog closes, and sub-minute durations were
+labelled "0 minutes".
+
+Local validation: `gofmt`, `go build ./...`, `go vet ./...` and
+`go test -race -count=1 ./...` passed with the isolated PostgreSQL fixture
+(PostgreSQL 16 locally; CI uses 18.6). `npm --prefix ui test` passed 54 tests, and
+`python3 scripts/ci/integrity.py` verified all 18 files. The worker check and all
+25 owner-flow steps passed in Chromium 141. Firefox and WebKit could not be
+downloaded in this environment, so those two engines run only in CI, which now
+starts PostgreSQL and Go in each browser job and runs the flows.
+
+[PR CI run 35903731538](https://github.com/YAPhoa/mcpwarden/actions/runs/35903731538)
+passed the flows in Chromium, Firefox and WebKit. An earlier WebKit run lost
+keyboard focus when a background reload redrew a list; the console now restores
+focus to the matching control. One earlier Chromium run stalled without an error
+at the uncertain-activation step and did not recur in four local runs or the next
+CI run (see the PR #5 review fixes entry above for the likely cause). The flow script now bounds its request-budget wait, times out gateway
+calls after 30 seconds, and prints timestamped requests and a gateway goroutine
+dump if a step stalls, so a recurrence will show its cause.
+
+Remaining gaps: nginx sends no CSP for the main page; no screen-reader, 200% zoom
+or real-device review was done; the console has no credential deletion; and
+windows still do not govern ordinary tool calls until guarded startup (step 4).
+## 2026-09-24 — PR #6 merge and deployment
+
+Merged [PR #6](https://github.com/YAPhoa/mcpwarden/pull/6) at `266b329` and
+deleted its feature branch. The deployed UI has searchable connector tools,
+visibility filters, scoped bulk actions, expandable rows and retry controls.
+Review fixes preserve policy-blocked choices during bulk changes and retain the
+original requested visibility when retrying a failed save.
+
+The merged runtime source matches reviewed head `c7e511b`. Both the
+[PR CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35999110481) and
+[post-merge CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36001785180) passed
+`go build ./...`, `go vet ./...`, the full PostgreSQL-enabled race suite,
+Chromium/Firefox/WebKit, container smoke and security checks. Local UI tests and
+independent Chromium regressions passed for blocked choices and stale retries;
+the browser checks also found no page errors or mobile horizontal overflow.
+CodeQL remained skipped for this private repository.
+
+Redeployed the UI after a consistent stopped-gateway backup at
+`/tmp/mcpwarden-predeploy-20260924-tool-visibility-1/`; keys are stored separately
+at `/tmp/mcpwarden-predeploy-keys-20260924-tool-visibility-1/`. Backup directories
+are mode 0700 and files mode 0600; hashes were rechecked after deployment.
+UI image `533f127ca59b` runs in a new container. The gateway resumed in its
+existing container with image `2a9cd8050e77`; both have zero restarts.
+
+Live health, authorization/access/history boundaries, no-store, worker MIME/CSP,
+UI source bytes and all 12 branding/favicon assets passed verification. The
+encrypted account/provider catalog and audit history are unchanged byte-for-byte.
+Deployment keys and gateway mounts were preserved. Live `owner_security` remains
+disabled, and credential custody remains server managed. PR #5 was not merged.
+
 ## 2026-09-24 — Documentation and nginx PRs resolved
 
 Merged [PR #4](https://github.com/YAPhoa/mcpwarden/pull/4) at `7eda80f` and

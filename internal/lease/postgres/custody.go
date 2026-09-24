@@ -117,6 +117,35 @@ func (x *ownerTx) SecurityEvents(limit int) ([]lease.Event, error) {
 	return out, nil
 }
 
+// MaxEndedLeases bounds RecentLeases. Ended windows are display history only;
+// reading them never reactivates or extends a window.
+const MaxEndedLeases = 50
+
+// RecentLeases returns the owner's windows that ended (expired, revoked or
+// suspended) at or after since, newest first.
+func (x *ownerTx) RecentLeases(since time.Time, limit int) ([]lease.Lease, error) {
+	if limit < 1 || limit > MaxEndedLeases {
+		return nil, lease.ErrDenied
+	}
+	rows, err := x.tx.Query(x.ctx, "SELECT "+leaseColumns+" FROM mcpwarden_security.leases WHERE owner_id=$1 AND state<>'active' AND ended_at >= $2 ORDER BY ended_at DESC, lease_id LIMIT $3", x.owner, since, limit)
+	if err != nil {
+		return nil, lease.ErrStorage
+	}
+	defer rows.Close()
+	out := []lease.Lease{}
+	for rows.Next() {
+		l, err := scanLease(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	if rows.Err() != nil {
+		return nil, lease.ErrStorage
+	}
+	return out, nil
+}
+
 // LoadCustody reads every committed credential head and approval policy once,
 // after Start and before any owner route or admission runs. It is the only
 // cross-owner read; its result is validated before anything is published.
