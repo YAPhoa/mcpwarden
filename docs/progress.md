@@ -1,5 +1,33 @@
 # Progress
 
+## 2026-09-24 — Documentation and nginx PRs resolved
+
+Merged [PR #4](https://github.com/YAPhoa/mcpwarden/pull/4) at `7eda80f` and
+[PR #1](https://github.com/YAPhoa/mcpwarden/pull/1) at `7b2fc8b`, then deleted
+their remote branches. The README now links to focused guides, and the separate
+UI container uses `nginx:1.29-alpine`. PR #5 remains open for its review fixes.
+
+Both PRs had passing required checks. The combined source tree passed the local
+disposable container smoke test, including health, API authentication/cache
+boundaries, served assets, and worker MIME/CSP. The merged commit's
+[CI](https://github.com/YAPhoa/mcpwarden/actions/runs/35945441420) passed
+`go build ./...`, `go vet ./...`, the full PostgreSQL-enabled race suite, all
+three browser jobs, container smoke, and security checks. CodeQL remained
+skipped. No local test suite was repeated for the documentation-only change.
+
+Redeployed only the UI after a consistent stopped-gateway backup at
+`/tmp/mcpwarden-predeploy-20260924-nginx-1/`, with keys stored separately at
+`/tmp/mcpwarden-predeploy-keys-20260924-nginx-1/`. Backup directories are mode
+0700 and files mode 0600; recorded hashes were rechecked after deployment. The
+gateway resumed in its existing container with image `2a9cd8050e77`. The new UI
+container runs image `616239d4a5dd` and nginx 1.29.8; both have zero restarts.
+
+Live health, authentication/access/history boundaries, no-store, worker MIME/CSP,
+served UI bytes and all 12 branding/favicon assets passed verification. The
+encrypted account/provider catalog and audit history are unchanged byte-for-byte.
+Deployment keys and gateway mounts were preserved. Live `owner_security` remains
+disabled, and credential custody remains server managed.
+
 ## 2026-09-24 — PR #3 merge and deployment
 
 Merged [PR #3](https://github.com/YAPhoa/mcpwarden/pull/3) at `c0203dc`, with
