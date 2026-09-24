@@ -847,3 +847,9 @@ the fixture. Chromium was checked against a synthetic API at 1440px dark and
 light and at 390px dark: bulk menu keyboard navigation and Escape, confirmation,
 pending switch, expanded row, empty search and the directory view, with no
 console errors and no horizontal overflow at 390px. Not redeployed.
+
+## 2026-09-24 — Tool visibility panel sizing
+
+Following feedback on the merged panel, it now fills the page width and its text
+is one step larger. CSS only. UI tests pass. Chromium at 1440px and 390px showed
+no console errors and no horizontal overflow at 390px. Not redeployed.
