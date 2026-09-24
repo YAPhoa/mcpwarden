@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	stdjson "encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -116,7 +118,7 @@ func (c compatRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		resp.ContentLength = int64(len(raw))
 		resp.Header.Set("Content-Length", strconv.Itoa(len(raw)))
 	case "text/event-stream":
-		resp.Body = newSSENormalizer(resp.Body)
+		resp.Body = newSSENormalizer(resp.Body, maxSSEEventBytes)
 	}
 	return resp, nil
 }
@@ -128,17 +130,25 @@ func isToolCall(body []byte) bool {
 	return json.Unmarshal(body, &req) == nil && req.Method == "tools/call"
 }
 
+// maxSSEEventBytes bounds one buffered SSE event, including comment and
+// unknown-field lines. The Streamable HTTP transport is configured with the
+// same limit so the wrapper never accepts more than the SDK would.
+const maxSSEEventBytes = mcp.DefaultMaxEventSize
+
+var errSSEEventTooLarge = errors.New("upstream SSE event exceeds size limit")
+
 // sseNormalizer rewrites the data of each SSE event. Events that do not change
 // are emitted with their original bytes.
 type sseNormalizer struct {
-	src *bufio.Reader
-	rc  io.ReadCloser
-	out bytes.Buffer
-	err error
+	src   *bufio.Reader
+	rc    io.ReadCloser
+	limit int
+	out   bytes.Buffer
+	err   error
 }
 
-func newSSENormalizer(rc io.ReadCloser) io.ReadCloser {
-	return &sseNormalizer{src: bufio.NewReader(rc), rc: rc}
+func newSSENormalizer(rc io.ReadCloser, limit int) io.ReadCloser {
+	return &sseNormalizer{src: bufio.NewReader(rc), rc: rc, limit: limit}
 }
 
 func (s *sseNormalizer) Read(p []byte) (int, error) {
@@ -153,34 +163,56 @@ func (s *sseNormalizer) Read(p []byte) (int, error) {
 
 func (s *sseNormalizer) Close() error { return s.rc.Close() }
 
+// nextEvent buffers one event in a single budgeted buffer. Reads are in
+// bufio-sized chunks, so a line without a terminator cannot exceed the budget.
 func (s *sseNormalizer) nextEvent() error {
-	var raw, other bytes.Buffer
-	var data [][]byte
+	var raw bytes.Buffer
+	lineStart := 0
 	for {
-		line, err := s.src.ReadBytes('\n')
-		raw.Write(line)
-		trimmed := bytes.TrimRight(line, "\r\n")
-		if len(line) > 0 && len(trimmed) > 0 {
-			if v, ok := bytes.CutPrefix(trimmed, []byte("data:")); ok {
-				data = append(data, bytes.TrimPrefix(v, []byte(" ")))
-			} else {
-				other.Write(line)
-			}
+		chunk, err := s.src.ReadSlice('\n')
+		if raw.Len()+len(chunk) > s.limit {
+			return errSSEEventTooLarge
 		}
-		if err != nil || (len(line) > 0 && len(trimmed) == 0) {
-			if len(data) > 0 {
-				if rewritten, changed := normalizeToolResult(bytes.Join(data, []byte("\n"))); changed {
-					s.out.Write(other.Bytes())
-					s.out.WriteString("data: ")
-					s.out.Write(rewritten)
-					s.out.WriteString("\n\n")
-					return err
-				}
-			}
-			s.out.Write(raw.Bytes())
+		raw.Write(chunk)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		line := raw.Bytes()[lineStart:]
+		lineStart = raw.Len()
+		if err != nil || (len(line) > 0 && len(bytes.TrimRight(line, "\r\n")) == 0) {
+			s.out.Write(rewriteSSEEvent(raw.Bytes()))
 			return err
 		}
 	}
+}
+
+// rewriteSSEEvent returns the event unchanged unless its data is a tools/call
+// response that normalizeToolResult repairs.
+func rewriteSSEEvent(event []byte) []byte {
+	var data [][]byte
+	var other bytes.Buffer
+	for _, line := range bytes.SplitAfter(event, []byte("\n")) {
+		trimmed := bytes.TrimRight(line, "\r\n")
+		if len(trimmed) == 0 {
+			continue
+		}
+		if v, ok := bytes.CutPrefix(trimmed, []byte("data:")); ok {
+			data = append(data, bytes.TrimPrefix(v, []byte(" ")))
+		} else {
+			other.Write(line)
+		}
+	}
+	if len(data) == 0 {
+		return event
+	}
+	rewritten, changed := normalizeToolResult(bytes.Join(data, []byte("\n")))
+	if !changed {
+		return event
+	}
+	other.WriteString("data: ")
+	other.Write(rewritten)
+	other.WriteString("\n\n")
+	return other.Bytes()
 }
 
 // compatTransport wraps a stdio transport so its connection applies the same
@@ -203,10 +235,36 @@ type compatConn struct {
 }
 
 func (c *compatConn) Write(ctx context.Context, msg jsonrpc.Message) error {
-	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "tools/call" && req.IsCall() {
-		c.calls.Store(req.ID, struct{}{})
+	var tracked jsonrpc.ID
+	if req, ok := msg.(*jsonrpc.Request); ok {
+		switch {
+		case req.Method == "tools/call" && req.IsCall():
+			tracked = req.ID
+			c.calls.Store(tracked, struct{}{})
+		case req.Method == "notifications/cancelled":
+			// The SDK has already retired the cancelled call, and the peer may
+			// never answer it, so stop tracking the ID before forwarding.
+			if id, ok := cancelledRequestID(req.Params); ok {
+				c.calls.Delete(id)
+			}
+		}
 	}
-	return c.Connection.Write(ctx, msg)
+	err := c.Connection.Write(ctx, msg)
+	if err != nil && tracked.IsValid() {
+		c.calls.Delete(tracked)
+	}
+	return err
+}
+
+func cancelledRequestID(params []byte) (jsonrpc.ID, bool) {
+	var p struct {
+		RequestID any `json:"requestId"`
+	}
+	if stdjson.Unmarshal(params, &p) != nil {
+		return jsonrpc.ID{}, false
+	}
+	id, err := jsonrpc.MakeID(p.RequestID)
+	return id, err == nil && id.IsValid()
 }
 
 func (c *compatConn) Read(ctx context.Context) (jsonrpc.Message, error) {

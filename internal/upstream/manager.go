@@ -189,7 +189,7 @@ func (m *Manager) connect(ctx context.Context, c *connection) (*mcp.ClientSessio
 		transport = compatTransport{&mcp.CommandTransport{Command: cmd, TerminateDuration: 5 * time.Second}}
 	} else {
 		base := http.DefaultTransport.(*http.Transport).Clone()
-		transport = &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, OAuthHandler: c.cfg.OAuthHandler, HTTPClient: &http.Client{Transport: compatRoundTripper{headerTransport{base, c.cfg.Headers}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1}
+		transport = &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, OAuthHandler: c.cfg.OAuthHandler, HTTPClient: &http.Client{Transport: compatRoundTripper{headerTransport{base, c.cfg.Headers}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1, MaxEventSize: maxSSEEventBytes}
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
