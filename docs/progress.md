@@ -950,3 +950,20 @@ audit bytes are unchanged, with no new audit records from the checks.
 The deployed gateway still uses legacy server-managed credential custody.
 Environment filtering is now deployed; process/host isolation and the owner
 API/UI, catalog migration and guarded startup wiring remain pending.
+
+## 2026-09-24 — Tool visibility panel restyle
+
+Rebuilt the connector Tools tab from the user's tool-visibility mockup: a
+searchable list with All / Shown / Hidden view counts, a view-scoped bulk menu
+with a confirmation dialog, per-row switches with pending and retry states, and
+expandable rows that show the MCP wire name and open the existing schema and
+history dialog. The tool directory shares the same panel and keeps its upstream
+filter. Connection settings are unchanged. No API or gateway change.
+
+`node --test` UI suites (47 tests, including new view-scoped bulk, failed-save
+retry and policy-blocked cases), `go build ./...`, `go vet ./...` and
+`go test -race ./...` passed locally; PostgreSQL-backed tests skipped without
+the fixture. Chromium was checked against a synthetic API at 1440px dark and
+light and at 390px dark: bulk menu keyboard navigation and Escape, confirmation,
+pending switch, expanded row, empty search and the directory view, with no
+console errors and no horizontal overflow at 390px. Not redeployed.
