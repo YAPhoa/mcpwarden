@@ -503,6 +503,7 @@ type credentialSummary struct {
 	Tools         []custody.ToolView  `json:"tools,omitempty"`
 	Destination   *secret.Destination `json:"destination,omitempty"`
 	WrappedKey    json.RawMessage     `json:"wrapped_key,omitempty"`
+	Envelope      json.RawMessage     `json:"envelope,omitempty"`
 }
 
 func (api *securityAPI) summarize(owner string, h custody.Head) credentialSummary {
@@ -639,7 +640,12 @@ func (api *securityAPI) vaultWrappers(w http.ResponseWriter, r *http.Request, ca
 		for _, record := range records {
 			s := api.summarize(caller.Owner, custody.Head{CredentialID: record.CredentialID, ConnectorID: record.ConnectorID, Epoch: record.Epoch, Revision: record.Revision, Deleted: !record.DeletedAt.IsZero()})
 			destination := record.Destination
+			// The owner's browser authenticates the current ciphertext before it
+			// releases a key; the server still cannot decrypt either value.
 			s.Destination, s.WrappedKey = &destination, record.WrappedKey
+			if record.DeletedAt.IsZero() {
+				s.Envelope = record.Envelope
+			}
 			credentials = append(credentials, s)
 		}
 		out["credentials"] = credentials
@@ -1084,6 +1090,7 @@ type leaseView struct {
 	RuntimeAvailable        bool              `json:"runtime_available"`
 	ActivatedAt             time.Time         `json:"activated_at"`
 	ExpiresAt               time.Time         `json:"expires_at"`
+	EndedAt                 *time.Time        `json:"ended_at,omitempty"`
 	AdmittedCalls           int64             `json:"admitted_calls"`
 	MaxCalls                *int64            `json:"max_calls"`
 	InFlight                int               `json:"in_flight"`
@@ -1105,12 +1112,24 @@ func (api *securityAPI) viewLease(owner string, l lease.LeaseView, r lease.Reque
 		AuthorizationSource: r.AuthorizationSource, VerificationMethod: r.VerificationMethod,
 		RenewalRequiresOwner: true, RenewalRequiresConfirm: p.Mode == "confirm", RenewalApprovalRevision: p.Revision}
 	v.Credential.Revision = ""
+	if !l.EndedAt.IsZero() {
+		v.EndedAt = &l.EndedAt
+	}
 	return v
 }
+
+// endedLeaseWindow bounds the optional history of ended windows returned with
+// ?include=ended. It is display metadata; nothing here can restore a window.
+const endedLeaseWindow = 24 * time.Hour
 
 func (api *securityAPI) leases(w http.ResponseWriter, r *http.Request, caller catalog.AccessRecord) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "GET")
+		return
+	}
+	include := r.URL.Query().Get("include")
+	if include != "" && include != "ended" {
+		securityError(w, lease.ErrScope)
 		return
 	}
 	view, err := api.service.View(r.Context(), caller.Owner)
@@ -1119,8 +1138,31 @@ func (api *securityAPI) leases(w http.ResponseWriter, r *http.Request, caller ca
 		return
 	}
 	interactive := caller.Kind == "browser"
+	all := append([]lease.LeaseView(nil), view.Leases...)
+	if include == "ended" {
+		var ended []lease.Lease
+		err := api.store.WithOwner(r.Context(), caller.Owner, func(tx lease.Tx) error {
+			var err error
+			ended, err = tx.(custody.Tx).RecentLeases(tx.Now().Add(-endedLeaseWindow), postgres.MaxEndedLeases)
+			return err
+		})
+		if err != nil {
+			securityError(w, err)
+			return
+		}
+		live := map[string]bool{}
+		for _, l := range view.Leases {
+			live[l.ID] = true
+		}
+		for _, l := range ended {
+			// A window that ended after the live view was read appears once.
+			if !live[l.ID] {
+				all = append(all, lease.LeaseView{Lease: l})
+			}
+		}
+	}
 	out := []leaseView{}
-	for _, l := range view.Leases {
+	for _, l := range all {
 		if !interactive && l.CallerID != caller.ID {
 			continue
 		}

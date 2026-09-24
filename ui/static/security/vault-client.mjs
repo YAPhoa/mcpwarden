@@ -2,6 +2,8 @@
 // This module performs no HTTP requests, persistence, or automatic key release.
 export class VaultClient {
   #worker = null; #pending = null; #next = 0;
+  // False after lock() or a worker failure; a replacement worker starts locked.
+  get active() { return this.#worker !== null; }
   lock() {
     this.#worker?.terminate(); this.#worker = null;
     if (this.#pending) { clearTimeout(this.#pending.timer); this.#pending.reject(new Error('Vault locked')); this.#pending = null; }

@@ -294,3 +294,64 @@ windows, preserving the browser-lock/execution-lock distinction. Expensive
 password hashing stays outside the gate; its exact verifier is checked again
 under the gate before root or policy changes. The trusted `ChangeAtomic` entry
 point remains available to non-HTTP integrations.
+
+## 2026-09-24 — Owner vault and access-window console
+
+Build the console as a separate static module beside `app.js`, joined only by
+`mcpwarden:identity` and `mcpwarden:route` events and a small
+`MCPWardenWorkspace` object. It reuses `VaultClient` and the pinned worker
+unchanged, apart from an `active` flag that reports whether a worker exists.
+Owner requests never carry an Authorization header. They refresh the CSRF token
+once on `csrf_required`, which the gateway checks before running the handler.
+Every lock bumps a generation counter, and responses from an older generation
+are dropped. Each operation captures the generation and its vault worker before
+its first await and publishes results only after checking it. Locking restores
+every operation's submit control, so a cancelled operation never leaves one
+disabled. Unlock, renewal and credential entry also run as an operation that
+their Cancel control ends: closing the dialog in any way, or cancelling the
+unlock form, stops the flow before key release, approval or upload. After an
+activation or upload is sent, cancellation no longer discards its outcome. A
+cancelled credential save reports that outcome on the page and leaves the dialog
+alone, because it may already hold a newer form. Only the operation that still
+owns the dialog closes it, clears it or shows field errors. A refresh clears only
+the page error it set itself, so an action's error survives the reload it
+triggers.
+
+Browser lock is separate from windows. Sign-out, account changes, leaving
+`/vault`, page hide and 10 minutes without input terminate the worker, clear
+sensitive inputs and drop late responses. None of them ends an agent window;
+"Stop access" and "Lock all execution" do. Leaving `/vault` for another console
+page counts as navigating away, so owners unlock again when they come back.
+
+The recovery key is shown once as Crockford base32 with a SHA-256 checksum. It is
+accepted with or without hyphens, in any case, and with I/L/O read as 1/1/0.
+Setup uploads the root only after the typed key opens the recovery wrapper in a
+separate worker. A wrong account password leaves no vault on the server.
+
+Credential entry covers existing personal HTTP connectors with header
+authentication (bearer, API key or custom headers) at HTTPS or loopback HTTP
+endpoints. The destination profile is computed in the browser with the gateway's
+JCS digest; shared Go and JavaScript vectors pin it. Replacing a credential is an
+epoch rotation under the same credential ID with a new key. The gateway's legacy
+header copy is left untouched and still serves ordinary calls.
+
+Activation sends only the selected credential key, bound to the server's boot
+ID, request digest and challenge, with a fresh Idempotency-Key. When the outcome
+is uncertain (network failure or 5xx), the console keeps that key in page memory
+and offers "Check status" and "Retry the same activation". It never creates a new
+request automatically. Renewal creates a new owner request with the same caller,
+credential, tools, constraints and call limit, then goes through the same
+explicit start. The gateway binds that request to the current tool definitions
+and credential version, so the console compares the returned scope with the one
+the dialog showed. If anything the owner reviews differs (caller, credential
+version, definition digests, constraints, duration or call limit), it shows the
+new request and releases no key until the owner allows it again. It defaults to 15 minutes, with 5, 30 and 60 as options.
+
+Two small additive API changes support the page. GET `/api/vault/wrappers` now
+returns each live credential's current envelope, which the worker must
+authenticate before releasing a key; the server still cannot decrypt it, and the
+key-facing credential list is unchanged. GET `/api/leases?include=ended` adds
+windows that ended in the last 24 hours, capped at 50 and newest first, with an
+`ended_at` time. Key callers still see only their own. Countdowns correct for
+clock skew over 2 seconds using the gateway's `Date` header, and a window's end
+time is never computed in the browser.

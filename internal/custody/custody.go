@@ -49,6 +49,7 @@ type Tx interface {
 	ApprovalPolicy() (Policy, error)
 	PutApprovalPolicy(p Policy, expected string) error
 	SecurityEvents(limit int) ([]lease.Event, error)
+	RecentLeases(since time.Time, limit int) ([]lease.Lease, error) // ended windows, newest first
 }
 
 // Snapshot is the committed custody state loaded once at startup, before any

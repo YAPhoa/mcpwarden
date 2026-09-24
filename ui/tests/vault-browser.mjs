@@ -24,7 +24,8 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 let browser;
 try {
-  browser = await playwright[browserName].launch({headless:true,...(browserName === 'firefox' && process.env.FIREFOX_EXECUTABLE ? {executablePath:process.env.FIREFOX_EXECUTABLE} : {})});
+  const executablePath = process.env.BROWSER_EXECUTABLE || (browserName === 'firefox' ? process.env.FIREFOX_EXECUTABLE : '');
+  browser = await playwright[browserName].launch({headless:true,...(executablePath ? {executablePath} : {})});
   const page = await browser.newPage(), requests=[], errors=[];
   page.on('request', request => requests.push(request.url()));
   page.on('pageerror', () => errors.push('browser page error'));
