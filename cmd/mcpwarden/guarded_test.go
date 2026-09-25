@@ -15,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/audit"
+	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/policy"
@@ -202,14 +203,34 @@ func TestGuardedHeaderExecution(t *testing.T) {
 		t.Fatal("leased call missing from call history")
 	}
 
-	// A disabled connector's tools leave tools/list.
+	// A disabled connector's tools leave tools/list, and a direct call is
+	// refused without reaching the upstream. On the file catalog the window is
+	// still active here, so this is the current-policy check (A06); the
+	// PostgreSQL catalog also ends the window in the same commit.
+	calls = upstream.calls.Load()
 	if err := f.store.SetProviderEnabled(alice, "remote", false); err != nil {
 		t.Fatal(err)
 	}
 	if listed(t, agent)["remote__search"] {
 		t.Fatal("disabled vault connector still listed")
 	}
+	if _, failed := callText(t, agent, "remote__search"); !failed {
+		t.Fatal("call to a disabled vault connector ran")
+	}
 	if err := f.store.SetProviderEnabled(alice, "remote", true); err != nil {
+		t.Fatal(err)
+	}
+	// Hiding the tool refuses it the same way.
+	if err := f.store.SetVisibility(alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{"remote__write"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, failed := callText(t, agent, "remote__search"); !failed {
+		t.Fatal("call to a hidden tool ran")
+	}
+	if upstream.calls.Load() != calls {
+		t.Fatal("a disabled connector or hidden tool reached the upstream")
+	}
+	if err := f.store.SetVisibility(alice, "remote", catalog.Visibility{Mode: "all"}); err != nil {
 		t.Fatal(err)
 	}
 

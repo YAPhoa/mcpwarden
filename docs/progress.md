@@ -1374,3 +1374,16 @@ disabled-connector listing check makes `TestGuardedHeaderExecution` fail.
 the isolated PostgreSQL fixture; `npm test` passed in `ui/`, and the owner
 browser flows passed locally in Chromium. The live deployment is unchanged:
 file catalog, `owner_security` disabled, no redeploy.
+
+### Review round 1 (2026-09-25)
+
+Fixed: Refresh all and single refresh skip vault connectors; the guarded call
+timeout clamps to 5 minutes instead of resetting long values to 30 seconds;
+conversion also runs when a credential commit publishes and then reports an
+error; the legacy remove dialog and the runtime docs say that removed
+credentials lock their connectors once `client_release` is on, and that rolling
+back returns tombstoned connectors to their server-held headers. The console's
+custody copy moved to `owner-core.mjs`. New tests cover disabled and hidden
+calls with an active window, the timeout clamp, vault rendering and refresh in
+the main console, and the custody copy. `gofmt`, build, vet,
+`go test -race -count=1 ./...` with PostgreSQL and `npm test` passed.

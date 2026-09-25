@@ -119,21 +119,30 @@ stdio isolation are outside this header-only adapter.
   loads the committed custody index and ciphertext cache before the first
   per-owner runtime exists, on both catalog backends. A load failure stops
   startup. `--stdio` refuses this mode.
-- A connector is bound when its owner has a vault credential head for it. The
-  vault console converts a connector by saving its credential; conversion takes
-  effect when the index publishes after commit, and the legacy session then
-  closes. A tombstone keeps the connector bound with no credential, so its
-  calls report `MCPWARDEN_LEASE_REQUIRED` and never reach legacy execution.
+- A connector is bound when its owner has a vault credential head for it, live
+  or removed, whichever mode wrote it. So the first `client_release` start also
+  converts every connector whose credential was saved or removed under
+  `legacy_managed`. The vault console converts a connector by saving its
+  credential; conversion takes effect when the index publishes after commit, and
+  the legacy session then closes (also when the commit reports an error after
+  publishing). A tombstone keeps the connector bound with no credential, so its
+  calls report `MCPWARDEN_LEASE_REQUIRED` and never reach legacy execution. The
+  connector stays locked until it is deleted and added again, which gives it
+  new connector and tool IDs and default visibility.
 - The legacy manager keeps a state entry for a bound connector (`custody:
   "vault"`) but never connects it, drops its server-held headers and OAuth
   handler from its copy, and refuses refresh and calls (`upstream.ErrGuarded`).
   The catalog still holds the sealed headers; the gateway does not read them for
-  that connector. Switching back to `legacy_managed` restores legacy execution.
+  that connector. Switching back to `legacy_managed` restores legacy execution
+  for every converted connector, including tombstoned ones whose vault
+  credential the owner removed on purpose: they go back to their old
+  server-held headers.
 - Cached tool definitions from the last legacy discovery stay in `tools/list`
   while the connector is enabled; each call verifies the selected definition
   against the upstream inside its window. Discovery for converted or new
   connectors needs the owner setup flow (step 5).
-- Each call uses the connector's configured call timeout (capped at 5 minutes).
+- Each call uses the connector's configured call timeout, clamped to 5 minutes
+  (30 seconds when unset).
   Admission and completion are durable in the lease store; a best-effort copy of
   both goes to the owner's call history with credential, lease and approval
   attribution.

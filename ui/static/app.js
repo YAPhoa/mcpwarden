@@ -405,7 +405,7 @@ async function refresh(renderAfter = true) {
 }
 $('refresh').addEventListener('click', async () => {
   if (!access || loading || mutating || [...refreshState.values()].some(s=>s.pending)) return;
-  const names=providers.filter(p=>p.enabled!==false).map(p=>p.name), failed=[];
+  const names=providers.filter(p=>p.enabled!==false&&!inVault(p)).map(p=>p.name), failed=[];
   mutating=true; lockMutationControls(); $('refresh').disabled=true; $('refresh').classList.add('saving-control'); $('refresh').setAttribute('aria-busy','true');
   try {
     for (const name of names) {
@@ -446,7 +446,7 @@ $('auth-dialog').addEventListener('close', async () => {
 });
 async function refreshProvider(name) {
   const p = providers.find(p => p.name === name);
-  if (!p || !access || mutating || p.enabled === false || refreshState.get(name)?.pending) return;
+  if (!p || !access || mutating || p.enabled === false || inVault(p) || refreshState.get(name)?.pending) return;
   refreshState.set(name, {pending: true}); render();
   try {
     await api(`/api/discovery/${encodeURIComponent(name)}/refresh`, {method: 'POST'});

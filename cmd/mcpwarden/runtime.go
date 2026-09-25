@@ -83,7 +83,6 @@ func (rs *runtimes) getLocked(owner string) *userRuntime {
 	}
 	p := proxy.New(reg, rs.policy, approval.None{}, rs.audit, rs.logger)
 	p.Owner = owner
-
 	p.Server.AddReceivingMiddleware(rs.access.middleware)
 	p.AdminServer.AddReceivingMiddleware(rs.access.middleware)
 	if rs.store != nil {

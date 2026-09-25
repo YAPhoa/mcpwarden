@@ -361,6 +361,22 @@ test('Refresh all discovers enabled connectors and skips disabled ones',async()=
  assert.match(ui.node('notice').textContent,/Refreshed 1 enabled connector/);
 });
 
+test('vault-custody connectors count as available and never refresh',async()=>{
+ const vault=provider({name:'vaulted',healthy:false,custody:'vault',tool_count:1});
+ const ui=await app({providers:[provider(),vault],tools:[{name:'vaulted__search',upstream:'vaulted',allowed:true,healthy:false,visible:true,custody:'vault'}]});
+ assert.equal(ui.node('overview-attention').textContent,0);
+ assert.equal(ui.node('gateway-status').textContent,'Connectors available');
+ assert.equal(ui.run("discovery(providers.find(p=>p.name==='vaulted'))[0]"),'Vault custody');
+ assert.match(ui.run("providerActions(providers.find(p=>p.name==='vaulted'))"),/provider-refresh[^>]*disabled/);
+ assert.equal(ui.run("isDiscoverable(tools[0])"),true);
+ await ui.run("refreshProvider('vaulted')");
+ await ui.node('refresh').handlers.click();
+ const paths=ui.requests.filter(r=>r.options.method==='POST').map(r=>r.path);
+ assert.deepEqual(paths,['/api/discovery/docs/refresh']);
+ assert.match(ui.node('notice').textContent,/Refreshed 1 enabled connector/);
+ assert.equal(ui.run("refreshState.has('vaulted')"),false);
+});
+
 test('authentication does not report green connector availability',async()=>{
  const ui=await app({providers:[provider({healthy:false})]});
  assert.equal(ui.node('overall').textContent,'Signed in');

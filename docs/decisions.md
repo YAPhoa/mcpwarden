@@ -454,7 +454,11 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
   publishes after commit, and the legacy session then closes. A deleted vault
   credential leaves a tombstone that keeps the connector bound and locked; it
   never falls back to legacy execution. Replacing the connector gives it a new
-  ID and legacy custody again.
+  ID and legacy custody again. A head does not record the mode that wrote it, so
+  credentials saved or removed under `legacy_managed` convert (or lock) their
+  connectors on the first `client_release` start; the legacy remove dialog says
+  so. Locking only client_release-era tombstones would need the mode stored
+  with the deletion and was not built (review round 1, 2026-09-25).
 - **Startup loads custody before any runtime.** The file backend now opens the
   owner security executor and loads its caches before the first runtime is
   built, as the PostgreSQL backend already did. A converted connector is built
@@ -464,7 +468,8 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
   owner-activated window.
 - **Server-held headers are kept, unused.** The sealed catalog headers of a
   converted connector are not read for it while `client_release` is on.
-  Switching back to `legacy_managed` is the rollback. Purging them is a separate
+  Switching back to `legacy_managed` is the rollback; it also returns
+  tombstoned connectors to their server-held headers. Purging them is a separate
   step; Yohanes chose to keep them on 2026-09-25.
 - **No legacy discovery for converted connectors.** Refresh returns 409
   (`upstream.ErrGuarded`); tool definitions come from the last legacy discovery

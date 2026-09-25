@@ -792,12 +792,15 @@ func (api *securityAPI) changeCredential(w http.ResponseWriter, r *http.Request,
 			return index()
 		}, nil
 	})
+	// A commit can publish the index and still report an error (for example
+	// when the executor stops right after). The hook rechecks the published
+	// binding, so it runs whenever a record was read.
+	if api.onCredential != nil && stored.ConnectorID != "" {
+		api.onCredential(caller.Owner, stored.ConnectorID)
+	}
 	if err != nil {
 		securityError(w, err)
 		return
-	}
-	if api.onCredential != nil {
-		api.onCredential(caller.Owner, stored.ConnectorID)
 	}
 	jsonResponse(w, status, credentialSummary{CredentialID: id, ConnectorID: stored.ConnectorID, Epoch: stored.Epoch, Revision: stored.Revision, Deleted: !stored.DeletedAt.IsZero()})
 }

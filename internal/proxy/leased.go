@@ -60,6 +60,21 @@ func (p *Proxy) mirror(r audit.Record) {
 	}
 }
 
+// maxLeasedTimeout bounds one admitted call. A connector's own longer call
+// timeout is clamped to it; an unset one falls back to 30 seconds.
+const maxLeasedTimeout = 5 * time.Minute
+
+func (p *Proxy) leasedTimeout(entry registry.Entry) time.Duration {
+	var timeout time.Duration
+	if p.Security.Timeout != nil {
+		timeout = p.Security.Timeout(entry)
+	}
+	if timeout <= 0 {
+		return 30 * time.Second
+	}
+	return min(timeout, maxLeasedTimeout)
+}
+
 func leaseError(err error) *mcp.CallToolResult {
 	switch {
 	case errors.Is(err, lease.ErrRequired), errors.Is(err, lease.ErrStale), errors.Is(err, lease.ErrLocked):
@@ -112,14 +127,7 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 	if p.Security.Service == nil || p.Security.Complete == nil || credentialID == "" {
 		return leaseError(lease.ErrLocked), nil
 	}
-	var timeout time.Duration
-	if p.Security.Timeout != nil {
-		timeout = p.Security.Timeout(entry)
-	}
-	if timeout <= 0 || timeout > 5*time.Minute {
-		timeout = 30 * time.Second
-	}
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	callCtx, cancel := context.WithTimeout(ctx, p.leasedTimeout(entry))
 	defer cancel()
 	prepared, err := upstream.PrepareLeased(callCtx, p.Security.Service, credentialID, entry, req.Params.Arguments)
 	if err != nil {
