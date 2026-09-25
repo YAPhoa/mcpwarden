@@ -95,6 +95,7 @@ var (
 	ErrVerify      = errors.New("verification failed")
 	ErrReplaced    = errors.New("a catalog or history file changed after cutover; move it aside (it is not used) and run rollback again")
 	ErrMarker      = errors.New("the catalog marker belongs to a migration in another database; run this step against the database that owns it")
+	ErrNotExport   = errors.New("the catalog file is not the one the PostgreSQL rollback wrote; restore that file (an older copy could revive revoked access)")
 )
 
 const maxLine = 1 << 20
@@ -144,6 +145,16 @@ func ownMarker(src Sources, importID, rollbackID string, allowPrevious bool) (*c
 		return &m, nil
 	}
 	return nil, ErrMarker
+}
+
+// rollbackExport refuses a catalog that a rolled_back marker does not admit.
+// After a rollback only the exported file is authoritative, exactly as
+// catalog.Open requires; an older copy could revive revoked access.
+func rollbackExport(snap catalog.Snapshot, previous *catalog.Marker) error {
+	if previous != nil && snap.Rollback != previous.RollbackID {
+		return ErrNotExport
+	}
+	return nil
 }
 
 func prepare(ctx context.Context, conn *pgx.Conn, src Sources) (*sealer, func(), error) {
@@ -390,6 +401,17 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		if !hashes.match(st) {
 			return Manifest{}, ErrSourceMoved
 		}
+		if previous != nil {
+			// The pinned source is the file the first run checked; check it
+			// again, since a rolled_back marker may still be on disk.
+			snap, _, err := catalog.ReadSnapshot(src.CatalogPath, src.CatalogKey, st.StartedAt)
+			if err != nil {
+				return Manifest{}, err
+			}
+			if err := rollbackExport(snap, previous); err != nil {
+				return Manifest{}, err
+			}
+		}
 		if err := catalog.WriteMarker(src.CatalogPath, catalog.Marker{State: "importing", ImportID: st.ImportID, Previous: previous}); err != nil {
 			return Manifest{}, err
 		}
@@ -422,6 +444,9 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		}
 		snap, _, err := catalog.ReadSnapshot(snapSrc.CatalogPath, src.CatalogKey, st.StartedAt)
 		if err != nil {
+			return Manifest{}, err
+		}
+		if err := rollbackExport(snap, previous); err != nil {
 			return Manifest{}, err
 		}
 		h := sha256.New()
@@ -886,9 +911,11 @@ func Cutover(ctx context.Context, conn *pgx.Conn, src Sources) (Manifest, error)
 }
 
 // Abort abandons an import that was never cut over: it deletes the imported
-// rows and state, then restores the marker the import replaced (or removes
-// its own). It never touches a marker that belongs to another database. The
-// protected snapshot is kept.
+// rows, restores the marker the import replaced (or removes its own), then
+// deletes the state. The state row stays, marked aborting, until the marker is
+// cleaned up, so an interrupted abort is finished by running it again and a
+// marker is only ever cleaned up by the database that owns it. The protected
+// snapshot is kept.
 func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 	_, unlock, err := prepare(ctx, conn, src)
 	if err != nil {
@@ -912,32 +939,43 @@ func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 		}
 		return nil
 	}
-	if st.State != "importing" && st.State != "imported" {
+	if st.State != "importing" && st.State != "imported" && st.State != "aborting" {
 		return ErrState
+	}
+	if _, err := ownMarker(src, st.ImportID, "", true); err != nil {
+		return err
 	}
 	marker, ours, err := catalog.ReadMarker(src.CatalogPath)
 	if err != nil {
 		return err
 	}
-	ours = ours && marker.ImportID == st.ImportID
-	if _, err := ownMarker(src, st.ImportID, "", true); err != nil {
-		return err
-	}
 	err = inTx(ctx, conn, func(tx pgx.Tx) error {
-		for _, table := range []string{"history_events", "catalog_discovery", "catalog_visibility", "catalog_legacy_tombstones", "catalog_connectors", "catalog_access", "catalog_accounts", "catalog_state"} {
+		for _, table := range []string{"history_events", "catalog_discovery", "catalog_visibility", "catalog_legacy_tombstones", "catalog_connectors", "catalog_access", "catalog_accounts"} {
 			if _, err := tx.Exec(ctx, "DELETE FROM mcpwarden_security."+table); err != nil {
 				return catalogdb.ErrStorage
 			}
 		}
-		return nil
+		st.State = "aborting"
+		return catalogdb.PutState(ctx, tx, st)
 	})
-	if err != nil || !ours {
-		// Without its own marker the import was interrupted before writing
-		// one; the marker in place, if any, is the earlier rolled_back one.
+	if err != nil {
 		return err
 	}
-	if marker.Previous != nil {
-		return catalog.WriteMarker(src.CatalogPath, *marker.Previous)
+	// Without its own marker the import was interrupted before writing one, or
+	// an earlier abort already cleaned it up; any marker in place is then the
+	// earlier rolled_back one.
+	if ours && marker.ImportID == st.ImportID {
+		if marker.Previous != nil {
+			err = catalog.WriteMarker(src.CatalogPath, *marker.Previous)
+		} else {
+			err = catalog.RemoveMarker(src.CatalogPath)
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return catalog.RemoveMarker(src.CatalogPath)
+	if _, err := conn.Exec(ctx, "DELETE FROM mcpwarden_security.catalog_state WHERE import_id=$1", st.ImportID); err != nil {
+		return catalogdb.ErrStorage
+	}
+	return nil
 }

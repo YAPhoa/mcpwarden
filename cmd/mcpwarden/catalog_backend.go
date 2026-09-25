@@ -85,6 +85,9 @@ func fileAuthority(ctx context.Context, db *postgres.Store) error {
 	if err != nil {
 		return errors.New("catalog state could not be read")
 	}
+	if state == "aborting" {
+		return errors.New("an abandoned catalog import is still being removed; run mcpwarden-catalog abort again")
+	}
 	if state != "" && state != "rolled_back" {
 		return errors.New("the PostgreSQL catalog is " + state + "; set managed_upstreams.backend to postgres or complete the rollback")
 	}

@@ -9,7 +9,7 @@
 -- changes it; the runtime role can only read it.
 CREATE TABLE mcpwarden_security.catalog_state (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    state text NOT NULL CHECK (state IN ('importing','imported','active','rolling_back','rolled_back')),
+    state text NOT NULL CHECK (state IN ('importing','imported','aborting','active','rolling_back','rolled_back')),
     import_id uuid NOT NULL,
     source_catalog_sha256 text NOT NULL CHECK (length(source_catalog_sha256) = 64),
     source_history_sha256 text NOT NULL CHECK (length(source_history_sha256) = 64),
@@ -23,7 +23,7 @@ CREATE TABLE mcpwarden_security.catalog_state (
     -- Import start; also the time used to end MCP sessions left open in the file.
     started_at timestamptz NOT NULL,
     changed_at timestamptz NOT NULL,
-    CHECK (state IN ('importing') OR manifest IS NOT NULL),
+    CHECK (state IN ('importing','aborting') OR manifest IS NOT NULL),
     CHECK ((state IN ('rolling_back','rolled_back')) = (rollback_id IS NOT NULL)),
     CHECK (state <> 'rolled_back' OR rollback_manifest IS NOT NULL)
 );

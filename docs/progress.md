@@ -1292,3 +1292,20 @@ previous code. `gofmt`, `go build ./...`, `go vet ./...`, `go mod tidy -diff`,
 `scripts/ci/integrity.py`, the CGO-disabled tests and
 `go test -race -count=1 -timeout=15m ./...` passed with the isolated PostgreSQL
 fixture.
+
+## 2026-09-25 — Step 3 second review fixes
+
+- Import after a rollback accepted any catalog file beside the `rolled_back`
+  marker, so a restored pre-cutover copy could be imported into a new database
+  and revive a revoked key. Import now requires the rollback's own export and
+  leaves the marker untouched when it refuses.
+- An abort interrupted after its database commit could not be finished, since
+  the state that proved marker ownership was already gone. The state now stays
+  as `aborting` until the marker is cleaned up, and a rerun finishes.
+
+New tests: `TestImportAfterRollbackRequiresTheExport` (fails without the check)
+and `TestAbortResumesAfterItsDatabaseCommit` (both interruption points, plus a
+refused abort from another database).
+`gofmt`, `go build ./...`, `go vet ./...` and
+`go test -race -count=1 -timeout=15m ./...` passed with the isolated PostgreSQL
+fixture.

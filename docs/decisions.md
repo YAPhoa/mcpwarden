@@ -427,3 +427,16 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
 - **History verification reads what queries read.** Cutover compares every
   derived history column with what `audit.ParseLine` derives from the pinned
   line, not only the stored bytes.
+
+## 2026-09-25 — Step 3 second review: rollback export identity, resumable abort
+
+- **Import after a rollback needs the export.** A `rolled_back` marker admits
+  only the file that rollback wrote, so import now compares the snapshot's
+  rollback ID with the marker before it writes any row, on a fresh run and on
+  resume. A refused import leaves the marker as it was.
+- **Abort keeps its ownership until the marker is clean.** Schema v4 (not yet
+  applied to any live database) gains the `aborting` state. Abort deletes the
+  imported rows and records `aborting` in one commit, cleans up the marker, then
+  deletes the state. A retry against the same database finishes the cleanup; a
+  different database still refuses the marker. File gateways with owner
+  security refuse to start while a state is `aborting`.

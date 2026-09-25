@@ -783,3 +783,123 @@ func TestProviderChangesMoveTheSecurityRevision(t *testing.T) {
 		t.Fatal("revision after reload", got)
 	}
 }
+
+// After a rollback only the exported file may be imported again. An older
+// copy placed beside the rolled_back marker is refused before any row is
+// written, and the marker stays.
+func TestImportAfterRollbackRequiresTheExport(t *testing.T) {
+	f := newFixture(t)
+	f.cutover()
+	repo, db, service, _ := f.gateway()
+	agent, ok := repo.AuthenticateAccess(f.tokens["agent"], "api_key")
+	if !ok {
+		t.Fatal("agent key missing")
+	}
+	if err := repo.RevokeAccess(f.alice, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	service.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = db.Close(ctx)
+	cancel()
+	m, err := Rollback(t.Context(), f.db.Admin, f.src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled, _, _ := catalog.ReadMarker(f.src.CatalogPath)
+	export, err := os.ReadFile(f.src.CatalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(filepath.Join(SnapshotDir(f.src, m.ImportID), "catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.src.CatalogPath, old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	other := pgtest.New(t)
+	if _, err := Import(t.Context(), other.Admin, f.src, Options{}); !errors.Is(err, ErrNotExport) {
+		t.Fatal("imported a pre-cutover copy after rollback", err)
+	}
+	if marker, _, err := catalog.ReadMarker(f.src.CatalogPath); err != nil || !reflect.DeepEqual(marker, rolled) {
+		t.Fatal("refused import changed the marker", marker, err)
+	}
+	var rows int
+	if err := other.Admin.QueryRow(t.Context(), "SELECT (SELECT count(*) FROM mcpwarden_security.catalog_state) + (SELECT count(*) FROM mcpwarden_security.catalog_access)").Scan(&rows); err != nil || rows != 0 {
+		t.Fatal("refused import wrote rows", rows, err)
+	}
+	// The export itself imports, and the revoked key stays revoked.
+	if err := os.WriteFile(f.src.CatalogPath, export, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(t.Context(), other.Admin, f.src, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	var revoked bool
+	if err := other.Admin.QueryRow(t.Context(), "SELECT revoked_at IS NOT NULL FROM mcpwarden_security.catalog_access WHERE access_id=$1", agent.ID).Scan(&revoked); err != nil || !revoked {
+		t.Fatal("re-import revived the revoked key", revoked, err)
+	}
+}
+
+// Abort keeps its state row, marked aborting, until the marker is cleaned up.
+// An abort interrupted after its database commit finishes on the next run,
+// and another database still cannot touch the marker.
+func TestAbortResumesAfterItsDatabaseCommit(t *testing.T) {
+	f := newFixture(t)
+	f.importAll(Options{})
+	importing, _, _ := catalog.ReadMarker(f.src.CatalogPath)
+	// The first abort's database transaction committed, then it stopped.
+	if _, err := f.db.Admin.Exec(t.Context(), `DELETE FROM mcpwarden_security.history_events; DELETE FROM mcpwarden_security.catalog_discovery;
+		DELETE FROM mcpwarden_security.catalog_visibility; DELETE FROM mcpwarden_security.catalog_legacy_tombstones;
+		DELETE FROM mcpwarden_security.catalog_connectors; DELETE FROM mcpwarden_security.catalog_access; DELETE FROM mcpwarden_security.catalog_accounts;
+		UPDATE mcpwarden_security.catalog_state SET state = 'aborting'`); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := Status(t.Context(), f.db.Admin); st.State != "aborting" {
+		t.Fatal(st.State)
+	}
+	if _, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey); err == nil {
+		t.Fatal("file backend opened during an unfinished abort")
+	}
+	if _, err := Import(t.Context(), f.db.Admin, f.src, Options{}); !errors.Is(err, ErrState) {
+		t.Fatal("import during an unfinished abort", err)
+	}
+	other := pgtest.New(t)
+	if err := Abort(t.Context(), other.Admin, f.src); !errors.Is(err, ErrMarker) {
+		t.Fatal("another database cleaned up the marker", err)
+	}
+	if marker, _, _ := catalog.ReadMarker(f.src.CatalogPath); !reflect.DeepEqual(marker, importing) {
+		t.Fatal("marker changed", marker)
+	}
+	if err := Abort(t.Context(), f.db.Admin, f.src); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := catalog.ReadMarker(f.src.CatalogPath); ok {
+		t.Fatal("marker left after the resumed abort")
+	}
+	if st, exists, _ := Status(t.Context(), f.db.Admin); exists {
+		t.Fatal("state left after the resumed abort", st.State)
+	}
+	store, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	// Stopped after the marker cleanup but before the state was deleted.
+	f.importAll(Options{})
+	st, _, _ := Status(t.Context(), f.db.Admin)
+	if _, err := f.db.Admin.Exec(t.Context(), "UPDATE mcpwarden_security.catalog_state SET state = 'aborting'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.RemoveMarker(f.src.CatalogPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := Abort(t.Context(), f.db.Admin, f.src); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, _ := Status(t.Context(), f.db.Admin); exists {
+		t.Fatal("state left after the second resumed abort", st.ImportID)
+	}
+}

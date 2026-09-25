@@ -61,8 +61,11 @@ text. Browser-controlled credential access is a later step. See
   migration in another database`, so pointing the tool at a new or empty
   database can never make a cut-over file authoritative again. The one
   exception is a `rolled_back` marker, since the file is then authoritative: a
-  new import keeps it inside its own marker, and abandoning that import puts it
-  back. Import records itself in the database before it writes its marker.
+  new import accepts it only if the catalog file is that rollback's export (an
+  older copy is refused with `the catalog file is not the one the PostgreSQL
+  rollback wrote`, before any row is written), keeps it inside its own marker,
+  and abandoning that import puts it back. Import records itself in the
+  database before it writes its marker.
 
 ## Coordination while running on PostgreSQL
 
@@ -123,10 +126,12 @@ Tool-call history rows commit before the call is dispatched, as before.
    make one tool call. `mcpwarden-catalog status` should show `active`.
 
 **Failure before cutover.** Before step 5 the file is still authoritative and
-unchanged. Run `mcpwarden-catalog abort` (it deletes the imported rows and
-state, then removes its marker or restores the `rolled_back` marker the import
-replaced; the snapshot directory is kept), keep `backend: file` and start the
-gateway. Tested by
+unchanged. Run `mcpwarden-catalog abort`, keep `backend: file` and start the
+gateway. Abort deletes the imported rows and marks the state `aborting` in one
+commit, then removes its marker or restores the `rolled_back` marker the import
+replaced, and only then deletes the state. If it stops partway, the file
+gateway stays blocked; run abort again against the same database to finish.
+The snapshot directory is kept. Tested by
 `TestAbortBeforeCutoverRestoresFileGateway`.
 
 ## Rollback after cutover
