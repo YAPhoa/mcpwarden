@@ -211,8 +211,6 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 		return errorResult("upstream " + entry.Upstream + " unavailable"), nil
 	}
 	timeout := p.Manager.Timeout(entry.Upstream)
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	admissionStart := time.Now()
 	err = p.Audit.Write(record.Admission())
 	admissionTime = time.Since(admissionStart)
@@ -222,6 +220,10 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 		return errorResult("MCPWARDEN_AUDIT_UNAVAILABLE: No upstream action was executed. Durable audit storage is unavailable."), nil
 	}
 	admitted = true
+	// The upstream's timeout starts after the durable admission write, so a
+	// slow fsync does not shorten the time the upstream gets.
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	upstreamStart := time.Now()
 	timing.Forwarded = true
 	res, err := p.Manager.Call(callCtx, entry.Upstream, entry.Original, json.RawMessage(req.Params.Arguments))

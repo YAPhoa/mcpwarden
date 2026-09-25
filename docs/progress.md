@@ -1387,3 +1387,12 @@ custody copy moved to `owner-core.mjs`. New tests cover disabled and hidden
 calls with an active window, the timeout clamp, vault rendering and refresh in
 the main console, and the custody copy. `gofmt`, build, vet,
 `go test -race -count=1 ./...` with PostgreSQL and `npm test` passed.
+
+### CI fix (2026-09-25)
+
+`TestGatewayIntegration` failed in CI with "upstream timeout not measured":
+the legacy call path started the upstream timeout before the durable admission
+write, so a slow fsync used up the upstream's budget. The timeout now starts
+after admission. Reproduced by delaying the admission write (old code fails,
+new code passes); `go vet ./...` and `go test -race -count=1 ./...` with
+PostgreSQL passed.
