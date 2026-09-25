@@ -4,8 +4,8 @@ Current boundary: the running gateway still uses the encrypted file catalog.
 The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter,
 owner security API, owner vault console and PostgreSQL catalog backend are
 implemented and tested. The owner API, console and PostgreSQL catalog are
-opt-in, live data has not been migrated, and tool execution does not use
-client-release custody yet. The original
+opt-in, live data has not been migrated, and client-release execution
+(`custody_mode: client_release`) is opt-in and off in the live deployment. The original
 acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
 per-case coverage of the 68 acceptance tests is in the
 [acceptance matrix](security/acceptance-matrix.md).
@@ -47,14 +47,17 @@ per-case coverage of the 68 acceptance tests is in the
    reauthorization for rotated grants and keeps new history. The
    [cutover procedure](catalog-migration.md) awaits review before live data
    moves; a second import after a rollback is not supported yet.
-4. **Startup and guarded execution integration.** Add explicit supported custody
-   configuration, load coherent caches while locked, install the guarded proxy and
-   disable legacy credential resolution/reconnect for converted providers. Restart
-   with a new boot and no active material. Preserve fail-closed behavior on storage,
-   ownership and clock uncertainty; never fall through to legacy execution.
-   The initial cutover covers only existing HTTP providers that use header
-   credentials. Setting up new providers under this custody requires step 5, and
-   OAuth providers require step 6.
+4. **Startup and guarded execution integration.** Implemented behind
+   `owner_security.custody_mode: client_release`; see
+   [encrypted runtime](security/encrypted-runtime.md#startup-integration). Custody
+   caches load before any runtime; an HTTP header connector with a vault
+   credential runs only through the guarded proxy, its legacy session and
+   reconnect stop and its server-held headers are never read for it. A restart
+   starts locked with a new boot. A tombstone keeps the connector locked; nothing
+   falls through to legacy execution. Setting up new providers under this custody
+   requires step 5, and OAuth providers require step 6. The server-held headers
+   of converted connectors are kept unused (chosen 2026-09-25); a purge is a
+   separate step.
 5. **Initial setup/discovery authorization.** Implement a bounded owner-only
    discovery capability for new providers before their tool catalog exists.
    Revalidate destination/header/network policy and actual discovered definitions.

@@ -4,7 +4,7 @@
 // a window. Locking, sign-out, account changes, leaving the page and idle time
 // terminate the worker and discard results that arrive afterwards.
 import {VaultClient} from './vault-client.mjs';
-import {OwnerClient, OwnerError, b64url, callsLabel, destinationDigest, destinationFor, durationLabel, errorMessage, formatRecoveryKey,
+import {OwnerClient, OwnerError, b64url, callsLabel, credentialSaveEffect, custodyCopy, destinationDigest, destinationFor, durationLabel, errorMessage, formatRecoveryKey,
   headerBundle, headerValueProblem, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, reviewedScope, windowPhase} from './owner-core.mjs';
 
 const $ = id => document.getElementById(id);
@@ -62,8 +62,12 @@ function pageError(message, refresh = false) { $('vault-error').textContent = me
 function unlocked() { return state.unlocked && vault.active; }
 function ownerCaller(id) { return state.accessItems.find(item => item.id === id); }
 function handleFor(publicID) { return publicHandle(publicID, state.accessItems.map(item => item.public_id).filter(Boolean)); }
+function custodyMode() { return state.vaultState?.custody_mode || 'legacy_managed'; }
+function applyCustodyCopy() {
+  for (const [id, text] of Object.entries(custodyCopy(custodyMode()))) $(id).textContent = text;
+}
 function connectorName(credential) { return credential?.connector_name || 'Unknown connector'; }
-function providerHealthy(name) { const p = state.providers.find(p => p.name === name); return !p || p.enabled !== false && p.healthy; }
+function providerHealthy(name) { const p = state.providers.find(p => p.name === name); return !p || p.enabled !== false && (p.healthy || p.custody === 'vault'); }
 function currentCredential(id) { return state.wrappers?.credentials.find(c => c.credential_id === id && !c.deleted); }
 function modeLabel(mode) { return mode === 'none' ? 'No extra confirmation' : 'Confirm each request'; }
 function startLabel(mode, seconds) { return `${mode === 'none' ? 'Start access' : 'Allow'} for ${durationLabel(seconds)}`; }
@@ -195,6 +199,7 @@ async function load() {
     Object.assign(state, {vaultState, bootID: vaultState.gateway_boot_id, wrappers: wrappers.data, requests: requests.data || [], windows: leases.data || [],
       connections: connections || [], providers: providers || [], tools: tools || [], accessItems: access?.items || [], phase: 'ready', loaded: true});
     if (!vaultState.configured && state.unlocked) lockBrowser();
+    applyCustodyCopy();
     if (refreshError) pageError('');
   } catch (error) {
     if (error.code === 'discarded') return;
@@ -702,7 +707,7 @@ $('vault-credentials').addEventListener('click', event => {
     const bearer = connection.auth_type === 'bearer' && name.toLowerCase() === 'authorization';
     return el('label', {for: `vault-header-${i}`, text: bearer ? 'Bearer token' : `${name} header value`}, el('input', {id: `vault-header-${i}`, type: 'password', autocomplete: 'off', spellcheck: 'false', 'data-header': name, 'aria-describedby': 'vault-credential-error'}));
   }));
-  $('vault-credential-effect').textContent = `${stored ? 'Replacing starts a new credential version with a new key.' : 'This adds the vault copy for this connector.'} Saving ends pending requests and all access windows for your account. The gateway-managed header is not changed or removed.`;
+  $('vault-credential-effect').textContent = credentialSaveEffect(custodyMode(), Boolean(stored));
   setError('vault-credential-error', '');
   $('vault-credential-dialog').showModal(); $('vault-header-0')?.focus();
 });

@@ -1346,3 +1346,82 @@ The live configuration remains on the file catalog with `owner_security`
 disabled. No live database migration or client-release cutover was performed;
 the validated [catalog migration procedure](catalog-migration.md) remains a
 separate rollout step.
+
+## 2026-09-25 — Roadmap step 4: guarded execution for HTTP header connectors
+
+Added `owner_security.custody_mode` (`legacy_managed` default, or
+`client_release`). In `client_release`, an HTTP header connector with a vault
+credential runs only through the guarded proxy adapter and owner-activated
+access windows. The owner security executor and custody caches now load before
+any runtime on the file backend too; converted connectors are built guarded,
+their legacy session and reconnect stop when the credential commits, and the
+legacy manager drops their server-held headers and refuses refresh and calls.
+A tombstone keeps a connector locked. Guarded calls get a best-effort copy in
+the owner's call history. Providers and tools report `custody: "vault"`; the
+main console and vault console show vault custody instead of a connection
+state and adjust their copy when `/api/vault/state` reports `client_release`.
+`--stdio` refuses the mode. The server-held headers of converted connectors
+are kept unused, as Yohanes chose; a purge would be a separate step. Decisions are in
+[decisions](decisions.md#2026-09-25--step-4-guarded-execution-for-http-header-connectors).
+
+New tests: `TestGuardedHeaderExecution` (file catalog, and PostgreSQL catalog via
+`TestOwnerFlowsOnPostgresCatalog/guarded-execution`),
+`TestGuardedConnectorNeverUsesLegacyHeaders`, `TestStdioRefusesClientRelease`
+and custody-mode config cases. Reverting the guarded runtime config or the
+disabled-connector listing check makes `TestGuardedHeaderExecution` fail.
+
+`gofmt`, `go build ./...`, `go vet ./...` and `go test -race ./...` passed with
+the isolated PostgreSQL fixture; `npm test` passed in `ui/`, and the owner
+browser flows passed locally in Chromium. The live deployment is unchanged:
+file catalog, `owner_security` disabled, no redeploy.
+
+### Review round 1 (2026-09-25)
+
+Fixed: Refresh all and single refresh skip vault connectors; the guarded call
+timeout clamps to 5 minutes instead of resetting long values to 30 seconds;
+conversion also runs when a credential commit publishes and then reports an
+error; the legacy remove dialog and the runtime docs say that removed
+credentials lock their connectors once `client_release` is on, and that rolling
+back returns tombstoned connectors to their server-held headers. The console's
+custody copy moved to `owner-core.mjs`. New tests cover disabled and hidden
+calls with an active window, the timeout clamp, vault rendering and refresh in
+the main console, and the custody copy. `gofmt`, build, vet,
+`go test -race -count=1 ./...` with PostgreSQL and `npm test` passed.
+
+### CI fix (2026-09-25)
+
+`TestGatewayIntegration` failed in CI with "upstream timeout not measured":
+the legacy call path started the upstream timeout before the durable admission
+write, so a slow fsync used up the upstream's budget. The timeout now starts
+after admission. Reproduced by delaying the admission write (old code fails,
+new code passes); `go vet ./...` and `go test -race -count=1 ./...` with
+PostgreSQL passed.
+
+### Review round 3 (2026-09-25)
+
+Fixed: a legacy call that passed the routing check before conversion
+published but was admitted afterwards ran on the old session with the
+server-held header. The proxy now re-checks the binding after the durable
+legacy admission and denies with `MCPWARDEN_LEASE_REQUIRED`; `upstream.ErrGuarded`
+from the manager is denied the same way, and `converted` closes the legacy
+session outside `rs.mu`. The guarded call's history copy of the admission moved
+after dispatch, next to the completion copy, so a slow copy no longer spends
+the call timeout. Round-2 optional items: timeout scope in the runtime doc, the
+`onCredential` comment, and Refresh all now reports connectors skipped for
+vault custody. New tests: `TestLegacyAdmissionAfterConversionIsDenied` and
+`TestHistoryCopyDoesNotDelayDispatch` (both fail on 22b151b). `gofmt`, build,
+vet, `go test -race -count=1 ./...` with PostgreSQL and `npm test` (66) passed.
+
+### Review round 4 (2026-09-25)
+
+Fixed: the round-3 conversion denials wrote `tool.dispatch.completed` with
+decision `deny`, which audit validation rejects, so history kept only the
+admission as unknown. The completion now keeps the admission's `allow` decision
+with status `denied`; the `ErrGuarded` branch also zeroes upstream time. New
+proxy tests `TestRecheckAfterAdmissionRecordsDenial` and
+`TestGuardedManagerRecordsDenial` check both audit records, and
+`TestLegacyAdmissionAfterConversionIsDenied` checks call history. `converted`
+swaps in the guarded generation under `rs.mu` (`Manager.Guard`) and closes the
+old session after releasing it; the race test no longer fails off the test
+goroutine. `gofmt`, build, vet and `go test -race -count=1 ./...` with
+PostgreSQL passed.

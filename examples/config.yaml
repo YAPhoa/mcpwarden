@@ -49,8 +49,8 @@ audit:
 
 # Optional owner security API (requires accounts). Adds vault, access-request,
 # approval and lease routes backed by PostgreSQL schema v4 (migrate first with
-# cmd/mcpwarden-security-db). Tool execution and credential custody are unchanged;
-# the guarded execution path is not installed by this setting.
+# cmd/mcpwarden-security-db). With the default custody_mode, tool execution and
+# credential custody are unchanged.
 # owner_security:
 #   database_url_env: MCPWARDEN_SECURITY_DATABASE_URL
 #   # Trust only the immediate proxy's IP/CIDR. It must overwrite
@@ -58,3 +58,8 @@ audit:
 #   trusted_proxies: ["127.0.0.1/32", "::1/128"]
 #   # Optional direct loopback HTTP for development only; default false.
 #   allow_insecure_loopback: false
+#   # legacy_managed (default): every provider uses server-held credentials.
+#   # client_release: an HTTP header connector that has a vault credential runs
+#   # only through owner-activated access windows and never through its
+#   # server-held headers. Cannot be used with --stdio.
+#   custody_mode: legacy_managed

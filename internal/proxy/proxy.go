@@ -15,6 +15,7 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/approval"
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/identity"
+	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/policy"
 	"github.com/yaphoa/mcpwarden/internal/registry"
 	"github.com/yaphoa/mcpwarden/internal/upstream"
@@ -56,7 +57,7 @@ func New(reg *registry.Registry, pol *policy.Policy, approver approval.Approver,
 					filtered = append(filtered, t)
 					continue
 				}
-				if entry, ok := p.Registry.Lookup(t.Name); ok && (entry.Healthy || p.requiresLease(entry)) && p.Policy.Allow(t.Name) && p.isVisible(t.Name) {
+				if entry, ok := p.Registry.Lookup(t.Name); ok && (entry.Healthy || p.leaseListed(entry)) && p.Policy.Allow(t.Name) && p.isVisible(t.Name) {
 					filtered = append(filtered, t)
 				}
 			}
@@ -211,8 +212,6 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 		return errorResult("upstream " + entry.Upstream + " unavailable"), nil
 	}
 	timeout := p.Manager.Timeout(entry.Upstream)
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	admissionStart := time.Now()
 	err = p.Audit.Write(record.Admission())
 	admissionTime = time.Since(admissionStart)
@@ -222,11 +221,30 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 		return errorResult("MCPWARDEN_AUDIT_UNAVAILABLE: No upstream action was executed. Durable audit storage is unavailable."), nil
 	}
 	admitted = true
+	// The connector may have converted to vault custody after the routing check
+	// above. Re-check after the durable admission so a call admitted once the
+	// binding is published never reaches the legacy session.
+	if _, required := p.leaseBinding(entry); required {
+		// The completion keeps the admission's allow decision; only the
+		// status records the denial.
+		record.EventType, record.Status = audit.DispatchCompleted, "denied"
+		return leaseError(lease.ErrRequired), nil
+	}
+	// The upstream's timeout starts after the durable admission write, so a
+	// slow fsync does not shorten the time the upstream gets.
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	upstreamStart := time.Now()
 	timing.Forwarded = true
 	res, err := p.Manager.Call(callCtx, entry.Upstream, entry.Original, json.RawMessage(req.Params.Arguments))
 	record.EventType = audit.DispatchCompleted
 	timing.UpstreamUS = time.Since(upstreamStart).Microseconds()
+	if errors.Is(err, upstream.ErrGuarded) {
+		// Conversion replaced the legacy connection before dispatch.
+		timing.Forwarded, timing.UpstreamUS = false, 0
+		record.Status = "denied"
+		return leaseError(lease.ErrRequired), nil
+	}
 	if err != nil {
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			record.Status = "timeout"
@@ -257,6 +275,7 @@ type ToolItem struct {
 	Healthy     bool      `json:"healthy"`
 	Allowed     bool      `json:"allowed"`
 	Visible     bool      `json:"visible"`
+	Custody     string    `json:"custody,omitempty"`
 	Tool        *mcp.Tool `json:"tool"`
 }
 
@@ -277,7 +296,11 @@ func (p *Proxy) ToolItems(provider, search string) []ToolItem {
 		if search != "" && !strings.Contains(strings.ToLower(name+" "+e.Tool.Description), search) {
 			continue
 		}
-		out = append(out, ToolItem{ID: e.ID, UpstreamID: e.UpstreamID, DisplayName: e.Original, Name: name, Upstream: e.Upstream, Description: e.Tool.Description, Healthy: e.Healthy, Allowed: p.Policy.Allow(name), Visible: p.isVisible(name), Tool: e.Tool})
+		item := ToolItem{ID: e.ID, UpstreamID: e.UpstreamID, DisplayName: e.Original, Name: name, Upstream: e.Upstream, Description: e.Tool.Description, Healthy: e.Healthy, Allowed: p.Policy.Allow(name), Visible: p.isVisible(name), Tool: e.Tool}
+		if p.requiresLease(e) {
+			item.Custody = "vault"
+		}
+		out = append(out, item)
 	}
 	return out
 }

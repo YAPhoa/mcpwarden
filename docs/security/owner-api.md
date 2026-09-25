@@ -2,15 +2,19 @@
 
 Roadmap step 1. The routes below are registered only when `owner_security` is set
 in accounts mode. They run the lease engine, encrypted vault records and custody
-index against PostgreSQL schema v3. Tool execution still uses file custody and does
-not consult leases until guarded startup (step 4), so this API can be enabled and
-exercised without changing how existing providers are called.
+index against PostgreSQL schema v3. With the default `custody_mode:
+legacy_managed`, tool execution still uses server-managed custody and does not
+consult leases, so this API can be enabled and exercised without changing how
+existing providers are called. `client_release` (step 4) runs each HTTP header
+connector that has a vault credential through access windows; see
+[startup integration](encrypted-runtime.md#startup-integration).
 
 ```yaml
 owner_security:
   database_url_env: MCPWARDEN_SECURITY_DATABASE_URL  # runtime role DSN, never inline
   trusted_proxies: []                             # explicit immediate proxy CIDRs
   allow_insecure_loopback: false                  # direct local development only
+  custody_mode: legacy_managed                    # or client_release (step 4)
 ```
 
 Startup opens the executor session, starts a new boot (old windows are suspended),

@@ -40,6 +40,7 @@ func TestOwnerFlowsOnPostgresCatalog(t *testing.T) {
 		{"limits", TestOwnerSecurityRequestLimitsAndBodies},
 		{"provider-changes", testPostgresProviderChangesEndAuthority},
 		{"loss-and-rollback", testPostgresCatalogLossAndRollback},
+		{"guarded-execution", TestGuardedHeaderExecution},
 	} {
 		t.Run(test.name, test.run)
 	}

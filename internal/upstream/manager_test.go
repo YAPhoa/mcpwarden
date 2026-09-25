@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -439,4 +440,84 @@ func TestMalformedToolResponseDoesNotDisconnect(t *testing.T) {
 	if !same {
 		t.Fatal("request decoding error replaced upstream session")
 	}
+}
+
+// A guarded connector never connects with its server-held headers, whether it
+// starts guarded or converts while connected, and later enable/disable
+// generations keep it guarded.
+func TestGuardedConnectorNeverUsesLegacyHeaders(t *testing.T) {
+	var legacy, other atomicCounter
+	s := mcp.NewServer(&mcp.Implementation{Name: "remote", Version: "1"}, nil)
+	s.AddTool(&mcp.Tool{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer legacy" {
+			legacy.add()
+		} else {
+			other.add()
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer remote.Close()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	events := make(chan bool, 16)
+	cfg := func(name string, guarded bool) config.Upstream {
+		return config.Upstream{Name: name, Transport: "http", URL: remote.URL, Headers: map[string]string{"Authorization": "Bearer legacy"}, Timeout: time.Second, Guarded: guarded}
+	}
+	m := New([]config.Upstream{cfg("locked", true), cfg("open", false)}, logger, func(name string, _ []*mcp.Tool, healthy bool) {
+		if name == "open" {
+			events <- healthy
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Close()
+	if !<-events {
+		t.Fatal("legacy connector did not connect")
+	}
+	if err := m.Refresh(ctx, "locked"); !errors.Is(err, ErrGuarded) {
+		t.Fatalf("refresh of a guarded connector: %v", err)
+	}
+	if _, err := m.Call(ctx, "locked", "echo", nil); !errors.Is(err, ErrGuarded) {
+		t.Fatalf("call through a guarded connector: %v", err)
+	}
+	if err := m.SetGuarded("open"); err != nil {
+		t.Fatal(err)
+	}
+	before := legacy.get()
+	for _, enabled := range []bool{false, true} {
+		if err := m.SetEnabled("open", enabled); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := m.Refresh(ctx, "open"); !errors.Is(err, ErrGuarded) {
+		t.Fatalf("refresh after conversion: %v", err)
+	}
+	for _, st := range m.States() {
+		if st.Custody != "vault" || st.Healthy {
+			t.Fatalf("state after conversion: %+v", st)
+		}
+	}
+	if legacy.get() != before || other.get() != 0 {
+		t.Fatal("a guarded connector reached the upstream")
+	}
+	if !m.Ready() {
+		t.Fatal("enabled vault connectors are serviceable")
+	}
+}
+
+type atomicCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *atomicCounter) add() { c.mu.Lock(); c.n++; c.mu.Unlock() }
+func (c *atomicCounter) get() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
 }

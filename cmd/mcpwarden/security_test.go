@@ -59,9 +59,12 @@ type ownerFixture struct {
 	entry    catalog.Entry // alice's HTTP connector
 	toolID   string
 	cek      []byte
+	// destination overrides the public default of credentialRecord.
+	destination *secret.Destination
 }
 
-func newOwnerFixture(t *testing.T) *ownerFixture {
+// newOwnerFixture takes an optional connector URL; the default is never dialed.
+func newOwnerFixture(t *testing.T, endpoint ...string) *ownerFixture {
 	t.Helper()
 	db := pgtest.New(t)
 	dir := t.TempDir()
@@ -85,7 +88,7 @@ func newOwnerFixture(t *testing.T) *ownerFixture {
 		f.owners[username] = account.ID
 		f.cookies[username] = f.session(username)
 	}
-	f.entry = catalog.Entry{Owner: f.owners["alice"], Name: "remote", URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer legacy-synthetic"}}
+	f.entry = catalog.Entry{Owner: f.owners["alice"], Name: "remote", URL: append(endpoint, "https://example.com/mcp")[0], Headers: map[string]string{"Authorization": "Bearer legacy-synthetic"}}
 	if err := store.Add(f.entry); err != nil {
 		t.Fatal(err)
 	}
@@ -295,6 +298,9 @@ func rootFixture(owner string) vault.Root {
 func (f *ownerFixture) credentialRecord(root vault.Root, credentialID, epoch, revision string, key []byte) vault.Record {
 	r := vault.Record{CredentialContext: secret.CredentialContext{OwnerID: root.OwnerID, RootID: root.RootID, RootVersion: root.RootVersion, ConnectorID: f.entry.ID, CredentialID: credentialID, Epoch: epoch}, Revision: revision,
 		Destination: secret.Destination{Schema: "mcpwarden.destination.v1", Endpoint: f.entry.URL, HeaderNames: []string{"authorization"}, Network: "public", PrivatePrefixes: []string{}}}
+	if f.destination != nil {
+		r.Destination = *f.destination
+	}
 	r.WrappedKey, _ = json.Marshal(secret.CredentialWrapper{Format: "mcpwarden.credential-wrap.v1", Algorithm: secret.Algorithm, Purpose: "credential-key", CredentialContext: r.CredentialContext, Nonce: randomEncoded(12), Ciphertext: randomEncoded(48)})
 	digest, err := r.Destination.Digest()
 	if err != nil {

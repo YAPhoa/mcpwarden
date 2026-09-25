@@ -2,9 +2,9 @@
 
 This is the tested foundation for security spec v1.1. `internal/lease` implements
 authorization state; `internal/lease/postgres` persists its metadata. The opt-in
-proxy adapter now exercises real encrypted credentials with this store, but
-application startup has not installed it. The running gateway still uses its encrypted file
-catalog and JSONL audit, and accepts no new `client_release` configuration. The
+proxy adapter exercises real encrypted credentials with this store; startup
+installs it only with `owner_security.custody_mode: client_release`. The live
+gateway still uses its encrypted file catalog and JSONL audit in legacy custody. The
 new integration tests use synthetic credentials with the real envelope activator;
 isolated core tests also retain simple test materials. See [encrypted execution](encrypted-runtime.md).
 
