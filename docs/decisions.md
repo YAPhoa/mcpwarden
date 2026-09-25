@@ -465,7 +465,7 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
 - **Server-held headers are kept, unused.** The sealed catalog headers of a
   converted connector are not read for it while `client_release` is on.
   Switching back to `legacy_managed` is the rollback. Purging them is a separate
-  decision (asked of Yohanes on 2026-09-25).
+  step; Yohanes chose to keep them on 2026-09-25.
 - **No legacy discovery for converted connectors.** Refresh returns 409
   (`upstream.ErrGuarded`); tool definitions come from the last legacy discovery
   in the catalog and every leased call verifies the selected definition. Owner

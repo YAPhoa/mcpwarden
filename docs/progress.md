@@ -1361,7 +1361,7 @@ the owner's call history. Providers and tools report `custody: "vault"`; the
 main console and vault console show vault custody instead of a connection
 state and adjust their copy when `/api/vault/state` reports `client_release`.
 `--stdio` refuses the mode. The server-held headers of converted connectors
-are kept unused; purging them is left to Yohanes. Decisions are in
+are kept unused, as Yohanes chose; a purge would be a separate step. Decisions are in
 [decisions](decisions.md#2026-09-25--step-4-guarded-execution-for-http-header-connectors).
 
 New tests: `TestGuardedHeaderExecution` (file catalog, and PostgreSQL catalog via

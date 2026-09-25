@@ -56,7 +56,8 @@ per-case coverage of the 68 acceptance tests is in the
    starts locked with a new boot. A tombstone keeps the connector locked; nothing
    falls through to legacy execution. Setting up new providers under this custody
    requires step 5, and OAuth providers require step 6. The server-held headers
-   of converted connectors are kept unused until a purge is decided.
+   of converted connectors are kept unused (chosen 2026-09-25); a purge is a
+   separate step.
 5. **Initial setup/discovery authorization.** Implement a bounded owner-only
    discovery capability for new providers before their tool catalog exists.
    Revalidate destination/header/network policy and actual discovered definitions.
