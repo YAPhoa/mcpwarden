@@ -98,8 +98,10 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 	}
 	timing := &audit.Timing{}
 	admitted := false
+	var admission audit.Record
 	defer func() {
 		if admitted && r.EventType != audit.DispatchCompleted {
+			p.mirror(admission)
 			return
 		} // Panic leaves unknown outcome.
 		r.CompletedAt = time.Now().UTC()
@@ -112,6 +114,9 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 			completionCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			err = p.Security.Complete(completionCtx, r)
+			// The best-effort history copies run after dispatch, outside the
+			// call timeout, so they never delay or prevent an admitted call.
+			p.mirror(admission)
 			p.mirror(r)
 		} else {
 			err = p.Audit.Write(r)
@@ -142,7 +147,7 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 	}
 	admitted = true
 	r = permit.Record // Preserve the exact durable actor/credential/revision snapshot.
-	p.mirror(r)
+	admission = r
 	r.EventID = identity.New()
 	var result *mcp.CallToolResult
 	err = permit.RunWithMaterial(func(ctx context.Context, material lease.Material) error {

@@ -459,6 +459,14 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
   connectors on the first `client_release` start; the legacy remove dialog says
   so. Locking only client_release-era tombstones would need the mode stored
   with the deletion and was not built (review round 1, 2026-09-25).
+- **Legacy calls re-check custody after admission.** Routing is decided before
+  the durable legacy admission, and conversion publishes independently of it.
+  The proxy therefore re-checks the binding after admission and before
+  `Manager.Call`, and maps `upstream.ErrGuarded` to the same
+  `MCPWARDEN_LEASE_REQUIRED` denial, recorded as not forwarded. A call whose
+  re-check ran before the binding published is ordered before conversion; the
+  credential save returns only after the legacy session is closed (review
+  round 3, 2026-09-25).
 - **Startup loads custody before any runtime.** The file backend now opens the
   owner security executor and loads its caches before the first runtime is
   built, as the PostgreSQL backend already did. A converted connector is built

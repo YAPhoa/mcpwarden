@@ -59,25 +59,34 @@ func (g *guardedCustody) execution(m *upstream.Manager) *proxy.LeasedExecution {
 }
 
 // converted stops the legacy session of a connector whose vault credential was
-// just committed. Routing already switched when the custody index published;
-// this closes the connection that still holds server-held headers.
+// just committed. Routing already switched when the custody index published,
+// and the proxy re-checks the binding after each legacy admission; this closes
+// the connection that still holds server-held headers. The session close runs
+// outside rs.mu so a slow close elsewhere does not delay it.
 func (rs *runtimes) converted(owner, connectorID string) {
 	if rs.guarded == nil || !rs.guarded.bound(owner, connectorID) {
 		return
 	}
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
 	rt := rs.users[owner]
 	if rt == nil {
+		rs.mu.Unlock()
 		return // The runtime is built guarded on first use.
 	}
+	name := ""
 	for _, e := range rs.store.List(owner) {
 		clear(e.Headers)
 		if e.ID == connectorID {
-			if err := rt.manager.SetGuarded(e.Name); err != nil {
-				rs.logger.Error("could not stop legacy connection", "upstream", e.Name, "error", err)
-			}
-			return
+			name = e.Name
+			break
 		}
+	}
+	m := rt.manager
+	rs.mu.Unlock()
+	if name == "" {
+		return
+	}
+	if err := m.SetGuarded(name); err != nil {
+		rs.logger.Error("could not stop legacy connection", "upstream", name, "error", err)
 	}
 }

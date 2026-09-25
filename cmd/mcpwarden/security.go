@@ -58,7 +58,8 @@ type securityAPI struct {
 	logger                *slog.Logger
 	trustedProxies        []netip.Prefix
 	allowInsecureLoopback bool
-	// onCredential runs after a credential change commits and publishes.
+	// onCredential runs after a connector credential change returns, including
+	// when the commit published and then reported an error.
 	onCredential func(owner, connectorID string)
 	custodyMode  string
 }

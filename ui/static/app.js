@@ -405,7 +405,7 @@ async function refresh(renderAfter = true) {
 }
 $('refresh').addEventListener('click', async () => {
   if (!access || loading || mutating || [...refreshState.values()].some(s=>s.pending)) return;
-  const names=providers.filter(p=>p.enabled!==false&&!inVault(p)).map(p=>p.name), failed=[];
+  const enabled=providers.filter(p=>p.enabled!==false), names=enabled.filter(p=>!inVault(p)).map(p=>p.name), vaulted=enabled.length-names.length, failed=[];
   mutating=true; lockMutationControls(); $('refresh').disabled=true; $('refresh').classList.add('saving-control'); $('refresh').setAttribute('aria-busy','true');
   try {
     for (const name of names) {
@@ -413,7 +413,8 @@ $('refresh').addEventListener('click', async () => {
       catch (_) {failed.push(name);refreshState.set(name,{failed:true});if(!access)break;}
     }
     if(access) await refresh(false);
-    notice(failed.length ? `Could not refresh: ${failed.join(', ')}. Other enabled connectors were refreshed.` : `Refreshed ${names.length} enabled connector${names.length===1?'':'s'}.`);
+    const skipped=vaulted?` Skipped ${vaulted} in vault custody.`:'';
+    notice((failed.length ? `Could not refresh: ${failed.join(', ')}. Other enabled connectors were refreshed.` : `Refreshed ${names.length} enabled connector${names.length===1?'':'s'}.`)+skipped);
   } finally {mutating=false;$('refresh').disabled=!access;$('refresh').classList.remove('saving-control');$('refresh').setAttribute('aria-busy','false');render();}
 });
 $('upstream-search').addEventListener('input', renderUpstreams);

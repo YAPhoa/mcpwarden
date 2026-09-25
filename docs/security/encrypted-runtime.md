@@ -142,10 +142,17 @@ stdio isolation are outside this header-only adapter.
   against the upstream inside its window. Discovery for converted or new
   connectors needs the owner setup flow (step 5).
 - Each call uses the connector's configured call timeout, clamped to 5 minutes
-  (30 seconds when unset).
-  Admission and completion are durable in the lease store; a best-effort copy of
-  both goes to the owner's call history with credential, lease and approval
-  attribution.
+  (30 seconds when unset). Unlike a legacy call, whose timeout starts after its
+  admission write and covers only the upstream, a guarded call's timeout covers
+  session setup, the definition check, admission and the upstream call.
+  Admission and completion are durable in the lease store. After dispatch, a
+  best-effort copy of both goes to the owner's call history with credential,
+  lease and approval attribution; a slow or failed copy never delays dispatch.
+- A legacy call that passed the routing check before conversion published is
+  re-checked after its durable admission and denied with
+  `MCPWARDEN_LEASE_REQUIRED` without reaching the upstream. Conversion then
+  replaces the legacy connection, so a later `Manager.Call` gets
+  `upstream.ErrGuarded` and is denied the same way.
 
 `TestGuardedHeaderExecution` (file and PostgreSQL catalogs) drives one
 connector through legacy calls, conversion, a locked call, an owner-activated

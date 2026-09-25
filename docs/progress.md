@@ -1396,3 +1396,18 @@ write, so a slow fsync used up the upstream's budget. The timeout now starts
 after admission. Reproduced by delaying the admission write (old code fails,
 new code passes); `go vet ./...` and `go test -race -count=1 ./...` with
 PostgreSQL passed.
+
+### Review round 3 (2026-09-25)
+
+Fixed: a legacy call that passed the routing check before conversion
+published but was admitted afterwards ran on the old session with the
+server-held header. The proxy now re-checks the binding after the durable
+legacy admission and denies with `MCPWARDEN_LEASE_REQUIRED`; `upstream.ErrGuarded`
+from the manager is denied the same way, and `converted` closes the legacy
+session outside `rs.mu`. The guarded call's history copy of the admission moved
+after dispatch, next to the completion copy, so a slow copy no longer spends
+the call timeout. Round-2 optional items: timeout scope in the runtime doc, the
+`onCredential` comment, and Refresh all now reports connectors skipped for
+vault custody. New tests: `TestLegacyAdmissionAfterConversionIsDenied` and
+`TestHistoryCopyDoesNotDelayDispatch` (both fail on 22b151b). `gofmt`, build,
+vet, `go test -race -count=1 ./...` with PostgreSQL and `npm test` (66) passed.
