@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -51,12 +52,22 @@ type Store struct {
 	accounts   map[string]Account
 	access     map[string]AccessRecord
 	deleted    map[string]Lifecycle
+	// rollback is set only in a file written by a PostgreSQL rollback export.
+	rollback string
+	unlock   func()
 }
 
-// Close implements Repository. The encrypted file store has no persistent
-// handles, but database-backed repositories can use this lifecycle hook to
-// release connection pools.
-func (s *Store) Close() error { return nil }
+// Close releases the shared catalog lock. Database-backed repositories use
+// this lifecycle hook to release connections.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unlock != nil {
+		s.unlock()
+		s.unlock = nil
+	}
+	return nil
+}
 
 type Visibility struct {
 	Lifecycle
@@ -87,12 +98,13 @@ type diskState struct {
 	Entries    []Entry                 `json:"entries"`
 	Discovery  map[string]Discovery    `json:"discovery"`
 	Visibility map[string]Visibility   `json:"visibility"`
+	Rollback   string                  `json:"rollback,omitempty"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-z0-9-]{1,20}$`)
 var headerPattern = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
 
-func Open(path, encodedKey string) (*Store, error) {
+func newAEAD(encodedKey string) (cipher.AEAD, error) {
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {
 		return nil, fmt.Errorf("managed upstream key must be base64-encoded 32 bytes")
@@ -105,25 +117,72 @@ func Open(path, encodedKey string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create credential cipher: %w", err)
 	}
-	s := &Store{path: path, aead: aead, entries: map[string]Entry{}, discovery: map[string]Discovery{}, visibility: map[string]Visibility{}, accounts: map[string]Account{}, access: map[string]AccessRecord{}, deleted: map[string]Lifecycle{}}
+	return aead, nil
+}
+
+// readDisk decrypts and decodes the file without changing it. A missing file
+// is an empty catalog.
+func readDisk(path string, aead cipher.AEAD) (diskState, bool, error) {
+	var state diskState
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return s, nil
+		return state, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read managed upstreams: %w", err)
+		return state, false, fmt.Errorf("read managed upstreams: %w", err)
 	}
 	if len(data) < aead.NonceSize() {
-		return nil, fmt.Errorf("managed upstream store is invalid")
+		return state, false, fmt.Errorf("managed upstream store is invalid")
 	}
 	plain, err := aead.Open(nil, data[:aead.NonceSize()], data[aead.NonceSize():], nil)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt managed upstreams: %w", err)
+		return state, false, fmt.Errorf("decrypt managed upstreams: %w", err)
 	}
-	var state diskState
+	defer clear(plain)
 	if err := json.Unmarshal(plain, &state); err != nil {
-		return nil, fmt.Errorf("decode managed upstreams: %w", err)
+		return state, false, fmt.Errorf("decode managed upstreams: %w", err)
 	}
+	return state, true, nil
+}
+
+func Open(path, encodedKey string) (*Store, error) {
+	aead, err := newAEAD(encodedKey)
+	if err != nil {
+		return nil, err
+	}
+	// The shared lock lets a catalog migration detect a running file gateway.
+	unlock, err := Lock(path, false)
+	if err != nil {
+		if errors.Is(err, ErrCatalogBusy) {
+			return nil, fmt.Errorf("a catalog migration is running; the file backend must not start")
+		}
+		return nil, err
+	}
+	s, err := open(path, aead)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	s.unlock = unlock
+	return s, nil
+}
+
+func open(path string, aead cipher.AEAD) (*Store, error) {
+	s := &Store{path: path, aead: aead, entries: map[string]Entry{}, discovery: map[string]Discovery{}, visibility: map[string]Visibility{}, accounts: map[string]Account{}, access: map[string]AccessRecord{}, deleted: map[string]Lifecycle{}}
+	state, exists, err := readDisk(path, aead)
+	if err != nil {
+		return nil, err
+	}
+	// A PostgreSQL cutover leaves a marker beside the file. Only the file its
+	// rollback wrote may be used again; an older copy could revive revoked keys,
+	// sessions or passwords.
+	if err := checkMarker(path, state.Rollback); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return s, nil
+	}
+	s.rollback = state.Rollback
 	if state.Access != nil {
 		s.access = state.Access
 	}
@@ -488,7 +547,7 @@ func (s *Store) save() error {
 		}
 		return entries[i].Owner < entries[j].Owner
 	})
-	plain, err := jsoncodec.Marshal(diskState{Access: s.access, Deleted: s.deleted, Entries: entries, Discovery: s.discovery, Visibility: s.visibility, Accounts: s.accounts})
+	plain, err := jsoncodec.Marshal(diskState{Access: s.access, Deleted: s.deleted, Entries: entries, Discovery: s.discovery, Visibility: s.visibility, Accounts: s.accounts, Rollback: s.rollback})
 	if err != nil {
 		return fmt.Errorf("encode managed upstreams failed")
 	}
@@ -497,8 +556,12 @@ func (s *Store) save() error {
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("create credential nonce: %w", err)
 	}
-	ciphertext := s.aead.Seal(nonce, nonce, plain, nil)
-	dir := filepath.Dir(s.path)
+	return writeEncrypted(s.path, s.aead.Seal(nonce, nonce, plain, nil))
+}
+
+// writeEncrypted atomically replaces path with a synced 0600 file.
+func writeEncrypted(path string, ciphertext []byte) error {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create managed upstream directory: %w", err)
 	}
@@ -522,7 +585,7 @@ func (s *Store) save() error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(f.Name(), s.path); err != nil {
+	if err := os.Rename(f.Name(), path); err != nil {
 		return fmt.Errorf("save managed upstreams: %w", err)
 	}
 	return nil
@@ -695,3 +758,6 @@ func (s *Store) ChangePassword(username string, expected, salt, hash []byte, ite
 	}
 	return ids, nil
 }
+
+// ValidName reports whether name is a valid connector or provider name.
+func ValidName(name string) bool { return namePattern.MatchString(name) }

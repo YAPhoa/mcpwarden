@@ -61,13 +61,25 @@ type securityAPI struct {
 }
 
 func openSecurity(ctx context.Context, cfg config.Config, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
-	trustedProxies, err := cfg.OwnerSecurity.ProxyPrefixes()
-	if err != nil {
+	if _, err := cfg.OwnerSecurity.ProxyPrefixes(); err != nil {
 		return nil, err
 	}
 	db, err := postgres.Open(ctx, cfg.OwnerSecurity.DatabaseURL)
 	if err != nil {
 		return nil, errors.New("owner security storage unavailable")
+	}
+	return startSecurity(ctx, cfg, db, store, tools, accounts, logger)
+}
+
+// startSecurity starts the lease executor on an open store. It owns db from
+// here on and closes it on failure.
+func startSecurity(ctx context.Context, cfg config.Config, db *postgres.Store, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
+	trustedProxies, err := cfg.OwnerSecurity.ProxyPrefixes()
+	if err != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = db.Close(closeCtx)
+		return nil, err
 	}
 	index, cache := custody.NewIndex(), &vault.Cache{}
 	authority := custody.NewAuthority(store, tools, index)

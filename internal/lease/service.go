@@ -846,6 +846,57 @@ func (s *Service) ChangeSessions(ctx context.Context, owner string, mutation fun
 	return mutation()
 }
 
+// Catalog commits one catalog change in a single owner transaction under the
+// owner gate. With endLeases the same transaction ends pending requests and
+// windows, and live material is dropped before publication. publish runs only
+// after a successful commit, still under the gate, and must not fail. Unlike
+// admission this also runs for a blocked owner: a blocked owner holds no live
+// material, and revocations must not wait for a restart. Lost storage returns an
+// error with the commit outcome possibly unknown; callers never retry the
+// mutation or fall back to another store. The callback must not call Service.
+func (s *Service) Catalog(ctx context.Context, owner string, endLeases bool, mutation func(Tx) (func(), error)) error {
+	if owner == "" || len(owner) > 512 || mutation == nil {
+		return ErrDenied
+	}
+	o := s.state(owner)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if s.stopped() {
+		block(o)
+		return ErrLocked
+	}
+	var publish func()
+	err := s.store.WithOwner(ctx, owner, func(tx Tx) error {
+		p, err := mutation(tx)
+		if err != nil {
+			return err
+		}
+		if endLeases {
+			if err := s.endAll(tx, owner, "revoked", ""); err != nil {
+				return err
+			}
+		}
+		publish = p
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrStorage) || s.stopped() {
+			block(o)
+		}
+		return err
+	}
+	if endLeases {
+		for id, rt := range o.live {
+			endRuntime(rt)
+			delete(o.live, id)
+		}
+	}
+	if publish != nil {
+		publish()
+	}
+	return nil
+}
+
 func (s *Service) changeAtomic(ctx context.Context, owner string, interactive bool, mutation func(Tx) (func() error, error)) error {
 	if mutation == nil {
 		return ErrDenied

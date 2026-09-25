@@ -63,6 +63,9 @@ type Managed struct {
 	Path   string `yaml:"path"`
 	KeyEnv string `yaml:"key_env"`
 	Key    string `yaml:"-"`
+	// Backend is file (default) or postgres. PostgreSQL requires owner_security
+	// and a completed catalog import and cutover.
+	Backend string `yaml:"backend"`
 }
 type Auth struct {
 	BearerTokenEnv string `yaml:"bearer_token_env"`
@@ -162,6 +165,17 @@ func (c *Config) ResolveAndValidate() error {
 		c.Managed.Key, ok = os.LookupEnv(c.Managed.KeyEnv)
 		if !ok || c.Managed.Key == "" {
 			return fmt.Errorf("managed_upstreams: environment variable %s is unset or empty", c.Managed.KeyEnv)
+		}
+		switch c.Managed.Backend {
+		case "":
+			c.Managed.Backend = "file"
+		case "file":
+		case "postgres":
+			if c.OwnerSecurity == nil {
+				return fmt.Errorf("managed_upstreams.backend postgres requires owner_security")
+			}
+		default:
+			return fmt.Errorf("managed_upstreams.backend must be file or postgres")
 		}
 	}
 	host, _, err := net.SplitHostPort(c.Listen)
