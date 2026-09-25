@@ -27,9 +27,11 @@ per-case coverage of the 68 acceptance tests is in the
    header-authenticated HTTP connectors, request review, explicit activation and
    renewal, fixed countdowns, and the separate browser lock, stop access and
    lock-all controls. Real-browser flows run against a gateway and PostgreSQL in
-   Chromium, Firefox and WebKit in CI. Remaining gaps: nginx sends no page CSP
-   yet (the flows use a strict one); no screen-reader or 200% zoom review; and
-   the console cannot delete a vault credential.
+   Chromium, Firefox and WebKit in CI. nginx sends the same strict page CSP the
+   flows use (a unit test keeps them equal), the console can remove a vault
+   credential (a permanent tombstone for that connector), and the flows check
+   layouts at 390, 720 (200% zoom on a 1440 px screen) and 1280 px. A
+   screen-reader review by a person is still open.
 3. **Full PostgreSQL catalog and authority coordination.** Preserve account/password
    verifiers, named keys, sessions, stable provider/tool IDs, visibility, discovery
    caches and lifecycle timestamps. Route every security change through the owner

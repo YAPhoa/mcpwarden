@@ -1209,3 +1209,17 @@ lines, an oversized event held open over HTTP, and eight cancelled stdio calls
 the peer never answers; each fails with its fix reverted. `go build ./...`,
 `go vet ./...` and `go test -race ./...` passed locally; PostgreSQL-backed tests
 skipped without the fixture. Not redeployed.
+
+## 2026-09-25 — Vault console leftovers
+
+nginx now sends the strict page CSP for console pages that the owner browser
+flows already use; `ui/tests/nginx-csp.test.mjs` fails if nginx and the fixture
+policies drift or `index.html` gains inline scripts, handlers or style
+attributes. `/vault` can remove a stored credential through the existing
+`DELETE /api/vault/credentials/{id}` route; a new flow step removes one while
+the vault is locked and checks the tombstone, the ended request and that no
+window runs. The layout check adds 720 px (200% zoom on a 1440 px screen);
+reviewing screenshots at that width found the two vault settings forms touching,
+now spaced. `npm test` (64) and the Chromium owner flows passed locally against
+PostgreSQL 16; Firefox and WebKit run in CI. A screen-reader review is still open.
+No Go code changed.
