@@ -1309,3 +1309,40 @@ refused abort from another database).
 `gofmt`, `go build ./...`, `go vet ./...` and
 `go test -race -count=1 -timeout=15m ./...` passed with the isolated PostgreSQL
 fixture.
+
+## 2026-09-25 — PR #10 review, merge and deployment
+
+Reviewed and merged [PR #10](https://github.com/YAPhoa/mcpwarden/pull/10) as
+`ba7bf33`, with the same source tree as reviewed head `257a7f2`. All five review
+findings are resolved: provider permission changes invalidate old authority,
+migration markers retain their ownership, history verification checks derived
+columns, reimport requires the matching rollback export, and interrupted aborts
+retain a durable cleanup checkpoint. The regression checks also cover abort
+before and after marker cleanup, with and without an earlier rollback marker.
+
+Local `go build ./...`, `go vet ./...`, the complete
+`go test -race -count=1 -timeout=10m ./...` suite with the isolated PostgreSQL
+fixture, and the original-spec/vendored-asset integrity check passed at the
+reviewed head. All required [PR CI jobs](https://github.com/YAPhoa/mcpwarden/actions/runs/36104657160)
+passed, including Chromium, Firefox, WebKit and container smoke; CodeQL was
+skipped for the private repository. The merged commit's
+[main CI](https://github.com/YAPhoa/mcpwarden/actions/runs/36105623772) also
+passed. The feature branch was deleted after merge.
+
+Built and redeployed the gateway and UI after a consistent stopped-gateway
+backup at `/tmp/mcpwarden-predeploy-20260925-pr10-catalog-1/`, with keys stored
+separately at `/tmp/mcpwarden-predeploy-keys-20260925-pr10-catalog-1/`. Backup
+directories are mode 0700 and files mode 0600. Gateway image `79e4f3fd5a7e` and
+UI image `dda2a881ddc9` are running in new containers with zero restarts.
+
+Live health, API authentication and no-store boundaries, access/history filters,
+UI source bytes, page and worker CSP, and all 12 brand/favicon assets passed
+verification. Deployment keys and mounts were preserved. The protected
+comparison confirmed unchanged accounts, access verifiers and metadata,
+connector headers/OAuth grants, discovery, visibility and prior audit history;
+the audit file is byte-for-byte unchanged.
+
+The live configuration remains on the file catalog with `owner_security`
+disabled. No live database migration or client-release cutover was performed;
+the validated [catalog migration procedure](catalog-migration.md) remains a
+separate rollout step.
