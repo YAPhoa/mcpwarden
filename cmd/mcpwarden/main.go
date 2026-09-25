@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -48,22 +49,40 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	auditLog, err := audit.Open(cfg.Audit.Path)
-	if err != nil {
-		return err
-	}
-	defer auditLog.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx, fail := context.WithCancelCause(ctx)
+	defer fail(nil)
 	var store catalog.Repository
-	if cfg.Managed != nil {
-		store, err = catalog.Open(cfg.Managed.Path, cfg.Managed.Key)
+	var history audit.Store
+	var pg *pgBackend
+	if cfg.Managed != nil && cfg.Managed.Backend == "postgres" {
+		if stdio {
+			return fmt.Errorf("--stdio cannot use the postgres catalog backend")
+		}
+		pg, err = openPostgresCatalog(ctx, cfg, pol, logger, fail)
 		if err != nil {
 			return err
 		}
-		defer store.Close()
+		defer pg.close()
+		store, history = pg.repo, pg.history
+	} else {
+		auditLog, err := audit.Open(cfg.Audit.Path)
+		if err != nil {
+			return err
+		}
+		defer auditLog.Close()
+		history = auditLog
+		if cfg.Managed != nil {
+			fileStore, err := catalog.Open(cfg.Managed.Path, cfg.Managed.Key)
+			if err != nil {
+				return err
+			}
+			defer fileStore.Close()
+			store = fileStore
+		}
 	}
-	rs := newRuntimes(ctx, cfg, pol, auditLog, store, logger)
+	rs := newRuntimes(ctx, cfg, pol, history, store, logger)
 	defer rs.close()
 	local := rs.get("local")
 	if stdio {
@@ -114,6 +133,16 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		apiProtect = func(h http.Handler) http.Handler {
 			return originOnly(rs.access.keys(h, true, resource.ProtectAPI(h)), cfg.Origins)
 		}
+	} else if pg != nil {
+		// The PostgreSQL catalog coordinates every change with the lease
+		// service itself, so the file backend's guards stay unset.
+		pg.accounts.onRevoke = rs.access.closeCredential
+		pg.security.register(mux)
+		accounts := pg.accounts
+		mcpHandler = accounts.protect(mcpHandler, false)
+		clientProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true, true) }
+		apiProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true) }
+		mux.Handle("/api/auth/", originOnly(http.HandlerFunc(accounts.authHandler), cfg.Origins))
 	} else if cfg.Accounts != nil {
 		accounts := newAccountAuth(store, cfg)
 		accounts.onRevoke = rs.access.closeCredential
@@ -123,9 +152,13 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 				return err
 			}
 			defer security.close()
+			if err := fileAuthority(ctx, security.store); err != nil {
+				return err
+			}
 			security.register(mux)
 			accounts.guard = security.guardAccess
 			rs.access.guard = security.guardAccess
+			rs.providerGuard = security.guardAccess
 			accounts.sessionGuard = security.service.ChangeSessions
 			rs.access.sessionGuard = security.service.ChangeSessions
 		}
@@ -199,6 +232,9 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			_ = server.Close()
 			return fmt.Errorf("shutdown HTTP: %w", err)
+		}
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			return cause
 		}
 		return nil
 	}

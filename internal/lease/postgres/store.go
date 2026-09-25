@@ -71,6 +71,12 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
         AND NOT has_table_privilege(current_user,'mcpwarden_security.credential_epochs','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.vault_roots','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.approval_policies','DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_state','INSERT,UPDATE,DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_legacy_tombstones','INSERT,UPDATE,DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_accounts','DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_access','DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_connectors','DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.history_events','UPDATE,DELETE,TRUNCATE')
         FROM pg_roles r,pg_namespace n WHERE r.rolname=current_user AND n.nspname='mcpwarden_security'`).Scan(&safe)
 	if err != nil || !safe {
 		return nil, lease.ErrStorage
@@ -142,50 +148,8 @@ func (s *Store) Start(ctx context.Context, boot string) error {
 		return lease.ErrLocked
 	}
 	err := s.transaction(ctx, func(tx pgx.Tx) error {
-		var now time.Time
-		if err := tx.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
-			return lease.ErrStorage
-		}
-		rows, err := tx.Query(ctx, "UPDATE mcpwarden_security.requests SET state='stale' WHERE state IN ('pending','approved') RETURNING owner_id,request_id::text")
-		if err != nil {
-			return lease.ErrStorage
-		}
-		var events []lease.Event
-		for rows.Next() {
-			var owner, id string
-			if err := rows.Scan(&owner, &id); err != nil {
-				rows.Close()
-				return lease.ErrStorage
-			}
-			events = append(events, lease.Event{ID: identity.New(), OwnerID: owner, Type: "request.stale", At: now, BootID: boot, RequestID: id})
-		}
-		rows.Close()
-		if rows.Err() != nil {
-			return lease.ErrStorage
-		}
-		rows, err = tx.Query(ctx, "UPDATE mcpwarden_security.leases SET state='suspended',ended_at=$1 WHERE state='active' RETURNING owner_id,request_id::text,lease_id::text", now)
-		if err != nil {
-			return lease.ErrStorage
-		}
-		for rows.Next() {
-			var owner, request, id string
-			if err := rows.Scan(&owner, &request, &id); err != nil {
-				rows.Close()
-				return lease.ErrStorage
-			}
-			events = append(events, lease.Event{ID: identity.New(), OwnerID: owner, Type: "lease.suspended", At: now, BootID: boot, RequestID: request, LeaseID: id})
-		}
-		rows.Close()
-		if rows.Err() != nil {
-			return lease.ErrStorage
-		}
-		for _, event := range events {
-			x := &ownerTx{ctx: ctx, tx: tx, owner: event.OwnerID, now: now}
-			if err := x.Event(event); err != nil {
-				return err
-			}
-		}
-		return nil
+		_, _, err := Quiesce(ctx, tx, boot)
+		return err
 	})
 	if err != nil {
 		s.fail()
@@ -193,6 +157,61 @@ func (s *Store) Start(ctx context.Context, boot string) error {
 	}
 	s.started = true
 	return nil
+}
+
+// Quiesce marks every pending or approved request stale and suspends every
+// active lease, recording one security event each under boot. Startup and
+// catalog rollback both use it while holding the executor lock.
+func Quiesce(ctx context.Context, tx pgx.Tx, boot string) (stale, suspended int, err error) {
+	if !identity.Valid(boot) {
+		return 0, 0, lease.ErrDenied
+	}
+	var now time.Time
+	if err := tx.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
+		return 0, 0, lease.ErrStorage
+	}
+	rows, err := tx.Query(ctx, "UPDATE mcpwarden_security.requests SET state='stale' WHERE state IN ('pending','approved') RETURNING owner_id,request_id::text")
+	if err != nil {
+		return 0, 0, lease.ErrStorage
+	}
+	var events []lease.Event
+	for rows.Next() {
+		var owner, id string
+		if err := rows.Scan(&owner, &id); err != nil {
+			rows.Close()
+			return 0, 0, lease.ErrStorage
+		}
+		events = append(events, lease.Event{ID: identity.New(), OwnerID: owner, Type: "request.stale", At: now, BootID: boot, RequestID: id})
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return 0, 0, lease.ErrStorage
+	}
+	stale = len(events)
+	rows, err = tx.Query(ctx, "UPDATE mcpwarden_security.leases SET state='suspended',ended_at=$1 WHERE state='active' RETURNING owner_id,request_id::text,lease_id::text", now)
+	if err != nil {
+		return 0, 0, lease.ErrStorage
+	}
+	for rows.Next() {
+		var owner, request, id string
+		if err := rows.Scan(&owner, &request, &id); err != nil {
+			rows.Close()
+			return 0, 0, lease.ErrStorage
+		}
+		events = append(events, lease.Event{ID: identity.New(), OwnerID: owner, Type: "lease.suspended", At: now, BootID: boot, RequestID: request, LeaseID: id})
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return 0, 0, lease.ErrStorage
+	}
+	suspended = len(events) - stale
+	for _, event := range events {
+		x := &ownerTx{ctx: ctx, tx: tx, owner: event.OwnerID, now: now}
+		if err := x.Event(event); err != nil {
+			return 0, 0, err
+		}
+	}
+	return stale, suspended, nil
 }
 
 func (s *Store) transaction(ctx context.Context, fn func(pgx.Tx) error) error {

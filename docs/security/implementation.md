@@ -236,3 +236,27 @@ PostgreSQL route tests cover isolation, replay, concurrent CAS writes
 and activations, key/session revocation, queued session expiry, transport trust
 and executor loss. Execution does not consult
 leases yet (step 4). See [owner API](owner-api.md).
+
+## PostgreSQL catalog and history — 2026-09-25
+
+Roadmap step 3, authorized by the user on 2026-09-25 with three conditions: a
+tested rollback that reconciles security changes and keeps new history, the full
+step 3 coordination requirements, and import verification from a protected
+snapshot beyond counts and IDs. Schema v4 adds catalog, catalog state and
+indexed history tables. `pgcatalog.Repository` implements `catalog.Repository`,
+with every mutation, its security event and any lease revocation in one owner
+transaction under `lease.Service.Catalog`, and publication only after commit.
+`pgcatalog.History` implements `audit.Store`. Secret-bearing fields stay in
+legacy managed custody under the existing catalog key.
+
+`mcpwarden-catalog` imports from a hash-pinned 0700 snapshot under the executor
+lock and an exclusive catalog file lock. It checkpoints history, verifies every
+field and history byte, and cuts over only after re-verification. Its rollback
+suspends windows, exports the current state, drops OAuth grants that changed
+after cutover and appends new history. Markers and a database check stop an
+older catalog file from starting. The backend is opt-in
+(`managed_upstreams.backend: postgres`, which requires `owner_security`) and fails
+closed without fallback. The six owner-route suites run unchanged on it after a
+real import and cutover. Live data has not been migrated; the procedure is in
+[catalog migration](../catalog-migration.md) for review. Guarded execution at
+startup is still step 4.

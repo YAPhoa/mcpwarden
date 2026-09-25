@@ -49,11 +49,38 @@ owner field. Historical audit rows must not cascade-delete with connectors. A
 database adapter also needs an explicit migration and encrypted-secret format; plain
 JSON or unencrypted text columns are not acceptable for secret-bearing fields.
 
-The PostgreSQL catalog/history adapter and its gateway configuration are not
-implemented yet. A separate [lease metadata adapter and migration command](security/lease-storage.md)
-now use pgx and an isolated test database; they do not implement this repository
-contract or convert live credentials. The [security specification](security/spec-v1.1/SECURITY-DESIGN.md)
-contains candidate catalog SQL for later review. A backend-only replacement can preserve
-these interfaces; client-release custody additionally requires a separate fallible
-secret-activation boundary and runtime changes. Do not hide interactive decryption
-inside these metadata reads or claim the current whole-file encryption is client-held.
+## PostgreSQL backend
+
+`pgcatalog.Repository` implements this contract on PostgreSQL schema v4 and is
+selected with `managed_upstreams.backend: postgres`, which requires
+`owner_security`. The default stays `file`. Moving data between the two is the
+[catalog migration](catalog-migration.md).
+
+Tables `catalog_accounts`, `catalog_access`, `catalog_connectors`,
+`catalog_legacy_tombstones`, `catalog_discovery` and `catalog_visibility` keep
+one row per record. Every secret-bearing value is in a `sealed` column:
+AES-GCM under a key derived with HKDF-SHA256 from the existing catalog key, with
+the row's identity as associated data. Key verifiers are indexed by an HMAC
+digest, never by the verifier itself. Plain columns (owner, username, public ID,
+kind, role, lifecycle times, connector name, auth type, grant ID and revision)
+exist for constraints and indexes. They must match the sealed payload, or
+loading fails. This is legacy server-managed custody, not client encryption.
+`catalog_state` records the import and which store is authoritative. The
+runtime role cannot change it or delete catalog rows.
+
+The repository loads and verifies every row at startup and serves reads from
+that view. Each mutation runs in one owner transaction under the lease
+service's owner gate (`lease.Service.Catalog`), together with its security event
+and any lease revocation. The view lock is taken inside the transaction and
+released only when the committed change is published. Readers never see
+uncommitted state, and a failed or uncertain commit publishes nothing. An
+uncertain commit or a lost session fails the repository closed: authentication
+stops, mutations return `catalog storage unavailable`, and the gateway exits.
+Uniqueness, the one live name per owner, grant compare-and-swap and hard active
+limits are enforced in the transaction as well as in memory. Deleted connectors
+keep a credential-free tombstone row. The file backend's guards are unused in
+this mode, because the repository coordinates with the lease service itself.
+
+A backend-only replacement preserves these interfaces. Client-release custody
+additionally requires a separate fallible secret-activation boundary and runtime
+changes. Do not hide interactive decryption inside these metadata reads.

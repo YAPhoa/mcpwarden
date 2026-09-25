@@ -718,8 +718,32 @@ try {
   await waitText(idle, '#vault-notice', 'after 10 minutes without activity');
   await idle.close();
 
+  await step('remove the vault credential while locked; it cannot be added back');
+  await openVault(page, 'credentials');
+  await waitText(page, '#vault-status-title', 'Vault locked');
+  const beforeRemoval = await ask(agent);
+  await page.click('#vault-credentials button[data-remove-connector]');
+  await page.locator('#vault-remove-dialog[open]').waitFor();
+  assert.equal((await activeElement(page)).id, 'vault-remove-cancel', 'removal did not default to keeping the credential');
+  await page.keyboard.press('Escape');
+  await page.locator('#vault-remove-dialog').waitFor({state: 'hidden'});
+  assert.equal(await page.evaluate(() => Boolean(document.activeElement?.dataset?.removeConnector)), true, 'focus did not return to Remove');
+  assert.equal((await owner3('GET', '/api/vault/wrappers')).data.credentials.filter(c => !c.deleted).length, 1, 'Escape removed the credential');
+  await page.click('#vault-credentials button[data-remove-connector]');
+  await page.click('#vault-remove-confirm');
+  await page.locator('#vault-remove-dialog').waitFor({state: 'hidden'});
+  await waitText(page, '#vault-notice', 'vault credential removed');
+  await waitText(page, '#vault-credentials', 'Removed from the vault');
+  assert.equal(await page.locator('#vault-credentials button[data-remove-connector]').count(), 0);
+  assert(await page.isDisabled('#vault-credentials button[data-connector-id]'), 'a removed credential can be replaced');
+  const tombstones = (await owner3('GET', '/api/vault/wrappers')).data.credentials;
+  assert.equal(tombstones.length, 1); assert.equal(tombstones[0].deleted, true);
+  assert.notEqual((await owner3('GET', `/api/access-requests/${beforeRemoval.id}`)).data.state, 'pending', 'removal left a request pending');
+  assert.equal((await owner3('GET', '/api/leases')).data.length, 0, 'removal left an access window running');
+
   await step('responsive layouts have no horizontal overflow');
-  for (const width of [390, 1280]) {
+  // 720 px is a 1440 px laptop screen at 200% zoom.
+  for (const width of [390, 720, 1280]) {
     await page.setViewportSize({width, height: 900});
     for (const section of ['access', 'credentials', 'settings']) {
       if (width < 700) { await page.goto(ui + `/vault${section === 'access' ? '' : '/' + section}`); await signedIn(page); await page.locator(`#vault-${section}-panel`).waitFor(); }

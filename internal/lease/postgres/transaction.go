@@ -209,7 +209,7 @@ func optionalVersion(v string) bool {
 }
 
 func validEventDetail(e lease.Event) bool {
-	return (e.CredentialID == "" || identity.Valid(e.CredentialID)) && optionalVersion(e.Epoch) && optionalVersion(e.Revision) &&
+	return (e.CredentialID == "" || identity.Valid(e.CredentialID)) && (e.SubjectID == "" || identity.Valid(e.SubjectID)) && optionalVersion(e.Epoch) && optionalVersion(e.Revision) &&
 		(e.Mode == "" || e.Mode == "none" || e.Mode == "confirm") && eventReasons[e.Reason]
 }
 

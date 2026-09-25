@@ -197,6 +197,14 @@ confirmation dialog. Browser lock also happens on sign-out, account change,
 leaving `/vault`, page hide and 10 minutes without input. Each lock discards any
 response still in flight.
 
+Remove (2026-09-25) sits beside Replace on a stored credential and works while
+the vault is locked, since it needs no key. A confirmation dialog focuses "Keep
+credential" first. Removal writes a tombstone: the connector shows "Removed from
+the vault" and cannot get a vault copy again, and pending requests and windows
+end. The gateway-managed header is untouched. nginx sends the page CSP the
+browser flows use; the flows also check layout at 720 px (200% zoom on a
+1440 px laptop).
+
 ## Tool visibility panel (2026-09-24)
 
 The connector Tools tab follows the user's supplied tool-visibility mockup. The

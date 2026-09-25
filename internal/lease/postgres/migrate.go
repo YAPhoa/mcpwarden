@@ -23,11 +23,27 @@ var vaultMigration string
 //go:embed migrations/003_owner_api.sql
 var ownerMigration string
 
-var migrations = []string{migration, vaultMigration, ownerMigration}
+//go:embed migrations/004_catalog.sql
+var catalogMigration string
 
-const SchemaVersion = 3
+var migrations = []string{migration, vaultMigration, ownerMigration, catalogMigration}
+
+const SchemaVersion = 4
 
 const executorLock int64 = 0x4d43505753454331 // MCPWSEC1, shared by migration and executor
+
+// ExecutorLock is the session advisory lock the gateway executor holds. Catalog
+// import, cutover and rollback hold it too, so they never run beside a gateway.
+const ExecutorLock = executorLock
+
+// CheckSchema requires the full current schema.
+func CheckSchema(ctx context.Context, db queryer) error {
+	n, err := appliedMigrations(ctx, db)
+	if err != nil || n != SchemaVersion {
+		return ErrMigration
+	}
+	return nil
+}
 
 // Attributes such as CREATEROLE are not inherited automatically, but membership
 // may still permit SET ROLE. Check the reachable roles, not just current_user.
@@ -136,6 +152,12 @@ func Migrate(ctx context.Context, conn *pgx.Conn, runtimeRole string) error {
 		"GRANT INSERT, UPDATE ON mcpwarden_security.vault_roots,mcpwarden_security.credential_heads,mcpwarden_security.credential_epochs TO " + role,
 		"GRANT INSERT ON mcpwarden_security.vault_wrapper_sets,mcpwarden_security.credential_versions TO " + role,
 		"GRANT INSERT, UPDATE ON mcpwarden_security.approval_policies TO " + role,
+		// Catalog rows are never deleted by the runtime: revocations and
+		// connector deletions are updates that leave tombstones. Only the
+		// discovery cache and per-provider visibility are removable.
+		"GRANT INSERT, UPDATE ON mcpwarden_security.catalog_accounts,mcpwarden_security.catalog_access,mcpwarden_security.catalog_connectors TO " + role,
+		"GRANT INSERT, UPDATE, DELETE ON mcpwarden_security.catalog_discovery,mcpwarden_security.catalog_visibility TO " + role,
+		"GRANT INSERT ON mcpwarden_security.history_events TO " + role,
 	} {
 		if _, err = tx.Exec(ctx, sql); err != nil {
 			return ErrMigration

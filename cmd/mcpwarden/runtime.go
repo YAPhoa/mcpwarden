@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +45,10 @@ type runtimes struct {
 	store        catalog.Repository
 	logger       *slog.Logger
 	users        map[string]*userRuntime
+	// providerGuard ends the owner's access windows before a file catalog
+	// changes a provider's availability or visible tools. The PostgreSQL
+	// catalog does this in its own transaction and leaves it unset.
+	providerGuard accessGuard
 }
 
 func newRuntimes(ctx context.Context, cfg config.Config, pol *policy.Policy, log audit.Store, store catalog.Repository, logger *slog.Logger) *runtimes {
@@ -335,7 +340,14 @@ func (rs *runtimes) providerVisibility(w http.ResponseWriter, r *http.Request, n
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
 		}
-		if err := rs.store.SetVisibility(owner, name, setting); err != nil {
+		set := func() error { return rs.store.SetVisibility(owner, name, setting) }
+		var err error
+		if visibilityChanges(rs.store.Visibility(owner, name), setting) {
+			err = rs.providerGuard.run(r.Context(), owner, set)
+		} else {
+			err = set()
+		}
+		if err != nil {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -345,6 +357,16 @@ func (rs *runtimes) providerVisibility(w http.ResponseWriter, r *http.Request, n
 		w.Header().Set("Allow", "GET, PUT")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// visibilityChanges reports whether a setting changes which tools are visible.
+func visibilityChanges(old, next catalog.Visibility) bool {
+	if old.Mode == "all" || next.Mode == "all" {
+		return old.Mode != next.Mode
+	}
+	enabled := slices.Clone(next.Enabled)
+	slices.Sort(enabled)
+	return !slices.Equal(old.Enabled, enabled)
 }
 
 func (rs *runtimes) connections(w http.ResponseWriter, r *http.Request) {
@@ -472,7 +494,14 @@ func (rs *runtimes) providerEnabled(w http.ResponseWriter, r *http.Request, name
 	defer rs.mu.Unlock()
 	rt := rs.getLocked(owner)
 	old := !rs.store.Visibility(owner, name).Disabled
-	if err := rs.store.SetProviderEnabled(owner, name, *input.Enabled); err != nil {
+	set := func() error { return rs.store.SetProviderEnabled(owner, name, *input.Enabled) }
+	var err error
+	if old != *input.Enabled {
+		err = rs.providerGuard.run(r.Context(), owner, set)
+	} else {
+		err = set()
+	}
+	if err != nil {
 		http.Error(w, "could not save provider setting", http.StatusInternalServerError)
 		return
 	}

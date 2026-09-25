@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/pbkdf2"
@@ -19,6 +20,7 @@ import (
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/pgcatalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"
@@ -37,10 +39,15 @@ const (
 // ownerFixture runs the real account session, access-key and owner security
 // routes against a scratch PostgreSQL database. All credentials are synthetic.
 type ownerFixture struct {
-	t        *testing.T
-	db       *pgtest.Database
-	store    *catalog.Store
-	cfg      config.Config
+	t     *testing.T
+	db    *pgtest.Database
+	store catalog.Repository
+	cfg   config.Config
+	// backend is file or postgres; see TestOwnerFlowsOnPostgresCatalog.
+	backend  string
+	imported bool
+	pg       *pgBackend
+	stopped  context.Context
 	accounts *accountAuth
 	access   *accessManager
 	api      *securityAPI
@@ -57,12 +64,15 @@ type ownerFixture struct {
 func newOwnerFixture(t *testing.T) *ownerFixture {
 	t.Helper()
 	db := pgtest.New(t)
-	store, err := catalog.Open(t.TempDir()+"/catalog.enc", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	dir := t.TempDir()
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	store, err := catalog.Open(dir+"/catalog.enc", key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &ownerFixture{t: t, db: db, store: store, owners: map[string]string{}, cookies: map[string]string{}, keys: map[string]string{}, keyIDs: map[string]string{}}
-	f.cfg = config.Config{Accounts: &config.Accounts{}, Origins: []string{panelOrigin}, OwnerSecurity: &config.OwnerSecurity{DatabaseURL: db.RuntimeDSN}}
+	f := &ownerFixture{t: t, db: db, store: store, backend: fixtureBackend(t), owners: map[string]string{}, cookies: map[string]string{}, keys: map[string]string{}, keyIDs: map[string]string{}}
+	f.cfg = config.Config{Accounts: &config.Accounts{}, Origins: []string{panelOrigin}, OwnerSecurity: &config.OwnerSecurity{DatabaseURL: db.RuntimeDSN},
+		Managed: &config.Managed{Path: dir + "/catalog.enc", Key: key, Backend: f.backend}, Audit: config.Audit{Path: dir + "/audit.jsonl"}}
 	f.accounts = newAccountAuth(store, f.cfg)
 	f.access = newAccessManager(store)
 	for _, username := range []string{"alice", "bob"} {
@@ -112,6 +122,10 @@ func (f *ownerFixture) session(username string) string {
 func (f *ownerFixture) start() {
 	f.t.Helper()
 	pol, _ := policy.New(config.Policy{Default: "allow"})
+	if f.backend == "postgres" {
+		f.startPostgres(pol)
+		return
+	}
 	api, err := openSecurity(f.t.Context(), f.cfg, f.store, pol, f.accounts, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		f.t.Fatal(err)
@@ -134,6 +148,51 @@ func (f *ownerFixture) restart() {
 	f.api.close()
 	f.api = nil
 	f.start()
+}
+
+// fixtureBackend runs the owner flows on the PostgreSQL catalog when invoked
+// from TestOwnerFlowsOnPostgresCatalog.
+func fixtureBackend(t *testing.T) string {
+	if strings.HasPrefix(t.Name(), "TestOwnerFlowsOnPostgresCatalog/") {
+		return "postgres"
+	}
+	return "file"
+}
+
+// startPostgres imports and cuts over the fixture's file catalog once, then
+// starts the gateway's real PostgreSQL catalog backend. No guards are set:
+// the repository coordinates with the lease service itself.
+func (f *ownerFixture) startPostgres(pol *policy.Policy) {
+	f.t.Helper()
+	if !f.imported {
+		if err := f.store.Close(); err != nil {
+			f.t.Fatal(err)
+		}
+		src := pgcatalog.Sources{CatalogPath: f.cfg.Managed.Path, CatalogKey: f.cfg.Managed.Key, HistoryPath: f.cfg.Audit.Path}
+		if _, err := pgcatalog.Import(f.t.Context(), f.db.Admin, src, pgcatalog.Options{}); err != nil {
+			f.t.Fatal(err)
+		}
+		if _, err := pgcatalog.Cutover(f.t.Context(), f.db.Admin, src); err != nil {
+			f.t.Fatal(err)
+		}
+		f.imported = true
+	}
+	ctx, fail := context.WithCancelCause(f.t.Context())
+	pg, err := openPostgresCatalog(ctx, f.cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), fail)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.pg, f.stopped, f.api, f.store, f.accounts = pg, ctx, pg.security, pg.repo, pg.accounts
+	f.access = newAccessManager(pg.repo)
+	f.t.Cleanup(func() {
+		if f.api == pg.security {
+			pg.close()
+		}
+	})
+	f.mux = http.NewServeMux()
+	pg.security.register(f.mux)
+	f.mux.Handle("/api/auth/", originOnly(http.HandlerFunc(f.accounts.authHandler), f.cfg.Origins))
+	f.mux.Handle("/api/access/", f.accounts.protect(http.HandlerFunc(f.access.handler), true))
 }
 
 type req struct {

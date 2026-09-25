@@ -105,6 +105,16 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 	defer cancel()
 	rs := newRuntimes(ctx, config.Config{}, pol, auditLog, store, logger)
 	defer rs.close()
+	// With owner security the file catalog ends the owner's windows first, but
+	// only for a change that alters what a caller can use.
+	guarded := 0
+	rs.providerGuard = func(_ context.Context, owner string, mutation func() error) error {
+		if owner != "alice" {
+			t.Error("provider guard for another owner", owner)
+		}
+		guarded++
+		return mutation()
+	}
 	for _, e := range []catalog.Entry{
 		{Owner: "alice", Name: "remote", URL: aliceHTTP.URL, Headers: map[string]string{"X-Api-Key": "alice-key"}, CallTimeout: "1s"},
 		{Owner: "bob", Name: "remote", URL: bobHTTP.URL, Headers: map[string]string{"X-Api-Key": "bob-key"}, CallTimeout: "1s"},
@@ -210,8 +220,8 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	visibilityResponse.Body.Close()
-	if visibilityResponse.StatusCode != http.StatusOK {
-		t.Fatalf("set visibility: %d", visibilityResponse.StatusCode)
+	if visibilityResponse.StatusCode != http.StatusOK || guarded != 1 {
+		t.Fatalf("set visibility: %d, guarded %d", visibilityResponse.StatusCode, guarded)
 	}
 	select {
 	case <-listChanged:
@@ -252,7 +262,14 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 			t.Fatalf("toggle: %d", res.StatusCode)
 		}
 	}
+	setEnabled(true)
+	if guarded != 1 {
+		t.Fatal("unchanged availability ended windows")
+	}
 	setEnabled(false)
+	if guarded != 2 {
+		t.Fatal("disabling did not end windows")
+	}
 	disabledList, err := listUpstreamTools(ctx, clients["alice"])
 	if err != nil || len(disabledList.Tools) != 0 {
 		t.Fatal("disabled provider still discoverable")

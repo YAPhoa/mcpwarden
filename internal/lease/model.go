@@ -110,6 +110,8 @@ type Event struct {
 	Revision     string `json:"revision,omitempty"`
 	Mode         string `json:"mode,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	// Catalog events name the changed account, access record or connector.
+	SubjectID string `json:"subject_id,omitempty"`
 }
 
 // Store implementations must commit all Tx writes together, then return success.

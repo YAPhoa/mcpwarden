@@ -359,3 +359,84 @@ windows that ended in the last 24 hours, capped at 50 and newest first, with an
 `ended_at` time. Key callers still see only their own. Countdowns correct for
 clock skew over 2 seconds using the gateway's `Date` header, and a window's end
 time is never computed in the browser.
+
+## 2026-09-25 — PostgreSQL catalog, verified migration and reconciling rollback
+
+The user approved roadmap step 3 with three conditions: a tested rollback that
+never revives revoked authority and keeps new history (spec §20.5), the full
+step 3 coordination (owner gate, atomic change plus audit, publication after
+commit), and import verification from a consistent protected snapshot that goes
+beyond counts and IDs. The live file backend stays unchanged and the default.
+
+- **Custody.** Secret-bearing values are sealed with AES-GCM under keys derived
+  by HKDF-SHA256 from the existing catalog key, with the row identity as
+  associated data. Verifier lookup uses an HMAC digest. This relocates legacy
+  server-managed custody; it is not client encryption. The user accepted keeping
+  the server key for this step.
+- **Coordination.** `lease.Service.Catalog` runs each catalog mutation inside
+  one owner transaction under the owner gate, with the security event. API-key
+  revocation and client-token replacement also end the owner's windows, as the
+  file mode's guard does. Connector deletion ends them too, which the file mode
+  does not, because the deleted connector's credential must not stay usable.
+  It runs even for
+  a blocked owner, so revocations never wait for a restart. The repository takes
+  its view lock inside the transaction and releases it when it publishes after
+  commit. The file backend's guards stay unset in this mode: calling back into
+  the service under the owner gate would deadlock.
+- **Failure.** An uncertain commit or a lost executor session marks the
+  repository failed. Authentication then fails, mutations return unavailable,
+  and the process exits. There is no fallback to the file.
+- **History.** One row per record holds the exact JSONL bytes plus indexed
+  columns, so query results match the JSONL reader. Latency means come from
+  stored sums and can differ in the last float digits.
+- **Import.** Import runs under the executor advisory lock and an exclusive
+  `flock` on `<catalog>.lock`. The file gateway now holds that lock shared for
+  its lifetime, its only behavior change. It reads a hash-pinned 0700 snapshot
+  copy. Verification decodes every row and compares the canonical catalog and
+  every history byte with the snapshot, both after import and again at cutover.
+  History checkpoints persist the SHA-256 state so a resumed import still
+  proves the whole file.
+- **Rollback.** Rollback exports PostgreSQL's current state and does not
+  restore the pre-cutover file. It suspends windows first, drops OAuth grants
+  whose revision changed after cutover (the user required reauthorization), ends
+  MCP sessions and appends new history to the pinned bytes. Marker files plus a
+  database state check stop an older catalog file from starting, and a finished
+  rollback stamps the exported file with its ID.
+- **Tools.** The image ships `mcpwarden-security-db` and `mcpwarden-catalog`, so
+  the migration runs with the gateway's own volume and key.
+
+
+## 2026-09-25 — Step 3 review: provider authority, marker ownership, history columns
+
+- **Provider changes are connector security.** Disabling or enabling a
+  provider, or changing which tools are visible, now commits with the end of
+  that connector's pending requests and windows and a higher connector security
+  revision. `lease.Service.Catalog` takes the ending from the mutation
+  (`lease.Ending`), so a repeated setting ends nothing and other connectors keep
+  their windows. The revision is sealed in the visibility row, starts at zero on
+  import and is dropped by a rollback export. Tool policy still reports a fixed
+  revision: it comes from the config file, and changing it needs a restart that
+  ends every window. With the file catalog and owner security the handlers end
+  all of the owner's windows first, as key revocation does.
+- **Markers belong to one database.** Each migration step checks the marker
+  before replacing it: it must be absent or carry the import and rollback IDs
+  of the database the step runs against. A `rolled_back` marker is the one
+  exception; a new import keeps it inside its own marker and abort restores it.
+  Import records itself in the database before writing its marker, so an
+  importing marker without state in its database is never the tool's own.
+- **History verification reads what queries read.** Cutover compares every
+  derived history column with what `audit.ParseLine` derives from the pinned
+  line, not only the stored bytes.
+
+## 2026-09-25 — Step 3 second review: rollback export identity, resumable abort
+
+- **Import after a rollback needs the export.** A `rolled_back` marker admits
+  only the file that rollback wrote, so import now compares the snapshot's
+  rollback ID with the marker before it writes any row, on a fresh run and on
+  resume. A refused import leaves the marker as it was.
+- **Abort keeps its ownership until the marker is clean.** Schema v4 (not yet
+  applied to any live database) gains the `aborting` state. Abort deletes the
+  imported rows and records `aborting` in one commit, cleans up the marker, then
+  deletes the state. A retry against the same database finishes the cleanup; a
+  different database still refuses the marker. File gateways with owner
+  security refuse to start while a state is `aborting`.

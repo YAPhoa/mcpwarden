@@ -33,12 +33,22 @@ policy:
 audit:
   path: ./audit.jsonl # Persistent file required: admission is synced before dispatch.
 
+# Optional user-registered remote upstreams, stored encrypted:
+# managed_upstreams:
+#   path: ./managed-upstreams.enc
+#   key_env: MCPWARDEN_CREDENTIAL_KEY
+#   # file (default) or postgres. postgres requires owner_security and a
+#   # completed catalog import and cutover (docs/catalog-migration.md); the
+#   # gateway then never reads the file and refuses to start if PostgreSQL is
+#   # unavailable or not cut over.
+#   backend: file
+
 # Optional local panel accounts (requires managed_upstreams, incompatible with oauth):
 # accounts:
 #   allow_registration: true
 
 # Optional owner security API (requires accounts). Adds vault, access-request,
-# approval and lease routes backed by PostgreSQL schema v3 (migrate first with
+# approval and lease routes backed by PostgreSQL schema v4 (migrate first with
 # cmd/mcpwarden-security-db). Tool execution and credential custody are unchanged;
 # the guarded execution path is not installed by this setting.
 # owner_security:

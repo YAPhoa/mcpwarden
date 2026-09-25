@@ -81,7 +81,7 @@ function lockBrowser(reason = '') {
   idleControls();
   clearSensitiveInputs();
   $('vault-recovery-key').textContent = '';
-  for (const id of ['vault-credential-dialog', 'vault-renew-dialog', 'vault-lock-all-dialog']) if ($(id).open) $(id).close();
+  for (const id of ['vault-credential-dialog', 'vault-renew-dialog', 'vault-lock-all-dialog', 'vault-remove-dialog']) if ($(id).open) $(id).close();
   $('vault-setup').hidden = true; $('vault-unlock').hidden = true;
   if (reason && wasUnlocked) notice(reason);
   render();
@@ -358,7 +358,9 @@ function renderCredentials() {
     return el('article', {class: 'access-row', 'data-connector': c.id},
       el('div', {class: 'access-record'}, el('h3', {text: c.name}), el('p', {class: 'record-meta'}, el('span', {class: `badge ${stored && !stored.deleted ? 'success' : ''}`, text: status}), el('span', {class: 'mono', text: c.url})),
         el('p', {class: 'help', text: destination ? `Header${c.header_names.length === 1 ? '' : 's'}: ${c.header_names.join(', ')}` : reason})),
-      el('div', {class: 'access-row-actions'}, el('button', {type: 'button', 'data-connector-id': c.id, disabled, 'aria-describedby': unlocked() ? null : 'vault-status-text', text: stored ? 'Replace credential' : 'Add encrypted credential'})));
+      el('div', {class: 'access-row-actions'}, el('button', {type: 'button', 'data-connector-id': c.id, disabled, 'aria-describedby': unlocked() ? null : 'vault-status-text', text: stored ? 'Replace credential' : 'Add encrypted credential'}),
+        // Removing needs no key, so it stays available while the vault is locked.
+        stored && !stored.deleted ? el('button', {type: 'button', class: 'danger', 'data-remove-connector': c.id, disabled: Boolean(state.busy), text: 'Remove'}) : ''));
   });
   replaceKeepingFocus($('vault-credentials'), rows.length ? rows : [el('p', {class: 'empty', text: 'Add a personal HTTP upstream with header authentication first. Its credential can then be encrypted here.'})]);
 }
@@ -744,6 +746,38 @@ $('vault-credential-form').addEventListener('submit', async event => {
     else if (error.code === 'encrypt') setError('vault-credential-error', error.message);
     else failed(error, 'vault-credential-error');
   } finally { endOperation(op, 'vault-credential-save'); }
+});
+
+// Removal writes a tombstone, so this connector cannot get a vault copy again.
+let removing = null;
+$('vault-credentials').addEventListener('click', event => {
+  const button = event.target.closest('button[data-remove-connector]');
+  if (!button || state.busy) return;
+  const connection = state.connections.find(c => c.id === button.dataset.removeConnector);
+  const stored = state.wrappers?.credentials.find(k => k.connector_id === button.dataset.removeConnector && !k.deleted);
+  if (!connection || !stored) return;
+  removing = {connection, stored};
+  $('vault-remove-title').textContent = `Remove the vault credential for ${connection.name}?`;
+  setError('vault-remove-error', '');
+  $('vault-remove-dialog').showModal(); $('vault-remove-cancel').focus();
+});
+$('vault-remove-cancel').addEventListener('click', () => $('vault-remove-dialog').close());
+$('vault-remove-dialog').addEventListener('close', () => {
+  const id = removing?.connection.id; removing = null;
+  focusOr(`#vault-credentials button[data-remove-connector="${id}"], #vault-credentials button[data-connector-id="${id}"]`);
+});
+$('vault-remove-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (state.busy || !removing) return;
+  const {connection, stored} = removing, generation = state.generation; state.busy = 'remove'; busyControl('vault-remove-confirm', 'Removing…');
+  try {
+    await client.request('DELETE', `/api/vault/credentials/${stored.credential_id}`, {body: JSON.stringify({expected: {epoch: stored.epoch, revision: stored.revision}})});
+    guard(generation);
+    $('vault-remove-dialog').close();
+    notice(`${connection.name}: vault credential removed. Pending requests and access windows for your account were ended.`);
+    await load();
+  } catch (error) { failed(error, 'vault-remove-error'); }
+  finally { if (generation === state.generation) { state.busy = ''; idleControl($('vault-remove-confirm')); render(); } }
 });
 
 // ---- Settings: approval mode and passphrase ----

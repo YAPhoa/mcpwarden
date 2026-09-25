@@ -664,36 +664,55 @@ func (s *Service) admit(ctx context.Context, credentialID, toolID, definition st
 }
 
 func (s *Service) endAll(tx Tx, owner, state, actor string) error {
+	_, err := s.endMatching(tx, owner, state, actor, "")
+	return err
+}
+
+// endMatching stales pending requests and ends active windows, all of the
+// owner's or only those whose scope names connector. It returns the ended
+// lease IDs.
+func (s *Service) endMatching(tx Tx, owner, state, actor, connector string) ([]string, error) {
 	requests, err := tx.Requests()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, r := range requests {
-		if r.State != "pending" && r.State != "approved" {
+		if r.State != "pending" && r.State != "approved" || connector != "" && r.Scope.ConnectorID != connector {
 			continue
 		}
 		r.State = "stale"
 		if err := tx.PutRequest(r); err != nil {
-			return err
+			return nil, err
 		}
 		if err := s.event(tx, owner, "request.stale", actor, r.ID, "", ""); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	leases, err := tx.Leases()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var ended []string
 	for _, l := range leases {
+		if connector != "" {
+			r, err := tx.Request(l.RequestID)
+			if err != nil {
+				return nil, err
+			}
+			if r.Scope.ConnectorID != connector {
+				continue
+			}
+		}
 		l.State, l.EndedAt = state, tx.Now()
 		if err := tx.PutLease(l); err != nil {
-			return err
+			return nil, err
 		}
 		if err := s.event(tx, owner, "lease."+state, actor, l.RequestID, l.ID, ""); err != nil {
-			return err
+			return nil, err
 		}
+		ended = append(ended, l.ID)
 	}
-	return nil
+	return ended, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, id string) error {
@@ -844,6 +863,80 @@ func (s *Service) ChangeSessions(ctx context.Context, owner string, mutation fun
 		return err
 	}
 	return mutation()
+}
+
+// Ending selects what a catalog change ends in its own transaction: every
+// pending request and window of the owner, or only those whose scope names
+// Connector. The zero value ends nothing.
+type Ending struct {
+	All       bool
+	Connector string
+}
+
+// Catalog commits one catalog change in a single owner transaction under the
+// owner gate. The mutation returns its publication and what the same
+// transaction must end; ended windows lose their live material before
+// publication. publish runs only after a successful commit, still under the
+// gate, and must not fail. Unlike admission this also runs for a blocked owner:
+// a blocked owner holds no live material, and revocations must not wait for a
+// restart. Lost storage returns an error with the commit outcome possibly
+// unknown; callers never retry the mutation or fall back to another store. The
+// callback must not call Service.
+func (s *Service) Catalog(ctx context.Context, owner string, mutation func(Tx) (func(), Ending, error)) error {
+	if owner == "" || len(owner) > 512 || mutation == nil {
+		return ErrDenied
+	}
+	o := s.state(owner)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if s.stopped() {
+		block(o)
+		return ErrLocked
+	}
+	var (
+		publish func()
+		end     Ending
+		ended   []string
+	)
+	err := s.store.WithOwner(ctx, owner, func(tx Tx) error {
+		p, e, err := mutation(tx)
+		if err != nil {
+			return err
+		}
+		if e.All || e.Connector != "" {
+			connector := e.Connector
+			if e.All {
+				connector = ""
+			}
+			if ended, err = s.endMatching(tx, owner, "revoked", "", connector); err != nil {
+				return err
+			}
+		}
+		publish, end = p, e
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrStorage) || s.stopped() {
+			block(o)
+		}
+		return err
+	}
+	if end.All {
+		for id, rt := range o.live {
+			endRuntime(rt)
+			delete(o.live, id)
+		}
+	}
+	for _, id := range ended {
+		if rt := o.live[id]; rt != nil {
+			endRuntime(rt)
+			delete(o.live, id)
+		}
+	}
+	if publish != nil {
+		publish()
+	}
+	return nil
 }
 
 func (s *Service) changeAtomic(ctx context.Context, owner string, interactive bool, mutation func(Tx) (func() error, error)) error {

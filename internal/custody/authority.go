@@ -13,15 +13,23 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/registry"
 )
 
-// Until the PostgreSQL catalog (roadmap step 3) keeps real counters, tool policy
-// and connector security metadata report a fixed revision. Every admission and
-// activation still rechecks the live tool visibility, policy and definition
-// digest, so a stale scope fails even though these numbers do not move. File
-// connectors are immutable apart from enablement: replacing one gives it a new ID.
+// Tool policy comes from the config file and changes only with a restart, which
+// starts a new boot and ends every window, so it reports a fixed revision. The
+// PostgreSQL catalog counts connector security changes (availability and
+// visible tools) and ends the connector's requests and windows in the same
+// commit. The file catalog keeps no counter and reports a fixed revision; every
+// admission and activation still rechecks the live tool visibility, policy and
+// definition digest. Replacing a connector gives it a new ID.
 const (
 	PolicyRevision            = "1"
 	ConnectorSecurityRevision = "1"
 )
+
+// securityRevisions is implemented by catalogs that count connector security
+// changes.
+type securityRevisions interface {
+	ConnectorSecurityRevision(owner, connectorID string) string
+}
 
 // Authority implements lease.Authority over the file catalog and the committed
 // custody index. It performs in-memory reads only and never resolves secrets.
@@ -77,8 +85,12 @@ func (a *Authority) Credential(owner, id string) (lease.Credential, bool) {
 		return lease.Credential{}, false
 	}
 	p := a.Index.Policy(owner)
+	connectorRevision := ConnectorSecurityRevision
+	if counted, ok := a.Catalog.(securityRevisions); ok {
+		connectorRevision = counted.ConnectorSecurityRevision(owner, h.ConnectorID)
+	}
 	k := lease.Credential{ID: h.CredentialID, ConnectorID: h.ConnectorID, Epoch: h.Epoch, Revision: h.Revision,
-		DestinationDigest: h.DestinationDigest, PolicyRevision: PolicyRevision, ConnectorSecurityRevision: ConnectorSecurityRevision,
+		DestinationDigest: h.DestinationDigest, PolicyRevision: PolicyRevision, ConnectorSecurityRevision: connectorRevision,
 		ApprovalPolicyRevision: p.Revision, ApprovalMode: p.Mode, Tools: map[string]lease.Tool{}}
 	entry, ok := a.Connector(owner, h.ConnectorID)
 	// Header-bundle custody only. OAuth connectors need encrypted grant state.

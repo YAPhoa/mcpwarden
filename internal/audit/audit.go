@@ -140,12 +140,15 @@ func Open(path string) (*Writer, error) {
 	}
 	return w, nil
 }
-func (w *Writer) Write(r Record) error {
+
+// Encode applies the writer's defaults and validation and returns the exact
+// bytes every history backend stores for a new event.
+func Encode(r Record) (Record, []byte, error) {
 	if r.SchemaVersion == 0 {
 		r.SchemaVersion = 1
 	}
 	if r.SchemaVersion != 1 && r.SchemaVersion != 2 {
-		return fmt.Errorf("unsupported audit schema version")
+		return r, nil, fmt.Errorf("unsupported audit schema version")
 	}
 	if r.EventID == "" {
 		r.EventID = identity.New()
@@ -158,17 +161,25 @@ func (w *Writer) Write(r Record) error {
 			r.OccurredAt = r.CompletedAt
 		}
 		if err := validateInvocationEvent(r); err != nil {
-			return err
+			return r, nil, err
 		}
 	} else if r.EventType != "" || r.InvocationID != "" {
-		return fmt.Errorf("invocation events require audit schema 2")
+		return r, nil, fmt.Errorf("invocation events require audit schema 2")
 	}
 	b, err := json.Marshal(r)
 	if err != nil {
-		return err
+		return r, nil, err
 	}
 	if len(b) >= 1<<20-1 {
-		return fmt.Errorf("audit record exceeds JSONL size limit")
+		return r, nil, fmt.Errorf("audit record exceeds JSONL size limit")
+	}
+	return r, b, nil
+}
+
+func (w *Writer) Write(r Record) error {
+	r, b, err := Encode(r)
+	if err != nil {
+		return err
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -291,23 +302,9 @@ func (w *Writer) queryHistory(q HistoryFilter, stats *Performance) ([]Record, in
 	line := 0
 	for scanner.Scan() {
 		line++
-		var r Record
-		if raw := bytes.TrimSpace(scanner.Bytes()); len(raw) == 0 || raw[0] != '{' || json.Unmarshal(raw, &r) != nil {
-			return nil, 0, nil, fmt.Errorf("invalid audit record at line %d", line)
-		}
-		if r.SchemaVersion < 0 || r.SchemaVersion > 2 {
-			return nil, 0, nil, fmt.Errorf("unsupported audit schema at line %d", line)
-		}
-		if r.SchemaVersion == 0 {
-			// Stable for repeated imports of this unchanged source file. Keep v0.
-			r.EventID = identity.Derive(identity.Namespace, fmt.Sprintf("audit-v0:%d:%s", line, scanner.Bytes()))
-			r.CompletedAt = r.TS.Add(time.Duration(r.DurationMS) * time.Millisecond)
-		} else if r.SchemaVersion == 2 {
-			if err := validateInvocationEvent(r); err != nil {
-				return nil, 0, nil, fmt.Errorf("invalid invocation event at line %d", line)
-			}
-		} else if r.EventID == "" || r.CompletedAt.IsZero() || r.EventType != "" || r.InvocationID != "" {
-			return nil, 0, nil, fmt.Errorf("incomplete audit record at line %d", line)
+		r, err := ParseLine(line, scanner.Bytes())
+		if err != nil {
+			return nil, 0, nil, err
 		}
 		if r.Owner != q.Owner || q.Owner == "" {
 			continue
@@ -354,6 +351,35 @@ func (w *Writer) queryHistory(q HistoryFilter, stats *Performance) ([]Record, in
 	})
 	return out, total, options, nil
 }
+
+// ParseLine decodes one JSONL line (without its line terminator) exactly as the
+// history reader does, including the v0 event ID derived from the line number
+// and raw bytes. line counts from 1.
+func ParseLine(line int, raw []byte) (Record, error) {
+	var r Record
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(trimmed, &r) != nil {
+		return r, fmt.Errorf("invalid audit record at line %d", line)
+	}
+	if r.SchemaVersion < 0 || r.SchemaVersion > 2 {
+		return r, fmt.Errorf("unsupported audit schema at line %d", line)
+	}
+	if r.SchemaVersion == 0 {
+		// Stable for repeated imports of this unchanged source file. Keep v0.
+		r.EventID = identity.Derive(identity.Namespace, fmt.Sprintf("audit-v0:%d:%s", line, raw))
+		r.CompletedAt = r.TS.Add(time.Duration(r.DurationMS) * time.Millisecond)
+	} else if r.SchemaVersion == 2 {
+		if err := validateInvocationEvent(r); err != nil {
+			return r, fmt.Errorf("invalid invocation event at line %d", line)
+		}
+	} else if r.EventID == "" || r.CompletedAt.IsZero() || r.EventType != "" || r.InvocationID != "" {
+		return r, fmt.Errorf("incomplete audit record at line %d", line)
+	}
+	return r, nil
+}
+
+// HistoryTime is the ordering time: completion, or occurrence for an
+// unresolved admission.
+func HistoryTime(r Record) time.Time { return historyTime(r) }
 
 // History ordering is completed_at DESC, event_id DESC, independent of ingestion.
 func older(a, b Record) bool {

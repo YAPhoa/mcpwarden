@@ -1209,3 +1209,103 @@ lines, an oversized event held open over HTTP, and eight cancelled stdio calls
 the peer never answers; each fails with its fix reverted. `go build ./...`,
 `go vet ./...` and `go test -race ./...` passed locally; PostgreSQL-backed tests
 skipped without the fixture. Not redeployed.
+
+## 2026-09-25 — Vault console leftovers
+
+nginx now sends the strict page CSP for console pages that the owner browser
+flows already use; `ui/tests/nginx-csp.test.mjs` fails if nginx and the fixture
+policies drift or `index.html` gains inline scripts, handlers or style
+attributes. `/vault` can remove a stored credential through the existing
+`DELETE /api/vault/credentials/{id}` route; a new flow step removes one while
+the vault is locked and checks the tombstone, the ended request and that no
+window runs. The layout check adds 720 px (200% zoom on a 1440 px screen);
+reviewing screenshots at that width found the two vault settings forms touching,
+now spaced. `npm test` (64) and the Chromium owner flows passed locally against
+PostgreSQL 16; Firefox and WebKit run in CI. A screen-reader review is still open.
+No Go code changed.
+
+## 2026-09-25 — PostgreSQL catalog, verified migration and rollback (step 3)
+
+Implemented roadmap step 3 behind `managed_upstreams.backend: postgres`, under
+the user's three conditions. The live file backend is unchanged apart from
+holding a shared lock on `<catalog>.lock` for its lifetime, and no live data
+moved.
+
+- Schema v4 adds catalog, catalog state and indexed history tables. The
+  runtime role cannot delete catalog rows, change catalog state or rewrite
+  history.
+- `pgcatalog.Repository` commits every catalog change with its security event
+  and any lease revocation in one owner transaction (`lease.Service.Catalog`)
+  and publishes after commit. It fails closed on an uncertain commit or a lost
+  session; the gateway then exits with no file fallback.
+- `pgcatalog.History` stores exact JSONL bytes with indexed columns and returns
+  the same results as the JSONL reader.
+- `mcpwarden-catalog` runs `status`, `import`, `cutover`, `rollback` and
+  `abort`. Import reads a hash-pinned protected snapshot under the executor and
+  file locks, resumes from history checkpoints and verifies every field and
+  history byte. Rollback suspends windows, exports the current state, requires
+  OAuth reauthorization for grants rotated after cutover and appends new
+  history. Markers and a database check block an older catalog file.
+- The gateway image now also ships `mcpwarden-security-db` and
+  `mcpwarden-catalog`.
+
+Tests cover the import and history-reader comparison, interrupted and repeated
+imports, unsafe or changed sources, a busy gateway, eight kinds of row
+tampering, abort before cutover, atomic commits, the active-key limit under
+concurrency, CAS conflicts and session loss, and rollback resume and replaced
+files. The six owner-route suites also run unchanged on the PostgreSQL catalog
+after a real import and cutover. One end-to-end case covers an approved window,
+key revocation, a password change, OAuth rotation and new history, then database
+loss, rollback and a file restart. A binary smoke run against a scratch database
+repeated this with the real gateway and CLI: register and create keys in file
+mode, import, cut over, revoke a key and change the password on PostgreSQL,
+roll back, and restart on the file. The revoked key stayed revoked, the old
+password failed, and the pre-cutover file was refused.
+
+`gofmt`, `go build ./...`, `go vet ./...`, `go mod tidy -diff`,
+`scripts/ci/integrity.py` and `go test -race -count=1 -timeout=10m ./...`
+passed with the isolated PostgreSQL fixture. govulncheck and the container smoke
+run in CI; the local toolchain and missing Docker daemon could not run them. The
+[cutover procedure](catalog-migration.md) awaits the user's review before any
+live migration.
+
+## 2026-09-25 — Step 3 review fixes
+
+The PR #10 review found three gaps, now fixed:
+
+- Disabling a provider or hiding its tools on the PostgreSQL catalog kept old
+  windows and pending requests. The same commit now ends that connector's
+  requests and windows and moves its security revision, so re-enabling revives
+  neither. Repeating a setting ends nothing. File mode with owner security ends
+  the owner's windows before such a change.
+- Import and abort against another database could replace or remove an active
+  marker. Every step now refuses a marker that belongs to another database, and
+  abort restores a `rolled_back` marker that an import replaced.
+- Verification compared history bytes but not the indexed columns. It now
+  compares every derived column, including v0 event IDs.
+
+New tests: `TestOwnerFlowsOnPostgresCatalog/provider-changes`,
+`TestProviderChangesMoveTheSecurityRevision`, `TestMarkerBelongsToItsDatabase`,
+five history-column tampering cases, and a guard check in
+`TestPersonalUpstreamsAndStoredDiscovery`. Each new case failed against the
+previous code. `gofmt`, `go build ./...`, `go vet ./...`, `go mod tidy -diff`,
+`scripts/ci/integrity.py`, the CGO-disabled tests and
+`go test -race -count=1 -timeout=15m ./...` passed with the isolated PostgreSQL
+fixture.
+
+## 2026-09-25 — Step 3 second review fixes
+
+- Import after a rollback accepted any catalog file beside the `rolled_back`
+  marker, so a restored pre-cutover copy could be imported into a new database
+  and revive a revoked key. Import now requires the rollback's own export and
+  leaves the marker untouched when it refuses.
+- An abort interrupted after its database commit could not be finished, since
+  the state that proved marker ownership was already gone. The state now stays
+  as `aborting` until the marker is cleaned up, and a rerun finishes.
+
+New tests: `TestImportAfterRollbackRequiresTheExport` (fails without the check)
+and `TestAbortResumesAfterItsDatabaseCommit` (both interruption points, plus a
+refused abort from another database).
+`gofmt`, `go build ./...`, `go vet ./...` and
+`go test -race -count=1 -timeout=15m ./...` passed with the isolated PostgreSQL
+fixture.

@@ -1,8 +1,10 @@
 # History storage contract
 
-History remains append-only JSONL. `audit.Appender` is the dispatch write boundary;
-`audit.Reader` is the query/aggregation boundary; `audit.Store` combines them for
-the runtime. The application owns closing the backend. No database is added.
+History is append-only JSONL by default, or the indexed `history_events` table
+with the PostgreSQL catalog backend (see the end of this page). `audit.Appender`
+is the dispatch write boundary; `audit.Reader` is the query/aggregation boundary;
+`audit.Store` combines them for the runtime. The application owns closing the
+backend.
 
 Legacy v1 rows represent completed invocations, including failures and denials:
 
@@ -95,3 +97,28 @@ Live JSONL admission does not yet reserve a lease/call budget or coordinate with
 revocation. The new [lease/PostgreSQL core](security/lease-storage.md) tests those
 transactions separately; gateway integration and full legacy-history migration
 remain required. Its leased-invocation table is not yet an `audit.Store` reader.
+
+## PostgreSQL history
+
+With `managed_upstreams.backend: postgres`, `pgcatalog.History` is the
+`audit.Store`. Each record is one row in `history_events` that keeps the exact
+JSONL bytes the file writer would have written, plus indexed columns derived
+from them: owner, event and invocation IDs, schema version, event type, tool ID
+and name, upstream, status, actor, start and ordering times in nanoseconds,
+timing values and their log2 buckets. Every write is its own committed
+transaction, so an admission is durable before dispatch. A failed or uncertain
+write is returned and never retried as a tool call. A lost session also stops
+the gateway.
+
+Imported rows are `source='legacy'` with their original line number, so v0 IDs
+derived from line and bytes stay valid. Live rows are `source='live'` in commit
+order. `(owner_id, event_id)` and `(owner_id, invocation_id, event_type)` are
+unique, and the runtime role can only insert. Queries return what the JSONL reader
+returns: the same owner scoping, filters, hiding of admissions that have a
+completion, ordering by completion (or occurrence) time and then event ID in
+byte order, tool options and timing summaries. Latency summaries are rebuilt
+from stored bucket counts, sums and maxima. Their means are sum/count, which can
+differ from the reader's streaming mean in the last floating-point digits.
+`TestImportPreservesCatalogAndHistory` compares both readers on the same data.
+A rollback writes the imported bytes back followed by the live rows, so the file
+backend continues the same history.
