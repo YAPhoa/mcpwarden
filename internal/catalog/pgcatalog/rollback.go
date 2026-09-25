@@ -53,6 +53,9 @@ func Rollback(ctx context.Context, conn *pgx.Conn, src Sources) (RollbackManifes
 	if !exists {
 		return RollbackManifest{}, ErrState
 	}
+	if _, err := ownMarker(src, st.ImportID, st.RollbackID, false); err != nil {
+		return RollbackManifest{}, err
+	}
 	switch st.State {
 	case "active":
 		if st, err = beginRollback(ctx, conn, st); err != nil {

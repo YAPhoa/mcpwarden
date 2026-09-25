@@ -22,6 +22,16 @@ type state struct {
 	legacy     map[string]catalog.Lifecycle    // file tombstones without an owner
 	discovery  map[catalog.ProviderKey]catalog.Discovery
 	visibility map[catalog.ProviderKey]catalog.Visibility
+	revisions  map[catalog.ProviderKey]int64 // provider security revision
+}
+
+// visibilityRecord is the sealed visibility payload. Revision counts changes to
+// a provider's availability and visible tools; access scopes bind it as the
+// connector security revision. The file catalog keeps no counter, so an import
+// starts at zero and a rollback export drops it.
+type visibilityRecord struct {
+	catalog.Visibility
+	Revision int64 `json:"security_revision,omitempty"`
 }
 
 type tombstone struct {
@@ -32,7 +42,7 @@ type tombstone struct {
 func newState() *state {
 	return &state{accounts: map[string]catalog.Account{}, access: map[string]catalog.AccessRecord{}, entries: map[string]catalog.Entry{},
 		grants: map[string]int64{}, tombstones: map[string]tombstone{}, legacy: map[string]catalog.Lifecycle{},
-		discovery: map[catalog.ProviderKey]catalog.Discovery{}, visibility: map[catalog.ProviderKey]catalog.Visibility{}}
+		discovery: map[catalog.ProviderKey]catalog.Discovery{}, visibility: map[catalog.ProviderKey]catalog.Visibility{}, revisions: map[catalog.ProviderKey]int64{}}
 }
 
 // sameTime compares a payload time with its column, which PostgreSQL keeps at
@@ -130,14 +140,18 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 		st.discovery[catalog.ProviderKey{Owner: row.OwnerID, Provider: row.Provider}] = d
 	}
 	for _, row := range rows.Visibility {
-		var v catalog.Visibility
+		var v visibilityRecord
 		if err := s.open(visibilityAAD(row.OwnerID, row.Provider), row.Sealed, &v); err != nil {
 			return nil, err
 		}
-		if v.Mode != row.Mode || v.Disabled != row.Disabled || !sameTime(v.CreatedAt, row.CreatedAt) || !sameTime(v.UpdatedAt, row.UpdatedAt) {
+		if v.Mode != row.Mode || v.Disabled != row.Disabled || !sameTime(v.CreatedAt, row.CreatedAt) || !sameTime(v.UpdatedAt, row.UpdatedAt) || v.Revision < 0 {
 			return nil, bad("visibility")
 		}
-		st.visibility[catalog.ProviderKey{Owner: row.OwnerID, Provider: row.Provider}] = v
+		k := catalog.ProviderKey{Owner: row.OwnerID, Provider: row.Provider}
+		st.visibility[k] = v.Visibility
+		if v.Revision > 0 {
+			st.revisions[k] = v.Revision
+		}
 	}
 	return st, nil
 }
@@ -208,8 +222,8 @@ func (s *sealer) discoveryRow(k catalog.ProviderKey, d catalog.Discovery) (catal
 	return catalogdb.Discovery{OwnerID: k.Owner, Provider: k.Provider, UpdatedAt: d.UpdatedAt, Sealed: sealed}, err
 }
 
-func (s *sealer) visibilityRow(k catalog.ProviderKey, v catalog.Visibility) (catalogdb.Visibility, error) {
-	sealed, err := s.seal(visibilityAAD(k.Owner, k.Provider), v)
+func (s *sealer) visibilityRow(k catalog.ProviderKey, v catalog.Visibility, revision int64) (catalogdb.Visibility, error) {
+	sealed, err := s.seal(visibilityAAD(k.Owner, k.Provider), visibilityRecord{Visibility: v, Revision: revision})
 	return catalogdb.Visibility{OwnerID: k.Owner, Provider: k.Provider, Mode: v.Mode, Disabled: v.Disabled, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt, Sealed: sealed}, err
 }
 

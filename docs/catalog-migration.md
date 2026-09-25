@@ -30,11 +30,12 @@ text. Browser-controlled credential access is a later step. See
   field. This covers ownership, password salts and hashes, key verifiers,
   public IDs, roles, expiry, all lifecycle timestamps, tombstones, discovery,
   visibility, headers, OAuth settings and grants, and grant revisions. Every
-  history line is compared byte for byte with its line number, so event IDs
-  (including derived v0 IDs), argument hashes and order are preserved. Plain
-  database columns must agree with the encrypted payload, and each payload is
-  bound to its row, so a swapped or edited row fails. Counts and IDs are
-  reported but are not the check.
+  history line is compared byte for byte with its line number, and every
+  column that history queries read (owner, event ID including derived v0 IDs,
+  filters, ordering time and timing) must equal what the JSONL reader derives
+  from that line. Plain database columns must agree with the encrypted
+  payload, and each payload is bound to its row, so a swapped or edited row
+  fails. Counts and IDs are reported but are not the check.
 - **Resumable and repeatable.** The catalog imports in one transaction. History
   imports in batches, and each batch commits with its checkpoint (line count,
   byte offset and hash state). A rerun after an interruption continues from the
@@ -53,6 +54,15 @@ text. Browser-controlled credential access is a later step. See
   refuses unless the catalog there is absent or rolled back. Do not delete the
   marker. It is the only guard for a file gateway that runs without
   `owner_security`.
+- **A marker belongs to one database.** Every step checks the marker under the
+  file lock before replacing it. It must be absent or carry the import (and
+  rollback) ID recorded in the database the step runs against. A marker from
+  another database stops the step with `the catalog marker belongs to a
+  migration in another database`, so pointing the tool at a new or empty
+  database can never make a cut-over file authoritative again. The one
+  exception is a `rolled_back` marker, since the file is then authoritative: a
+  new import keeps it inside its own marker, and abandoning that import puts it
+  back. Import records itself in the database before it writes its marker.
 
 ## Coordination while running on PostgreSQL
 
@@ -62,7 +72,14 @@ grants, visibility, availability and discovery. The same transaction writes the
 change, its security event (`access.revoked`, `account.password_changed`,
 `connector.oauth_saved` and so on), and any lease revocation. Revoking an API
 key or deleting a connector ends the owner's access windows in that commit;
-the file mode's guard does this for key revocation only. Password changes and session revocation end no windows. The
+the file mode's guard does this for key revocation only. Password changes and
+session revocation end no windows. Disabling or enabling a provider, or
+changing which of its tools are visible, is a connector security change: the
+same commit ends that connector's pending requests and windows (other
+connectors keep theirs) and moves its security revision, which access scopes
+bind, so undoing the change revives neither. Repeating the current setting
+changes nothing. With the file catalog and `owner_security`, such a change
+ends all of the owner's windows before the file is written. The
 in-memory view changes only after the commit succeeds. Hard limits on active
 keys and sessions are checked in memory and again by a count inside the
 transaction. OAuth grant updates use compare-and-swap on the stored grant ID.
@@ -107,8 +124,9 @@ Tool-call history rows commit before the call is dispatched, as before.
 
 **Failure before cutover.** Before step 5 the file is still authoritative and
 unchanged. Run `mcpwarden-catalog abort` (it deletes the imported rows and
-state, then removes the marker; the snapshot directory is kept), keep
-`backend: file` and start the gateway. Tested by
+state, then removes its marker or restores the `rolled_back` marker the import
+replaced; the snapshot directory is kept), keep `backend: file` and start the
+gateway. Tested by
 `TestAbortBeforeCutoverRestoresFileGateway`.
 
 ## Rollback after cutover

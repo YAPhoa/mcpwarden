@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,7 +25,7 @@ import (
 // is one owner transaction under it, together with any lease revocation and
 // its security event, and the in-memory view changes only after the commit.
 type Coordinator interface {
-	Catalog(ctx context.Context, owner string, endLeases bool, mutation func(lease.Tx) (func(), error)) error
+	Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error
 	BootID() string
 }
 
@@ -136,6 +138,8 @@ type change struct {
 	events []lease.Event
 	boot   string
 	now    time.Time
+	// end names a connector whose requests and windows this change ends.
+	end string
 }
 
 func (c *change) ctx() context.Context { return c.tx.CatalogContext() }
@@ -166,25 +170,25 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 			r.mu.Unlock()
 		}
 	}()
-	err := coord.Catalog(ctx, owner, endLeases, func(tx lease.Tx) (func(), error) {
+	err := coord.Catalog(ctx, owner, func(tx lease.Tx) (func(), lease.Ending, error) {
 		otx, ok := tx.(catalogdb.OwnerTx)
 		if !ok || otx.CatalogOwner() != owner {
-			return nil, lease.ErrStorage
+			return nil, lease.Ending{}, lease.ErrStorage
 		}
 		r.mu.Lock()
 		held = true
 		if r.st == nil {
-			return nil, ErrUnavailable
+			return nil, lease.Ending{}, ErrUnavailable
 		}
 		c := &change{tx: otx, boot: coord.BootID(), now: r.now()}
 		publish, err := plan(c, r.st)
 		if err != nil {
-			return nil, err
+			return nil, lease.Ending{}, err
 		}
 		for _, e := range c.events {
 			e.At = tx.Now()
 			if err := tx.Event(e); err != nil {
-				return nil, err
+				return nil, lease.Ending{}, err
 			}
 		}
 		wrote = true
@@ -194,7 +198,7 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 			}
 			held = false
 			r.mu.Unlock()
-		}, nil
+		}, lease.Ending{All: endLeases, Connector: c.end}, nil
 	})
 	if err != nil && wrote {
 		// The writes ran; the commit may or may not have happened.
@@ -333,6 +337,7 @@ func (r *Repository) Delete(owner, name string) error {
 			st.tombstones[e.ID] = tombstone{owner: owner, life: deleted}
 			delete(st.discovery, k)
 			delete(st.visibility, k)
+			delete(st.revisions, k)
 		}, nil
 	})
 }
@@ -377,6 +382,23 @@ func (st *state) connectorID(owner, provider string) string {
 	return ""
 }
 
+// visibleSet is the part of a visibility setting that decides which tools a
+// caller can use.
+func visibleSet(v catalog.Visibility, exists bool) (string, []string) {
+	if !exists || v.Mode == "all" {
+		return "all", nil
+	}
+	return v.Mode, v.Enabled
+}
+
+// securityChange bumps the provider's security revision and ends the pending
+// requests and windows of its connector in the same transaction. An old scope
+// then no longer matches, even if the change is later undone.
+func (c *change) securityChange(st *state, k catalog.ProviderKey) int64 {
+	c.end = st.connectorID(k.Owner, k.Provider)
+	return st.revisions[k] + 1
+}
+
 func (r *Repository) SetVisibility(owner, provider string, setting catalog.Visibility) error {
 	if !validProvider(owner, provider) || setting.Mode != "all" && setting.Mode != "selected" {
 		return fmt.Errorf("invalid visibility setting")
@@ -392,11 +414,20 @@ func (r *Repository) SetVisibility(owner, provider string, setting catalog.Visib
 	sort.Strings(setting.Enabled)
 	return r.apply(owner, false, func(c *change, st *state) (func(), error) {
 		k := catalog.ProviderKey{Owner: owner, Provider: provider}
-		old := st.visibility[k]
+		old, exists := st.visibility[k]
+		if exists && old.Mode == setting.Mode && slices.Equal(old.Enabled, setting.Enabled) {
+			return nil, nil
+		}
 		setting.Disabled = old.Disabled
 		setting.Lifecycle = old.Lifecycle
 		touch(&setting.Lifecycle, c.now)
-		row, err := r.seal.visibilityRow(k, setting)
+		revision := st.revisions[k]
+		oldMode, oldTools := visibleSet(old, exists)
+		newMode, newTools := visibleSet(setting, true)
+		if oldMode != newMode || !slices.Equal(oldTools, newTools) {
+			revision = c.securityChange(st, k)
+		}
+		row, err := r.seal.visibilityRow(k, setting, revision)
 		if err != nil {
 			return nil, err
 		}
@@ -404,7 +435,7 @@ func (r *Repository) SetVisibility(owner, provider string, setting catalog.Visib
 			return nil, err
 		}
 		c.event("connector.visibility_changed", st.connectorID(owner, provider))
-		return func() { st.visibility[k] = setting }, nil
+		return func() { st.visibility[k] = setting; st.revisions[k] = revision }, nil
 	})
 }
 
@@ -462,13 +493,17 @@ func (r *Repository) SetProviderEnabled(owner, provider string, enabled bool) er
 	return r.apply(owner, false, func(c *change, st *state) (func(), error) {
 		k := catalog.ProviderKey{Owner: owner, Provider: provider}
 		setting, exists := st.visibility[k]
+		if setting.Disabled == !enabled {
+			return nil, nil
+		}
 		if !exists {
 			setting.Mode = "all"
 		}
 		setting.Enabled = append([]string(nil), setting.Enabled...)
 		setting.Disabled = !enabled
 		touch(&setting.Lifecycle, c.now)
-		row, err := r.seal.visibilityRow(k, setting)
+		revision := c.securityChange(st, k)
+		row, err := r.seal.visibilityRow(k, setting, revision)
 		if err != nil {
 			return nil, err
 		}
@@ -476,8 +511,21 @@ func (r *Repository) SetProviderEnabled(owner, provider string, enabled bool) er
 			return nil, err
 		}
 		c.event("connector.availability_changed", st.connectorID(owner, provider))
-		return func() { st.visibility[k] = setting }, nil
+		return func() { st.visibility[k] = setting; st.revisions[k] = revision }, nil
 	})
+}
+
+// ConnectorSecurityRevision is the revision access scopes bind for a
+// connector. It moves whenever the provider is disabled or enabled or its
+// visible tools change.
+func (r *Repository) ConnectorSecurityRevision(owner, connectorID string) string {
+	st, done := r.view()
+	defer done()
+	e, ok := st.entries[connectorID]
+	if !ok || e.Owner != owner {
+		return "1"
+	}
+	return strconv.FormatInt(st.revisions[catalog.ProviderKey{Owner: owner, Provider: e.Name}]+1, 10)
 }
 
 // SaveOAuth stores a new grant only if the stored grant is still previousGrant,

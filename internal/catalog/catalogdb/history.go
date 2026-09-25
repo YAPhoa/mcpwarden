@@ -141,14 +141,32 @@ func QueryHistory(ctx context.Context, db DB, q HistoryQuery) (HistoryResult, er
 }
 
 // LegacyHistory streams imported rows in source line order, for verification.
-func LegacyHistory(ctx context.Context, db DB, fn func(line int64, record string) error) error {
-	return each(ctx, db, `SELECT source_line,record FROM mcpwarden_security.history_events WHERE source='legacy' ORDER BY source_line`, func(r pgx.Rows) error {
-		var line int64
-		var record string
-		if err := r.Scan(&line, &record); err != nil {
+// LegacyHistory streams imported rows with every stored column, in source
+// line order, so verification can compare what queries read.
+func LegacyHistory(ctx context.Context, db DB, fn func(HistoryRow) error) error {
+	return each(ctx, db, `SELECT owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,
+        timed,failed,forwarded,handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record,source,source_line
+        FROM mcpwarden_security.history_events WHERE source='legacy' ORDER BY source_line`, func(r pgx.Rows) error {
+		var h HistoryRow
+		var eventType, invocationID *string
+		if err := r.Scan(&h.OwnerID, &h.EventID, &h.SchemaVersion, &eventType, &invocationID, &h.ToolID, &h.Tool, &h.Upstream, &h.Status, &h.ActorAccessID,
+			&h.TSNano, &h.HistoryNano, &h.Timed, &h.Failed, &h.Forwarded, &h.HandlerUS, &h.GatewayUS, &h.UpstreamUS,
+			&h.HandlerBucket, &h.GatewayBucket, &h.UpstreamBucket, &h.Record, &h.Source, &h.SourceLine); err != nil {
 			return ErrStorage
 		}
-		return fn(line, record)
+		if eventType != nil {
+			if *eventType == "" {
+				return ErrStorage
+			}
+			h.EventType = *eventType
+		}
+		if invocationID != nil {
+			if *invocationID == "" {
+				return ErrStorage
+			}
+			h.InvocationID = *invocationID
+		}
+		return fn(h)
 	})
 }
 

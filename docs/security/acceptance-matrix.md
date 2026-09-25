@@ -96,8 +96,8 @@ Totals: 3 Live, 19 Opt-in, 20 Library, 17 Partial, 2 Open, 7 Unselected.
 | P04 | Partial | `TestLeaseAttributionIsAnAtomicMetadataBundle`, `TestEncryptedDispatchThroughMCPAndPostgres` | Live calls do not carry credential epoch, lease or approval yet |
 | P05 | Live | `TestInvocationImportOrderOwnerIsolationAndLegacyPreservation`, `TestStableToolIdentity`, UI test "public key handles disambiguate collisions…" | None |
 | P06 | Opt-in | Browser flows (an uncertain activation retries with the same Idempotency-Key and yields one window), `TestOwnerActivationReplayAndOwnerIsolation` (identical retry returns the same window; a new operation is refused), `TestOwnerConcurrentMutationsAndKeyRevocation` (parallel activations create one durable window), `TestOwnerActivationAndReplay`, `TestPostgresAmbiguousActivationCommit` | None |
-| P07 | Opt-in | `TestLegacyPublicIDMigrationPreservesCredentialsAndLifecycle`, `TestMigrationV1UpgradeAndRollback`, `TestImportPreservesCatalogAndHistory`, `TestImportResumesWithoutDuplicates`, `TestImportRefusesUnsafeOrChangedSources`, `TestVerificationDetectsTampering`, `TestAbortBeforeCutoverRestoresFileGateway` | Not yet run on live data |
-| P08 | Partial | `TestPostgresSnapshotRestartLocksExecution`, `TestOwnerFlowsOnPostgresCatalog/loss-and-rollback`, `TestRollbackResumesAndRefusesReplacedFiles`, `TestMarkerGatesTheFileBackend` | Database backup/restore drill (step 9) |
+| P07 | Opt-in | `TestLegacyPublicIDMigrationPreservesCredentialsAndLifecycle`, `TestMigrationV1UpgradeAndRollback`, `TestImportPreservesCatalogAndHistory`, `TestImportResumesWithoutDuplicates`, `TestImportRefusesUnsafeOrChangedSources`, `TestVerificationDetectsTampering`, `TestAbortBeforeCutoverRestoresFileGateway`, `TestMarkerBelongsToItsDatabase` | Not yet run on live data |
+| P08 | Partial | `TestPostgresSnapshotRestartLocksExecution`, `TestOwnerFlowsOnPostgresCatalog/loss-and-rollback`, `TestRollbackResumesAndRefusesReplacedFiles`, `TestMarkerGatesTheFileBackend`, `TestMarkerBelongsToItsDatabase` | Database backup/restore drill (step 9) |
 | P09 | Opt-in | `TestOwnerRoutesFailClosedOnDatabaseLoss` (terminated executor session locks owner routes; restart suspends the old window), `TestPostgresExclusiveExecutorAndLoss` | Guarded execution at startup (step 4) |
 | P10 | Library | `TestPostgresDurabilityIsolationAndPrivileges` | Retention role and procedure |
 | P11 | Partial | `TestBudgetAdmissionAtomicAndConcurrency`, `TestPostgresAtomicBudget` | High-concurrency load tests (step 10) |
@@ -114,7 +114,7 @@ Totals: 3 Live, 19 Opt-in, 20 Library, 17 Partial, 2 Open, 7 Unselected.
 | O05 | Unselected | Not applicable | Push is unselected |
 | O06 | Unselected | Not applicable | Push is unselected |
 | O07 | Opt-in | `TestOwnerConfirmModeAndPolicyChange` (revision CAS and current password), `TestOwnerRoutesRequireInteractiveBrowserSession` (keys cannot change the policy); browser flow "approval policy" (wrong password and stale revision refused) | None |
-| O08 | Opt-in | `TestOwnerConfirmModeAndPolicyChange` (the change commits with stale pending requests and revoked windows, audited together) | None |
+| O08 | Opt-in | `TestOwnerConfirmModeAndPolicyChange` (the change commits with stale pending requests and revoked windows, audited together), `TestOwnerFlowsOnPostgresCatalog/provider-changes` and `TestProviderChangesMoveTheSecurityRevision` (disabling a provider or hiding tools ends that connector's windows and requests and moves its revision; repeats change nothing) | None |
 | O09 | Unselected | Not applicable | TOTP is unselected |
 | O10 | Unselected | Not applicable | Push and TOTP are unselected |
 | O11 | Opt-in | `TestOwnerActivationReplayAndOwnerIsolation` (another owner cannot read, request against, confirm, deny, activate or revoke; a substituted challenge is refused) | None |

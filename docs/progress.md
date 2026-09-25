@@ -1268,3 +1268,27 @@ passed with the isolated PostgreSQL fixture. govulncheck and the container smoke
 run in CI; the local toolchain and missing Docker daemon could not run them. The
 [cutover procedure](catalog-migration.md) awaits the user's review before any
 live migration.
+
+## 2026-09-25 — Step 3 review fixes
+
+The PR #10 review found three gaps, now fixed:
+
+- Disabling a provider or hiding its tools on the PostgreSQL catalog kept old
+  windows and pending requests. The same commit now ends that connector's
+  requests and windows and moves its security revision, so re-enabling revives
+  neither. Repeating a setting ends nothing. File mode with owner security ends
+  the owner's windows before such a change.
+- Import and abort against another database could replace or remove an active
+  marker. Every step now refuses a marker that belongs to another database, and
+  abort restores a `rolled_back` marker that an import replaced.
+- Verification compared history bytes but not the indexed columns. It now
+  compares every derived column, including v0 event IDs.
+
+New tests: `TestOwnerFlowsOnPostgresCatalog/provider-changes`,
+`TestProviderChangesMoveTheSecurityRevision`, `TestMarkerBelongsToItsDatabase`,
+five history-column tampering cases, and a guard check in
+`TestPersonalUpstreamsAndStoredDiscovery`. Each new case failed against the
+previous code. `gofmt`, `go build ./...`, `go vet ./...`, `go mod tidy -diff`,
+`scripts/ci/integrity.py`, the CGO-disabled tests and
+`go test -race -count=1 -timeout=15m ./...` passed with the isolated PostgreSQL
+fixture.

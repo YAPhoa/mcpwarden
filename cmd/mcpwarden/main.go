@@ -158,6 +158,7 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 			security.register(mux)
 			accounts.guard = security.guardAccess
 			rs.access.guard = security.guardAccess
+			rs.providerGuard = security.guardAccess
 			accounts.sessionGuard = security.service.ChangeSessions
 			rs.access.sessionGuard = security.service.ChangeSessions
 		}

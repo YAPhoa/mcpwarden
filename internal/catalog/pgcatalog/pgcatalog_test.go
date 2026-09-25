@@ -398,6 +398,13 @@ func TestImportRefusesUnsafeOrChangedSources(t *testing.T) {
 		if _, err := f.db.Admin.Exec(t.Context(), "DELETE FROM mcpwarden_security.catalog_state"); err != nil {
 			t.Fatal(err)
 		}
+		// The importing marker now has no state in this database.
+		if _, err := Import(t.Context(), f.db.Admin, f.src, Options{}); !errors.Is(err, ErrMarker) {
+			t.Fatal(err)
+		}
+		if err := catalog.RemoveMarker(f.src.CatalogPath); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := Import(t.Context(), f.db.Admin, f.src, Options{}); !errors.Is(err, ErrNotEmpty) {
 			t.Fatal(err)
 		}
@@ -425,6 +432,12 @@ func TestVerificationDetectsTampering(t *testing.T) {
 		"history bytes":    "UPDATE mcpwarden_security.history_events SET record = replace(record, '\"status\":\"ok\"', '\"status\":\"ok\" ') WHERE source_line = 3",
 		"history row":      "DELETE FROM mcpwarden_security.history_events WHERE source_line = 7",
 		"history order":    "UPDATE mcpwarden_security.history_events SET source_line = source_line + 1000 WHERE source_line = 1",
+		// Queries read the derived columns, so each must match its line.
+		"history v0 event id":  "UPDATE mcpwarden_security.history_events SET event_id = event_id || '-changed' WHERE source_line = 1",
+		"history owner column": "UPDATE mcpwarden_security.history_events SET owner_id = owner_id || '-other' WHERE source_line = 6",
+		"history filter":       "UPDATE mcpwarden_security.history_events SET status = 'denied' WHERE source_line = 7",
+		"history time order":   "UPDATE mcpwarden_security.history_events SET history_ns = history_ns + 1 WHERE source_line = 2",
+		"history timing":       "UPDATE mcpwarden_security.history_events SET handler_us = handler_us + 1 WHERE source_line = (SELECT min(source_line) FROM mcpwarden_security.history_events WHERE timed)",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
@@ -644,4 +657,129 @@ func (f *fixture) gatewayErr() (*Repository, error) {
 		return nil, err
 	}
 	return repo, repo.Load(f.t.Context())
+}
+
+// A marker guards the database that wrote it. Another database cannot replace
+// or remove it, so an empty target never makes a cut-over file authoritative.
+// A rolled_back marker is kept inside the import that replaces it and restored
+// if that import is abandoned.
+func TestMarkerBelongsToItsDatabase(t *testing.T) {
+	f := newFixture(t)
+	f.cutover()
+	active, _, err := catalog.ReadMarker(f.src.CatalogPath)
+	if err != nil || active.State != "active" {
+		t.Fatal("marker after cutover", active, err)
+	}
+	other := pgtest.New(t)
+	unchanged := func(want catalog.Marker) {
+		t.Helper()
+		got, ok, err := catalog.ReadMarker(f.src.CatalogPath)
+		if err != nil || !ok || !reflect.DeepEqual(got, want) {
+			t.Fatal("marker changed", got, err)
+		}
+	}
+	if _, err := Import(t.Context(), other.Admin, f.src, Options{}); !errors.Is(err, ErrMarker) {
+		t.Fatal("import into another database replaced the active marker", err)
+	}
+	if err := Abort(t.Context(), other.Admin, f.src); !errors.Is(err, ErrMarker) {
+		t.Fatal("abort in another database", err)
+	}
+	if _, err := Cutover(t.Context(), other.Admin, f.src); err == nil {
+		t.Fatal("cutover in another database")
+	}
+	unchanged(active)
+	if _, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey); err == nil {
+		t.Fatal("file backend opened while PostgreSQL is active")
+	}
+
+	// After a rollback the file is authoritative again, so a fresh database may
+	// import it; abandoning that import restores the rollback's guard.
+	m, err := Rollback(t.Context(), f.db.Admin, f.src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled, _, _ := catalog.ReadMarker(f.src.CatalogPath)
+	next, err := Import(t.Context(), other.Admin, f.src, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	importing, _, _ := catalog.ReadMarker(f.src.CatalogPath)
+	if importing.State != "importing" || importing.ImportID != next.ImportID || importing.Previous == nil || *importing.Previous != rolled {
+		t.Fatal("importing marker", importing)
+	}
+	if _, err := Rollback(t.Context(), f.db.Admin, f.src); !errors.Is(err, ErrMarker) {
+		t.Fatal("finished rollback rewrote another import's marker", err)
+	}
+	if err := Abort(t.Context(), other.Admin, f.src); err != nil {
+		t.Fatal(err)
+	}
+	unchanged(rolled)
+	store, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey)
+	if err != nil {
+		t.Fatal("rollback export refused after abort", err)
+	}
+	store.Close()
+	if old, err := os.ReadFile(filepath.Join(SnapshotDir(f.src, m.ImportID), "catalog")); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(f.src.CatalogPath, old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey); err == nil {
+		t.Fatal("pre-cutover catalog opened after the abandoned import")
+	}
+}
+
+// Provider availability and tool visibility are connector security: a real
+// change moves the revision scopes bind, a repeated one changes nothing.
+func TestProviderChangesMoveTheSecurityRevision(t *testing.T) {
+	f := newFixture(t)
+	f.cutover()
+	repo, db, service, _ := f.gateway()
+	var remote string
+	for _, e := range repo.List(f.alice) {
+		if e.Name == "remote" {
+			remote = e.ID
+		}
+	}
+	events := func() int {
+		return f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1 AND event_type IN ('connector.availability_changed','connector.visibility_changed')", f.alice)
+	}
+	revision := func() string { return repo.ConnectorSecurityRevision(f.alice, remote) }
+	if revision() != "1" {
+		t.Fatal("imported revision", revision())
+	}
+	steps := []struct {
+		name   string
+		change func() error
+		want   string
+		events int
+	}{
+		{"enable while enabled", func() error { return repo.SetProviderEnabled(f.alice, "remote", true) }, "1", 0},
+		{"disable", func() error { return repo.SetProviderEnabled(f.alice, "remote", false) }, "2", 1},
+		{"disable again", func() error { return repo.SetProviderEnabled(f.alice, "remote", false) }, "2", 1},
+		{"enable", func() error { return repo.SetProviderEnabled(f.alice, "remote", true) }, "3", 2},
+		{"same visibility", func() error {
+			return repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{"remote__search"}})
+		}, "3", 2},
+		{"hide the tool", func() error {
+			return repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{}})
+		}, "4", 3},
+	}
+	for _, step := range steps {
+		if err := step.change(); err != nil {
+			t.Fatal(step.name, err)
+		}
+		if revision() != step.want || events() != step.events {
+			t.Fatal(step.name, revision(), events())
+		}
+	}
+	// The revision is sealed with the row and survives a restart.
+	service.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = db.Close(ctx)
+	cancel()
+	restarted, _, _, _ := f.gateway()
+	if got := restarted.ConnectorSecurityRevision(f.alice, remote); got != "4" {
+		t.Fatal("revision after reload", got)
+	}
 }

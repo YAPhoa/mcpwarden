@@ -405,3 +405,25 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
 - **Tools.** The image ships `mcpwarden-security-db` and `mcpwarden-catalog`, so
   the migration runs with the gateway's own volume and key.
 
+
+## 2026-09-25 — Step 3 review: provider authority, marker ownership, history columns
+
+- **Provider changes are connector security.** Disabling or enabling a
+  provider, or changing which tools are visible, now commits with the end of
+  that connector's pending requests and windows and a higher connector security
+  revision. `lease.Service.Catalog` takes the ending from the mutation
+  (`lease.Ending`), so a repeated setting ends nothing and other connectors keep
+  their windows. The revision is sealed in the visibility row, starts at zero on
+  import and is dropped by a rollback export. Tool policy still reports a fixed
+  revision: it comes from the config file, and changing it needs a restart that
+  ends every window. With the file catalog and owner security the handlers end
+  all of the owner's windows first, as key revocation does.
+- **Markers belong to one database.** Each migration step checks the marker
+  before replacing it: it must be absent or carry the import and rollback IDs
+  of the database the step runs against. A `rolled_back` marker is the one
+  exception; a new import keeps it inside its own marker and abort restores it.
+  Import records itself in the database before writing its marker, so an
+  importing marker without state in its database is never the tool's own.
+- **History verification reads what queries read.** Cutover compares every
+  derived history column with what `audit.ParseLine` derives from the pinned
+  line, not only the stored bytes.

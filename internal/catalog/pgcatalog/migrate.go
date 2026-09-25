@@ -94,6 +94,7 @@ var (
 	ErrNotEmpty    = errors.New("the target database already has catalog or history rows")
 	ErrVerify      = errors.New("verification failed")
 	ErrReplaced    = errors.New("a catalog or history file changed after cutover; move it aside (it is not used) and run rollback again")
+	ErrMarker      = errors.New("the catalog marker belongs to a migration in another database; run this step against the database that owns it")
 )
 
 const maxLine = 1 << 20
@@ -122,6 +123,27 @@ func locks(ctx context.Context, conn *pgx.Conn, src Sources) (func(), error) {
 		return nil, err
 	}
 	return func() { unlockFile(); unlockDB() }, nil
+}
+
+// ownMarker checks, under the exclusive catalog lock, that this database may
+// replace the marker beside the catalog: it must be absent or carry this
+// database's import (and rollback) ID. With allowPrevious a rolled_back marker
+// from an earlier migration is also accepted, since the file is then
+// authoritative; it is returned so an abandoned import can restore it. Any
+// other marker guards another database's authority, and a new or empty target
+// database does not make the file authoritative again.
+func ownMarker(src Sources, importID, rollbackID string, allowPrevious bool) (*catalog.Marker, error) {
+	m, ok, err := catalog.ReadMarker(src.CatalogPath)
+	if err != nil || !ok {
+		return nil, err
+	}
+	if importID != "" && m.ImportID == importID && (m.RollbackID == "" || m.RollbackID == rollbackID) {
+		return m.Previous, nil
+	}
+	if allowPrevious && m.State == "rolled_back" {
+		return &m, nil
+	}
+	return nil, ErrMarker
 }
 
 func prepare(ctx context.Context, conn *pgx.Conn, src Sources) (*sealer, func(), error) {
@@ -337,10 +359,12 @@ func empty(ctx context.Context, db catalogdb.DB) (bool, error) {
 
 // Import copies the file catalog and history into an empty, migrated database
 // and verifies the result. It holds the executor lock and the exclusive catalog
-// lock, writes the importing marker before reading, pins both source files by
-// SHA-256 and reads only a protected snapshot of them. The catalog is imported
-// in one transaction and history in checkpointed batches: an interrupted run
-// resumes from its last committed batch, and a completed one only re-verifies.
+// lock, refuses a marker that belongs to another database, pins both source
+// files by SHA-256 and reads only a protected snapshot of them. The importing
+// marker is written once the import is recorded in this database. The catalog
+// is imported in one transaction and history in checkpointed batches: an
+// interrupted run resumes from its last committed batch, and a completed one
+// only re-verifies.
 func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Manifest, error) {
 	seal, unlock, err := prepare(ctx, conn, src)
 	if err != nil {
@@ -359,10 +383,14 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		if st.State != "importing" && st.State != "imported" {
 			return Manifest{}, ErrState
 		}
+		previous, err := ownMarker(src, st.ImportID, "", true)
+		if err != nil {
+			return Manifest{}, err
+		}
 		if !hashes.match(st) {
 			return Manifest{}, ErrSourceMoved
 		}
-		if err := catalog.WriteMarker(src.CatalogPath, catalog.Marker{State: "importing", ImportID: st.ImportID}); err != nil {
+		if err := catalog.WriteMarker(src.CatalogPath, catalog.Marker{State: "importing", ImportID: st.ImportID, Previous: previous}); err != nil {
 			return Manifest{}, err
 		}
 		if st.State == "imported" {
@@ -372,6 +400,10 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 			return Manifest{}, err
 		}
 	} else {
+		previous, err := ownMarker(src, "", "", true)
+		if err != nil {
+			return Manifest{}, err
+		}
 		ok, err := empty(ctx, conn)
 		if err != nil {
 			return Manifest{}, err
@@ -384,10 +416,6 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		}
 		st = catalogdb.State{State: "importing", ImportID: identity.New(), SourceCatalogSHA256: hashes.catalog, SourceHistorySHA256: hashes.history,
 			SourceHistoryBytes: hashes.historyBytes, StartedAt: time.Now().UTC().Truncate(time.Microsecond)}
-		// The marker goes first so a file gateway cannot start once rows exist.
-		if err := catalog.WriteMarker(src.CatalogPath, catalog.Marker{State: "importing", ImportID: st.ImportID}); err != nil {
-			return Manifest{}, err
-		}
 		snapSrc, err := takeSnapshot(src, st)
 		if err != nil {
 			return Manifest{}, err
@@ -410,6 +438,13 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		}
 		// Reload so StartedAt and ChangedAt are exactly what PutState compares.
 		if st, _, err = catalogdb.ReadState(ctx, conn, false); err != nil {
+			return Manifest{}, err
+		}
+		// The marker follows the commit, so an importing marker without state in
+		// its database is never this tool's own. The file stays authoritative
+		// until cutover: a file gateway that starts after an interruption only
+		// makes the resumed import fail its source hash check.
+		if err := catalog.WriteMarker(src.CatalogPath, catalog.Marker{State: "importing", ImportID: st.ImportID, Previous: previous}); err != nil {
 			return Manifest{}, err
 		}
 	}
@@ -499,7 +534,7 @@ func writeSnapshot(ctx context.Context, db catalogdb.DB, seal *sealer, snap cata
 		}
 	}
 	for k, v := range snap.Visibility {
-		row, err := seal.visibilityRow(k, v)
+		row, err := seal.visibilityRow(k, v, 0)
 		if err == nil {
 			err = catalogdb.PutVisibility(ctx, db, row)
 		}
@@ -700,18 +735,26 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 			defer f.Close()
 		}
 		var n int64
-		err = catalogdb.LegacyHistory(ctx, tx, func(line int64, record string) error {
+		err = catalogdb.LegacyHistory(ctx, tx, func(got catalogdb.HistoryRow) error {
 			raw, ok, err := lines.next()
 			if err != nil {
 				return err
 			}
 			n++
-			if !ok || line != n || record != string(raw) {
+			if !ok || got.SourceLine != n || got.Record != string(raw) {
 				return fmt.Errorf("%w: history line %d differs", ErrVerify, n)
 			}
 			r, err := audit.ParseLine(int(n), raw)
 			if err != nil {
 				return err
+			}
+			// Queries read the derived columns, not the record: owner, event ID
+			// (derived for v0 lines), filters, ordering and timing must all be
+			// what the JSONL reader derives from this line.
+			want := historyRow(r, string(raw))
+			want.Source, want.SourceLine = "legacy", n
+			if got != want {
+				return fmt.Errorf("%w: history line %d columns differ", ErrVerify, n)
 			}
 			m.HistoryVersions[fmt.Sprint(r.SchemaVersion)]++
 			m.HistoryOwners[r.Owner]++
@@ -738,6 +781,9 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 	}
 	if len(decoded.tombstones) != 0 {
 		return fail("unexpected connector tombstones")
+	}
+	if len(decoded.revisions) != 0 {
+		return fail("unexpected provider security revisions")
 	}
 	same, err := sameSnapshot(source, decoded.snapshot())
 	if err != nil {
@@ -809,6 +855,9 @@ func Cutover(ctx context.Context, conn *pgx.Conn, src Sources) (Manifest, error)
 	if !exists {
 		return Manifest{}, ErrState
 	}
+	if _, err := ownMarker(src, st.ImportID, "", false); err != nil {
+		return Manifest{}, err
+	}
 	var m Manifest
 	switch st.State {
 	case "imported":
@@ -837,7 +886,9 @@ func Cutover(ctx context.Context, conn *pgx.Conn, src Sources) (Manifest, error)
 }
 
 // Abort abandons an import that was never cut over: it deletes the imported
-// rows and state, then removes the marker. The protected snapshot is kept.
+// rows and state, then restores the marker the import replaced (or removes
+// its own). It never touches a marker that belongs to another database. The
+// protected snapshot is kept.
 func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 	_, unlock, err := prepare(ctx, conn, src)
 	if err != nil {
@@ -848,23 +899,29 @@ func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 	if err != nil {
 		return err
 	}
-	if exists && st.State != "importing" && st.State != "imported" {
-		return ErrState
-	}
-	marker, ok, err := catalog.ReadMarker(src.CatalogPath)
-	if err != nil {
-		return err
-	}
-	if ok && (marker.State != "importing" || exists && marker.ImportID != st.ImportID) {
-		return ErrState
-	}
 	if !exists {
-		// Rows without state cannot be an import this tool started.
+		// Rows without state cannot be an import this tool started, and a
+		// marker here is not this database's.
 		if clean, err := empty(ctx, conn); err != nil {
 			return err
 		} else if !clean {
 			return ErrNotEmpty
 		}
+		if _, err := ownMarker(src, "", "", true); err != nil {
+			return err
+		}
+		return nil
+	}
+	if st.State != "importing" && st.State != "imported" {
+		return ErrState
+	}
+	marker, ours, err := catalog.ReadMarker(src.CatalogPath)
+	if err != nil {
+		return err
+	}
+	ours = ours && marker.ImportID == st.ImportID
+	if _, err := ownMarker(src, st.ImportID, "", true); err != nil {
+		return err
 	}
 	err = inTx(ctx, conn, func(tx pgx.Tx) error {
 		for _, table := range []string{"history_events", "catalog_discovery", "catalog_visibility", "catalog_legacy_tombstones", "catalog_connectors", "catalog_access", "catalog_accounts", "catalog_state"} {
@@ -874,8 +931,13 @@ func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil || !ours {
+		// Without its own marker the import was interrupted before writing
+		// one; the marker in place, if any, is the earlier rolled_back one.
 		return err
+	}
+	if marker.Previous != nil {
+		return catalog.WriteMarker(src.CatalogPath, *marker.Previous)
 	}
 	return catalog.RemoveMarker(src.CatalogPath)
 }

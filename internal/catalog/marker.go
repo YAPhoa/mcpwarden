@@ -17,6 +17,9 @@ type Marker struct {
 	State      string `json:"state"` // importing, active, rolling_back, rolled_back
 	ImportID   string `json:"import_id"`
 	RollbackID string `json:"rollback_id,omitempty"`
+	// Previous is the rolled_back marker of an earlier migration that an
+	// importing marker replaced. Abandoning the import restores it.
+	Previous *Marker `json:"previous,omitempty"`
 }
 
 func MarkerPath(path string) string { return path + ".state" }
@@ -31,22 +34,26 @@ func ReadMarker(path string) (Marker, bool, error) {
 		return Marker{}, false, fmt.Errorf("read catalog marker: %w", err)
 	}
 	var m Marker
-	if len(data) > 4096 || json.Unmarshal(data, &m) != nil || !identity.Valid(m.ImportID) {
+	if len(data) > 4096 || json.Unmarshal(data, &m) != nil || !m.valid() {
 		return Marker{}, false, fmt.Errorf("catalog marker is invalid")
 	}
-	switch m.State {
-	case "importing", "active":
-		if m.RollbackID != "" {
-			return Marker{}, false, fmt.Errorf("catalog marker is invalid")
-		}
-	case "rolling_back", "rolled_back":
-		if !identity.Valid(m.RollbackID) {
-			return Marker{}, false, fmt.Errorf("catalog marker is invalid")
-		}
-	default:
+	if m.Previous != nil && (m.State != "importing" || m.Previous.State != "rolled_back" || m.Previous.Previous != nil || !m.Previous.valid()) {
 		return Marker{}, false, fmt.Errorf("catalog marker is invalid")
 	}
 	return m, true, nil
+}
+
+func (m Marker) valid() bool {
+	if !identity.Valid(m.ImportID) {
+		return false
+	}
+	switch m.State {
+	case "importing", "active":
+		return m.RollbackID == ""
+	case "rolling_back", "rolled_back":
+		return identity.Valid(m.RollbackID)
+	}
+	return false
 }
 
 // WriteMarker atomically replaces the marker and syncs its directory.
@@ -83,8 +90,8 @@ func WriteMarker(path string, m Marker) error {
 	return nil
 }
 
-// RemoveMarker deletes the marker (used only when an import is abandoned
-// before cutover) and syncs the directory.
+// RemoveMarker deletes the marker (used only when an import that replaced no
+// earlier marker is abandoned before cutover) and syncs the directory.
 func RemoveMarker(path string) error {
 	if err := os.Remove(MarkerPath(path)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove catalog marker: %w", err)
