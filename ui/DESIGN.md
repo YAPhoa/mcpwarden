@@ -151,8 +151,15 @@ tabular numerals. Below 700px the status controls, facts and row actions stack.
 The page appears only for local accounts with `owner_security` enabled. A
 disabled API, untrusted transport, storage failure or shared operator/OAuth
 workspace gets a plain status line and no controls. A note on every visit says
-windows do not yet limit ordinary tool calls, which still use gateway-managed
-credentials.
+what windows limit. With `custody_mode: legacy_managed` (the default, from
+`/api/vault/state`) they do not yet limit ordinary tool calls, which still use
+gateway-managed credentials. With `client_release` (2026-09-25) the note, the
+credentials help, the save dialog and the remove dialog say that a connector
+with a vault credential runs only inside access windows, that the gateway stops
+using its own header copy, and that a removed credential keeps the connector
+locked. Connections in vault custody show "Vault custody" instead of a
+connection state in the main console, count as available, and have Refresh
+turned off.
 
 | Surface | Source or mutation |
 | --- | --- |

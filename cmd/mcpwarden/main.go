@@ -45,6 +45,9 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	if stdio && cfg.Audit.Path == "-" {
 		return fmt.Errorf("audit.path '-' cannot be used with --stdio")
 	}
+	if stdio && cfg.ClientRelease() {
+		return fmt.Errorf("--stdio cannot use owner_security.custody_mode client_release")
+	}
 	pol, err := policy.New(cfg.Policy)
 	if err != nil {
 		return err
@@ -82,8 +85,32 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 			store = fileStore
 		}
 	}
+	// The owner security executor and its custody caches load before any
+	// runtime exists, so no connector can start on the legacy path first.
+	var security *securityAPI
+	var fileAccounts *accountAuth
+	if pg != nil {
+		security = pg.security
+	} else if cfg.Accounts != nil && cfg.OwnerSecurity != nil && !stdio {
+		fileAccounts = newAccountAuth(store, cfg)
+		security, err = openSecurity(ctx, cfg, store, pol, fileAccounts, logger)
+		if err != nil {
+			return err
+		}
+		defer security.close()
+		if err := fileAuthority(ctx, security.store); err != nil {
+			return err
+		}
+	}
 	rs := newRuntimes(ctx, cfg, pol, history, store, logger)
 	defer rs.close()
+	if cfg.ClientRelease() {
+		if security == nil {
+			return fmt.Errorf("owner_security.custody_mode client_release requires the owner security executor")
+		}
+		rs.guarded = &guardedCustody{api: security, store: store, history: history}
+		security.onCredential = rs.converted
+	}
 	local := rs.get("local")
 	if stdio {
 		return local.proxy.Server.Run(ctx, &mcp.StdioTransport{})
@@ -144,17 +171,12 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		apiProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true) }
 		mux.Handle("/api/auth/", originOnly(http.HandlerFunc(accounts.authHandler), cfg.Origins))
 	} else if cfg.Accounts != nil {
-		accounts := newAccountAuth(store, cfg)
+		accounts := fileAccounts
+		if accounts == nil {
+			accounts = newAccountAuth(store, cfg)
+		}
 		accounts.onRevoke = rs.access.closeCredential
-		if cfg.OwnerSecurity != nil {
-			security, err := openSecurity(ctx, cfg, store, pol, accounts, logger)
-			if err != nil {
-				return err
-			}
-			defer security.close()
-			if err := fileAuthority(ctx, security.store); err != nil {
-				return err
-			}
+		if security != nil {
 			security.register(mux)
 			accounts.guard = security.guardAccess
 			rs.access.guard = security.guardAccess

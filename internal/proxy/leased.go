@@ -17,12 +17,17 @@ import (
 // current owner-scoped custody metadata, including tombstones: a required binding
 // MUST NOT disappear into legacy fallback when a credential is locked/deleted.
 // Its security mutations use Service.Change. Complete appends to the same durable
-// store as lease admissions. The legacy application has not installed this yet.
+// store as lease admissions. Available, when set, hides a bound connector's
+// cached tools from tools/list while it is disabled. History, when set,
+// receives a best-effort copy of each admission and completion for the owner's
+// call history; the durable record is the one Complete and admission wrote.
 type LeasedExecution struct {
 	Service    *lease.Service
 	Credential func(owner, connectorID string) (credentialID string, required bool)
 	Complete   func(context.Context, audit.Record) error
-	Timeout    time.Duration
+	Available  func(owner, provider string) bool
+	History    audit.Appender
+	Timeout    func(registry.Entry) time.Duration
 }
 
 func (p *Proxy) leaseBinding(e registry.Entry) (string, bool) {
@@ -38,6 +43,21 @@ func (p *Proxy) leaseBinding(e registry.Entry) (string, bool) {
 func (p *Proxy) requiresLease(e registry.Entry) bool {
 	_, required := p.leaseBinding(e)
 	return required
+}
+
+// leaseListed keeps a bound connector's cached tools listed while its
+// credential is locked, unless the connector is disabled.
+func (p *Proxy) leaseListed(e registry.Entry) bool {
+	return p.requiresLease(e) && (p.Security.Available == nil || p.Security.Available(p.Owner, e.Upstream))
+}
+
+func (p *Proxy) mirror(r audit.Record) {
+	if p.Security.History == nil {
+		return
+	}
+	if err := p.Security.History.Write(r); err != nil {
+		p.Logger.Error("call history copy failed", "event_id", r.EventID, "event_type", r.EventType)
+	}
 }
 
 func leaseError(err error) *mcp.CallToolResult {
@@ -77,6 +97,7 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 			completionCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			err = p.Security.Complete(completionCtx, r)
+			p.mirror(r)
 		} else {
 			err = p.Audit.Write(r)
 		}
@@ -91,7 +112,10 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 	if p.Security.Service == nil || p.Security.Complete == nil || credentialID == "" {
 		return leaseError(lease.ErrLocked), nil
 	}
-	timeout := p.Security.Timeout
+	var timeout time.Duration
+	if p.Security.Timeout != nil {
+		timeout = p.Security.Timeout(entry)
+	}
 	if timeout <= 0 || timeout > 5*time.Minute {
 		timeout = 30 * time.Second
 	}
@@ -110,6 +134,7 @@ func (p *Proxy) callLeased(ctx context.Context, req *mcp.CallToolRequest, entry 
 	}
 	admitted = true
 	r = permit.Record // Preserve the exact durable actor/credential/revision snapshot.
+	p.mirror(r)
 	r.EventID = identity.New()
 	var result *mcp.CallToolResult
 	err = permit.RunWithMaterial(func(ctx context.Context, material lease.Material) error {

@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -23,7 +24,16 @@ type State struct {
 	Healthy   bool   `json:"healthy"`
 	Error     string `json:"error,omitempty"`
 	ToolCount int    `json:"tool_count"`
+	// Custody is "vault" for a guarded connector. It has no background
+	// session; each admitted call opens its own under an access window.
+	Custody string `json:"custody,omitempty"`
 }
+
+// ErrGuarded reports an operation that would need server-held credentials for
+// a connector in vault custody. Discovery for such connectors needs the owner
+// setup flow (roadmap step 5); legacy refresh never runs for them.
+var ErrGuarded = errors.New("connector credentials are in vault custody; the gateway cannot refresh it without an access window")
+
 type connection struct {
 	initialDone chan struct{}
 	cfg         config.Upstream
@@ -46,17 +56,32 @@ type Manager struct {
 func New(cfg []config.Upstream, logger *slog.Logger, onChange func(string, []*mcp.Tool, bool)) *Manager {
 	m := &Manager{items: map[string]*connection{}, logger: logger, onChange: onChange}
 	for _, u := range cfg {
-		m.items[u.Name] = &connection{initialDone: make(chan struct{}), cfg: u, state: State{Name: u.Name, Transport: u.Transport, Enabled: !u.Disabled}}
+		m.items[u.Name] = newConnection(u)
 	}
 	return m
 }
+
+// newConnection drops a guarded connector's server-held headers and OAuth
+// handler, so the manager holds nothing that could reach it with them.
+func newConnection(u config.Upstream) *connection {
+	c := &connection{initialDone: make(chan struct{}), cfg: u, state: State{Name: u.Name, Transport: u.Transport, Enabled: !u.Disabled}}
+	if u.Guarded {
+		c.cfg.Headers, c.cfg.OAuthHandler = nil, nil
+		c.state.Custody = "vault"
+		close(c.initialDone)
+	}
+	return c
+}
+
+// runs reports whether the legacy connection loop may start.
+func (c *connection) runs() bool { return !c.cfg.Disabled && !c.cfg.Guarded }
 func (m *Manager) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
 	m.ctx = ctx
 	m.cancel = cancel
 	for _, c := range m.items {
-		if c.cfg.Disabled {
+		if !c.runs() {
 			continue
 		}
 		m.wg.Add(1)
@@ -78,9 +103,10 @@ func (m *Manager) Add(u config.Upstream) error {
 		return fmt.Errorf("upstream %s already exists", u.Name)
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	c := &connection{initialDone: make(chan struct{}), cfg: u, cancel: cancel, state: State{Name: u.Name, Transport: u.Transport, Enabled: !u.Disabled}}
+	c := newConnection(u)
+	c.cancel = cancel
 	m.items[u.Name] = c
-	if u.Disabled {
+	if !c.runs() {
 		cancel()
 		return nil
 	}
@@ -260,6 +286,9 @@ func (m *Manager) Call(ctx context.Context, upstream string, name string, args a
 	if c == nil {
 		return nil, fmt.Errorf("upstream %s unavailable", upstream)
 	}
+	if c.cfg.Guarded {
+		return nil, ErrGuarded
+	}
 	c.mu.RLock()
 	s := c.session
 	c.mu.RUnlock()
@@ -279,6 +308,9 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 	}
 	if c.cfg.Disabled {
 		return fmt.Errorf("upstream %s disabled", name)
+	}
+	if c.cfg.Guarded {
+		return ErrGuarded
 	}
 	// Enabling starts a new connection asynchronously. Wait for its first
 	// discovery attempt instead of treating the startup window as unavailable.
@@ -322,9 +354,12 @@ func (m *Manager) States() []State {
 	}
 	return out
 }
+
+// Ready reports a connected upstream or an enabled vault connector, which
+// serves calls through access windows without a background session.
 func (m *Manager) Ready() bool {
 	for _, s := range m.States() {
-		if s.Healthy {
+		if s.Healthy || s.Custody == "vault" && s.Enabled {
 			return true
 		}
 	}
@@ -367,16 +402,48 @@ func (m *Manager) SetEnabled(name string, enabled bool) error {
 	}
 	cfg := old.cfg
 	cfg.Disabled = !enabled
-	c := &connection{initialDone: make(chan struct{}), cfg: cfg, state: State{Name: name, Transport: cfg.Transport, Enabled: enabled}}
+	c := newConnection(cfg)
 	m.items[name] = c
 	// Holding the manager lock excludes both old and new discovery callbacks.
 	m.onChange(name, nil, false)
-	if enabled {
+	if c.runs() {
 		ctx, cancel := context.WithCancel(m.ctx)
 		c.cancel = cancel
 		m.wg.Add(1)
 		go func() { defer m.wg.Done(); m.run(ctx, c) }()
 	}
+	m.mu.Unlock()
+	if old.cancel != nil {
+		old.cancel()
+	}
+	old.mu.RLock()
+	session := old.session
+	old.mu.RUnlock()
+	if session != nil {
+		_ = session.Close()
+	}
+	return nil
+}
+
+// SetGuarded moves a connector into vault custody for good: its legacy session
+// closes, its server-held headers are dropped from the manager and no later
+// generation reconnects it. Cached registry tools are kept (unhealthy), so
+// clients still see them while calls wait for an access window.
+func (m *Manager) SetGuarded(name string) error {
+	m.mu.Lock()
+	old := m.items[name]
+	if old == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("upstream %s does not exist", name)
+	}
+	if old.cfg.Guarded {
+		m.mu.Unlock()
+		return nil
+	}
+	cfg := old.cfg
+	cfg.Guarded = true
+	m.items[name] = newConnection(cfg)
+	m.onChange(name, nil, false)
 	m.mu.Unlock()
 	if old.cancel != nil {
 		old.cancel()

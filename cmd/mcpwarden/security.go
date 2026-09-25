@@ -58,6 +58,9 @@ type securityAPI struct {
 	logger                *slog.Logger
 	trustedProxies        []netip.Prefix
 	allowInsecureLoopback bool
+	// onCredential runs after a credential change commits and publishes.
+	onCredential func(owner, connectorID string)
+	custodyMode  string
 }
 
 func openSecurity(ctx context.Context, cfg config.Config, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
@@ -92,7 +95,7 @@ func startSecurity(ctx context.Context, cfg config.Config, db *postgres.Store, s
 	}
 	api := &securityAPI{service: service, store: db, cache: cache, index: index, authority: authority, catalog: store,
 		accounts: accounts, origins: cfg.Origins, csrfKey: randBytes(32), limits: newRateLimits(), logger: logger,
-		trustedProxies: trustedProxies, allowInsecureLoopback: cfg.OwnerSecurity.AllowInsecureLoopback}
+		trustedProxies: trustedProxies, allowInsecureLoopback: cfg.OwnerSecurity.AllowInsecureLoopback, custodyMode: cfg.OwnerSecurity.CustodyMode}
 	snapshot, err := db.LoadCustody(ctx)
 	if err == nil {
 		err = index.Load(snapshot, cache)
@@ -566,6 +569,7 @@ func (api *securityAPI) vaultState(w http.ResponseWriter, r *http.Request, calle
 		"approval_policy": viewPolicy(api.index.Policy(caller.Owner)),
 		"gateway_boot_id": view.BootID,
 		"active_leases":   available,
+		"custody_mode":    api.custodyMode,
 	}
 	if root != nil {
 		state["root"] = rootView{RootID: root.RootID, RootVersion: root.RootVersion, WrapperRevision: root.WrapperRevision}
@@ -791,6 +795,9 @@ func (api *securityAPI) changeCredential(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		securityError(w, err)
 		return
+	}
+	if api.onCredential != nil {
+		api.onCredential(caller.Owner, stored.ConnectorID)
 	}
 	jsonResponse(w, status, credentialSummary{CredentialID: id, ConnectorID: stored.ConnectorID, Epoch: stored.Epoch, Revision: stored.Revision, Deleted: !stored.DeletedAt.IsZero()})
 }

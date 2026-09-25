@@ -1,11 +1,12 @@
 # Encrypted credential execution — development adapter
 
 `internal/secret`, the lease material capability, and the opt-in proxy execution
-adapter now form a tested path from a released CEK to a real MCP upstream with
-PostgreSQL admission. The gateway application has **not** installed this adapter
-in its startup/runtime wiring. Its deployed credentials remain in the existing
-server-managed encrypted file. No browser vault or `client_release` config is
-enabled by these changes.
+adapter form a tested path from a released CEK to a real MCP upstream with
+PostgreSQL admission. Startup installs the adapter only with
+`owner_security.custody_mode: client_release`, and then only for HTTP header
+connectors that have a vault credential (see [startup integration](#startup-integration)).
+The live deployment runs neither `owner_security` nor that mode; its credentials
+remain in the existing server-managed encrypted file.
 
 ## Ciphertext and activation
 
@@ -45,8 +46,8 @@ tests is explicitly test-only; deterministic nonces stay in public fixtures.
 Bindings are trusted owner-scoped custody metadata; locked/deleted client-release
 records must keep a required binding, including tombstones, and never fall back
 to legacy manager execution. An incomplete installed adapter fails closed.
-Unbound legacy providers retain their existing behavior. Application integration
-must exclude converted providers from the legacy startup/reconnect manager.
+Unbound legacy providers retain their existing behavior. The application excludes
+converted providers from the legacy startup/reconnect manager.
 
 1. Check owner, tool policy and visibility. Cached visible tool definitions remain
    listed while a bound credential is locked; listing performs no provider I/O.
@@ -109,6 +110,40 @@ Deployments still need to define which private prefixes an owner may select and
 apply appropriate network egress controls. OAuth discovery/token endpoints and
 stdio isolation are outside this header-only adapter.
 
+## Startup integration
+
+`custody_mode` is `legacy_managed` (default) or `client_release`. In
+`client_release`:
+
+- The owner security executor starts (new boot, earlier leases suspended) and
+  loads the committed custody index and ciphertext cache before the first
+  per-owner runtime exists, on both catalog backends. A load failure stops
+  startup. `--stdio` refuses this mode.
+- A connector is bound when its owner has a vault credential head for it. The
+  vault console converts a connector by saving its credential; conversion takes
+  effect when the index publishes after commit, and the legacy session then
+  closes. A tombstone keeps the connector bound with no credential, so its
+  calls report `MCPWARDEN_LEASE_REQUIRED` and never reach legacy execution.
+- The legacy manager keeps a state entry for a bound connector (`custody:
+  "vault"`) but never connects it, drops its server-held headers and OAuth
+  handler from its copy, and refuses refresh and calls (`upstream.ErrGuarded`).
+  The catalog still holds the sealed headers; the gateway does not read them for
+  that connector. Switching back to `legacy_managed` restores legacy execution.
+- Cached tool definitions from the last legacy discovery stay in `tools/list`
+  while the connector is enabled; each call verifies the selected definition
+  against the upstream inside its window. Discovery for converted or new
+  connectors needs the owner setup flow (step 5).
+- Each call uses the connector's configured call timeout (capped at 5 minutes).
+  Admission and completion are durable in the lease store; a best-effort copy of
+  both goes to the owner's call history with credential, lease and approval
+  attribution.
+
+`TestGuardedHeaderExecution` (file and PostgreSQL catalogs) drives one
+connector through legacy calls, conversion, a locked call, an owner-activated
+window, a scope miss, disabling, restart and credential deletion against a real
+SDK upstream, and checks that the server-held header never reaches it after
+conversion. `TestGuardedConnectorNeverUsesLegacyHeaders` covers the manager.
+
 ## Validation and release gates
 
 Tests authenticate the original public envelope vector and exchange ciphertext
@@ -128,9 +163,7 @@ committed. It covers locked listing/calls, owner-only key release, wrong keys,
 revision attribution, completion failure, lost responses, redirect refusal,
 definition changes, revocation, and a real deferred admission commit rejection.
 
-Before live rollout: integrate the tested browser and encrypted-storage
-primitives with owner-only routes and CSRF; full catalog/history migration and
-coordinated mutations; setup/discovery
-authorization; OAuth refresh; UI countdown/recovery; session/resource limits;
-restart/restore drills; and load qualification. Deployment history is recorded in
-[progress](../progress.md); rebuilding the gateway does not install this adapter.
+Before live rollout: the live catalog migration; setup/discovery
+authorization; OAuth refresh; session/resource limits; restart/restore drills;
+and load qualification. Deployment history is recorded in
+[progress](../progress.md); rebuilding the gateway does not enable this mode.

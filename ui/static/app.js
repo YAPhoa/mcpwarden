@@ -27,7 +27,10 @@ function toolView() {
 function toolKey(t) { return t.id || t.name; }
 function toolLabel(t) { return t.display_name || t.name; }
 function isToolDiscoverable(t) { return Boolean(t.allowed && t.visible); }
-function isDiscoverable(t) { return Boolean(t.allowed && t.healthy && t.visible && providers.find(p => p.name === t.upstream)?.enabled !== false); }
+// A vault-custody connection has no background session; its cached tools serve calls inside access windows.
+function inVault(p) { return p?.custody === 'vault'; }
+function serviceable(p) { return Boolean(p.healthy || inVault(p)); }
+function isDiscoverable(t) { return Boolean(t.allowed && (t.healthy || inVault(t)) && t.visible && providers.find(p => p.name === t.upstream)?.enabled !== false); }
 
 function clearWorkspace() {
   clearPasswordForm();
@@ -54,7 +57,7 @@ window.MCPWardenWorkspace = {
 function renderIdentity() {
   announceWorkspace('identity', window.MCPWardenWorkspace.current());
   $('gateway-status').hidden=!access;
-  if(access){const enabled=providers.filter(p=>p.enabled!==false), healthy=enabled.filter(p=>p.healthy).length;
+  if(access){const enabled=providers.filter(p=>p.enabled!==false), healthy=enabled.filter(serviceable).length;
     $('gateway-status').textContent=!providers.length?'No connectors added':!enabled.length?'All connectors disabled':healthy===enabled.length?'Connectors available':healthy?'Some connectors unavailable':'No connectors available';
     $('gateway-status').className='status-pill '+(!enabled.length?'':healthy===enabled.length?'success':'warning');
   }
@@ -209,6 +212,7 @@ function discovery(p) {
   if (p.enabled === false) return ['Disabled', '', 'Connection paused'];
   const entry = connections.get(p.name);
   if (entry?.auth_type === 'oauth' && !entry.oauth_connected) return ['Connect account', 'warning', 'Authorization required'];
+  if (inVault(p)) return ['Vault custody', 'success', `${p.tool_count} cached tool${p.tool_count === 1 ? '' : 's'} · calls need an access window`];
   const local = refreshState.get(p.name);
   if (local?.pending) return ['Refreshing…', '', 'Discovery in progress'];
   if (local?.failed) return [p.last_discovered || p.tool_count ? 'Cached · stale' : 'Refresh failed', p.last_discovered || p.tool_count ? 'warning' : 'failure', 'Latest refresh failed'];
@@ -221,7 +225,7 @@ function providerActions(p) {
   const enabled = pending ? pendingProvider.enabled : p.enabled !== false;
   const refreshing = refreshState.get(p.name)?.pending;
   const locked = !access || mutating || refreshing;
-  return `<div class="provider-actions"><label class="visibility-toggle"><input type="checkbox" role="switch" class="provider-toggle" data-provider="${escapeHTML(p.name)}" aria-label="Enable ${escapeHTML(p.name)} upstream" ${enabled ? 'checked' : ''} ${locked || !managedAvailable ? 'disabled' : ''}><span>${enabled ? 'Enabled' : 'Disabled'}</span></label><button type="button" class="provider-refresh" data-provider="${escapeHTML(p.name)}" aria-label="Refresh tools for ${escapeHTML(p.name)}" ${locked || !enabled ? 'disabled' : ''}>${refreshing ? 'Refreshing…' : 'Refresh'}</button></div>`;
+  return `<div class="provider-actions"><label class="visibility-toggle"><input type="checkbox" role="switch" class="provider-toggle" data-provider="${escapeHTML(p.name)}" aria-label="Enable ${escapeHTML(p.name)} upstream" ${enabled ? 'checked' : ''} ${locked || !managedAvailable ? 'disabled' : ''}><span>${enabled ? 'Enabled' : 'Disabled'}</span></label><button type="button" class="provider-refresh" data-provider="${escapeHTML(p.name)}" aria-label="Refresh tools for ${escapeHTML(p.name)}" ${locked || !enabled || inVault(p) ? 'disabled' : ''}>${refreshing ? 'Refreshing…' : 'Refresh'}</button></div>`;
 }
 function toolCounts(name) {
   const inventory = tools.filter(t => t.upstream === name);
@@ -242,7 +246,7 @@ function renderUpstreams() {
 function renderDetails() {
   const p = providers.find(p => p.name === selected);
   $('connection-title').textContent = selected || 'Connection';
-  $('connection-subtitle').textContent = p ? `${p.source === 'personal' ? 'Personal upstream' : 'Config managed upstream'} · ${p.enabled===false?'Disabled':p.healthy?'Connected':'Not connected'} · Last discovery: ${date(p.last_discovered)}` : '';
+  $('connection-subtitle').textContent = p ? `${p.source === 'personal' ? 'Personal upstream' : 'Config managed upstream'} · ${p.enabled===false?'Disabled':inVault(p)?'Vault custody':p.healthy?'Connected':'Not connected'} · Last discovery: ${date(p.last_discovered)}` : '';
   const settings = readRoute().section === 'settings';
   $('connector-tool-slot').hidden = !p || settings;
   $('connection-settings').hidden = !p || !settings;
@@ -262,14 +266,14 @@ function renderDetails() {
   $('provider-enabled').textContent = enabled ? 'Disable' : 'Enable';
   $('provider-enabled').className = `connector-action ${enabled ? 'connector-disable' : 'connector-enable'}`;
   $('provider-enabled').disabled = !p || !access || !managedAvailable || mutating || refreshState.get(p.name)?.pending;
-  $('refresh-tools').disabled = !p || !access || mutating || p.enabled === false || refreshState.get(p.name)?.pending;
+  $('refresh-tools').disabled = !p || !access || mutating || p.enabled === false || inVault(p) || refreshState.get(p.name)?.pending;
   $('refresh-tools').textContent = refreshState.get(p?.name)?.pending ? 'Refreshing…' : 'Refresh';
   if (!p) { $('upstream-details').innerHTML = `<div class="empty">${loaded ? 'This upstream is not available in your workspace.' : 'Sign in to load this connection.'}</div>`; return; }
   const entry = connections.get(p.name), [label, tone] = discovery(p), local = refreshState.get(p.name);
   const locked = !access || mutating;
   $('upstream-details').innerHTML = `<div class="detail-heading"><div class="eyebrow">UPSTREAM DETAILS</div><h2>${escapeHTML(p.name)}</h2><span class="badge ${tone}">${label}</span></div>
     <section class="detail-section"><h3>Upstream connection</h3><dl><dt>Managed by</dt><dd>${entry ? escapeHTML(session?.username || (session?.mode === 'local' ? 'Shared operator workspace' : session?.subject) || 'Your workspace') : 'Gateway configuration'}</dd><dt>Transport</dt><dd>${p.transport === 'stdio' ? 'stdio' : 'Streamable HTTP'}</dd>${entry ? `<dt>Endpoint</dt><dd class="mono">${escapeHTML(entry.url)}</dd><dt>Call timeout</dt><dd>${escapeHTML(entry.call_timeout || '30s')}</dd>` : '<dt>Settings</dt><dd>Defined in YAML configuration.</dd>'}</dl></section>
-    <section class="detail-section"><h3>Discovery</h3><dl><dt>Last successful discovery</dt><dd>${escapeHTML(date(p.last_discovered))}</dd><dt>Metadata</dt><dd>${p.healthy || p.last_discovered || p.tool_count ? `${p.tool_count} ${p.healthy && !local?.failed ? 'discovered' : 'cached'} tools` : 'No successful discovery recorded'}</dd><dt>Gateway-reported connection</dt><dd>${p.enabled === false ? 'Disabled' : p.healthy ? 'Connected' : 'Unavailable'}</dd></dl>${local?.failed || p.error ? '<p class="help failure">Discovery could not complete. Check the upstream endpoint and credentials. Raw diagnostics are omitted to protect credentials.</p>' : ''}<p class="help">Refresh retrieves tool metadata. It does not invoke tools.</p></section>
+    <section class="detail-section"><h3>Discovery</h3><dl><dt>Last successful discovery</dt><dd>${escapeHTML(date(p.last_discovered))}</dd><dt>Metadata</dt><dd>${p.healthy || p.last_discovered || p.tool_count ? `${p.tool_count} ${p.healthy && !local?.failed ? 'discovered' : 'cached'} tools` : 'No successful discovery recorded'}</dd><dt>Gateway-reported connection</dt><dd>${p.enabled === false ? 'Disabled' : inVault(p) ? 'Vault custody' : p.healthy ? 'Connected' : 'Unavailable'}</dd></dl>${local?.failed || p.error ? '<p class="help failure">Discovery could not complete. Check the upstream endpoint and credentials. Raw diagnostics are omitted to protect credentials.</p>' : ''}<p class="help">${inVault(p) ? 'Calls run only inside an access window. Refresh would need server-held credentials, so it is off for this connection.' : 'Refresh retrieves tool metadata. It does not invoke tools.'}</p></section>
     ${entry ? `<section class="detail-section"><h3>Authentication</h3><p>${escapeHTML(authLabel(entry.auth_type || (entry.header_names.length ? 'headers' : 'none')))}</p>${entry.auth_type === 'oauth' ? `<p class="help">${entry.oauth_connected ? 'Account authorization saved. Reconnect if permissions have changed or access expired.' : 'Authorize this connector to discover its tools.'}</p>` : ''}</section>` : ''}
     <section class="detail-section"><h3>Saved headers</h3>${entry ? entry.header_names.length ? entry.header_names.map(name => `<div class="saved-header"><span class="mono">${escapeHTML(name)}</span><span>Stored</span></div>`).join('') : '<p class="help">Not set</p>' : '<p class="help">Managed in gateway configuration; header names are not exposed.</p>'}${entry ? '<p class="help">Saved values remain private. This gateway does not support editing saved headers.</p>' : ''}</section>
     <section class="detail-section"><h3>Agent discovery</h3><label for="visibility-mode" class="help">Tools visible to MCP clients</label><select id="visibility-mode" ${locked || !managedAvailable ? 'disabled' : ''}><option value="all" ${p.visibility_mode === 'selected' ? '' : 'selected'}>All tools visible</option><option value="selected" ${p.visibility_mode === 'selected' ? 'selected' : ''}>Selected tools only</option></select><p class="help">Selected mode exposes only enabled tools in the directory. Gateway allow/deny policy still applies.</p></section>
@@ -277,7 +281,7 @@ function renderDetails() {
 }
 function renderDashboard() {
   const disabled = providers.filter(p => p.enabled === false).length;
-  const attention = providers.filter(p => p.enabled !== false && (!p.healthy || refreshState.get(p.name)?.failed)).map(p => p.name);
+  const attention = providers.filter(p => p.enabled !== false && (!serviceable(p) || refreshState.get(p.name)?.failed)).map(p => p.name);
   $('overview-upstreams').textContent = loaded ? providers.length : '—';
   $('overview-upstreams-help').textContent = !loaded ? 'Not loaded' : !providers.length ? 'None added yet' : disabled ? `${providers.length - disabled} enabled · ${disabled} disabled` : 'All enabled';
   $('overview-tools').textContent = loaded ? tools.filter(isDiscoverable).length : '—';
@@ -287,7 +291,7 @@ function renderDashboard() {
   $('overview-attention-help').title = attention.join(', ');
   const attentionCard = $('overview-attention').parentElement; if (attentionCard) attentionCard.dataset.tone = !loaded ? '' : attention.length ? 'warning' : 'success';
   $('dashboard-add').disabled = !access || !managedAvailable || mutating;
-  const ordered = [...providers].sort((a, b) => Number(a.healthy) - Number(b.healthy) || a.name.localeCompare(b.name));
+  const ordered = [...providers].sort((a, b) => Number(serviceable(a)) - Number(serviceable(b)) || a.name.localeCompare(b.name));
   $('overview-connections').innerHTML = ordered.length ? ordered.slice(0, 5).map(p => {
     const [label, tone] = discovery(p);
     const count = tools.filter(t => t.upstream === p.name && isDiscoverable(t)).length;
@@ -336,7 +340,7 @@ function renderToolEmpty(scoped, queried, provider, filter) {
 }
 function renderToolNote(provider) {
   const p = readRoute().view === 'detail' ? providers.find(x => x.name === provider) : null;
-  const note = !loaded ? '' : !access ? 'Showing the last loaded snapshot. Reload to change tool visibility.' : !managedAvailable ? 'Visibility settings are not configured on this gateway, so these switches are read-only.' : p?.enabled === false ? 'This connection is disabled. Clients receive none of its tools until you enable it; the choices below are kept.' : p && !p.healthy ? 'This connection is not connected right now. Clients receive its shown tools once it reconnects.' : '';
+  const note = !loaded ? '' : !access ? 'Showing the last loaded snapshot. Reload to change tool visibility.' : !managedAvailable ? 'Visibility settings are not configured on this gateway, so these switches are read-only.' : p?.enabled === false ? 'This connection is disabled. Clients receive none of its tools until you enable it; the choices below are kept.' : p && !serviceable(p) ? 'This connection is not connected right now. Clients receive its shown tools once it reconnects.' : '';
   $('tool-panel-note').textContent = note; $('tool-panel-note').hidden = !note;
 }
 function reconcileToolErrors() {

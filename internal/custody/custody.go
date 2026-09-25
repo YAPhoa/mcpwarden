@@ -118,6 +118,19 @@ func (x *Index) Credential(owner, id string) (Head, bool) {
 	return h, ok
 }
 
+// ConnectorCredential returns the connector's head, including a tombstone.
+// Storage keeps at most one credential per owner and connector.
+func (x *Index) ConnectorCredential(owner, connectorID string) (Head, bool) {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	for key, h := range x.heads {
+		if key[0] == owner && h.ConnectorID == connectorID {
+			return h, true
+		}
+	}
+	return Head{}, false
+}
+
 // Credentials lists the owner's heads, including tombstones, by credential ID.
 func (x *Index) Credentials(owner string) []Head {
 	x.mu.RLock()

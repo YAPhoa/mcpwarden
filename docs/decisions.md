@@ -440,3 +440,40 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
   deletes the state. A retry against the same database finishes the cleanup; a
   different database still refuses the marker. File gateways with owner
   security refuse to start while a state is `aborting`.
+
+## 2026-09-25 — Step 4: guarded execution for HTTP header connectors
+
+- **Explicit custody mode.** `owner_security.custody_mode` is `legacy_managed`
+  (default, unchanged behavior) or `client_release`. There is no automatic
+  upgrade; the spec's other modes are rejected at startup. `--stdio` refuses
+  `client_release`, because stdio mode never opens the owner security executor.
+- **A vault credential converts its connector.** In `client_release`, an HTTP
+  header connector with a vault credential head is bound to it. The owner
+  converts a connector by saving its credential in the vault console; no
+  separate switch exists. Conversion takes effect when the custody index
+  publishes after commit, and the legacy session then closes. A deleted vault
+  credential leaves a tombstone that keeps the connector bound and locked; it
+  never falls back to legacy execution. Replacing the connector gives it a new
+  ID and legacy custody again.
+- **Startup loads custody before any runtime.** The file backend now opens the
+  owner security executor and loads its caches before the first runtime is
+  built, as the PostgreSQL backend already did. A converted connector is built
+  guarded: the legacy manager keeps its state entry but never connects it and
+  drops its server-held headers and OAuth handler from its copy. The new boot
+  starts with no active material; cached tools stay listed and calls need a new
+  owner-activated window.
+- **Server-held headers are kept, unused.** The sealed catalog headers of a
+  converted connector are not read for it while `client_release` is on.
+  Switching back to `legacy_managed` is the rollback. Purging them is a separate
+  decision (asked of Yohanes on 2026-09-25).
+- **No legacy discovery for converted connectors.** Refresh returns 409
+  (`upstream.ErrGuarded`); tool definitions come from the last legacy discovery
+  in the catalog and every leased call verifies the selected definition. Owner
+  setup discovery is step 5.
+- **Call history.** The durable admission and completion stay in the lease
+  store. The proxy also writes a best-effort copy of both to the owner's call
+  history so guarded calls appear there with credential, lease and approval
+  attribution. A failed copy is logged and never affects the call.
+- **Status reporting.** Providers and tools report `custody: "vault"`. Such a
+  connector is not `healthy` (it has no session), counts as ready while enabled,
+  and its cached tools leave `tools/list` while it is disabled.

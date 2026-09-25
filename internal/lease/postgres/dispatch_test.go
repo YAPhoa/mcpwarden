@@ -223,7 +223,7 @@ func TestEncryptedDispatchThroughMCPAndPostgres(t *testing.T) {
 					return errors.New("SYNTHETIC_PRIVATE_STORAGE_ERROR")
 				}
 				return store.Complete(ctx, r)
-			}, Timeout: 5 * time.Second}
+			}, Timeout: func(registry.Entry) time.Duration { return 5 * time.Second }}
 			gatewayHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 				if r.URL.Path == "/admin" {
 					return p.AdminServer

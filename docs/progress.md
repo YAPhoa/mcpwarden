@@ -1346,3 +1346,31 @@ The live configuration remains on the file catalog with `owner_security`
 disabled. No live database migration or client-release cutover was performed;
 the validated [catalog migration procedure](catalog-migration.md) remains a
 separate rollout step.
+
+## 2026-09-25 — Roadmap step 4: guarded execution for HTTP header connectors
+
+Added `owner_security.custody_mode` (`legacy_managed` default, or
+`client_release`). In `client_release`, an HTTP header connector with a vault
+credential runs only through the guarded proxy adapter and owner-activated
+access windows. The owner security executor and custody caches now load before
+any runtime on the file backend too; converted connectors are built guarded,
+their legacy session and reconnect stop when the credential commits, and the
+legacy manager drops their server-held headers and refuses refresh and calls.
+A tombstone keeps a connector locked. Guarded calls get a best-effort copy in
+the owner's call history. Providers and tools report `custody: "vault"`; the
+main console and vault console show vault custody instead of a connection
+state and adjust their copy when `/api/vault/state` reports `client_release`.
+`--stdio` refuses the mode. The server-held headers of converted connectors
+are kept unused; purging them is left to Yohanes. Decisions are in
+[decisions](decisions.md#2026-09-25--step-4-guarded-execution-for-http-header-connectors).
+
+New tests: `TestGuardedHeaderExecution` (file catalog, and PostgreSQL catalog via
+`TestOwnerFlowsOnPostgresCatalog/guarded-execution`),
+`TestGuardedConnectorNeverUsesLegacyHeaders`, `TestStdioRefusesClientRelease`
+and custody-mode config cases. Reverting the guarded runtime config or the
+disabled-connector listing check makes `TestGuardedHeaderExecution` fail.
+
+`gofmt`, `go build ./...`, `go vet ./...` and `go test -race ./...` passed with
+the isolated PostgreSQL fixture; `npm test` passed in `ui/`, and the owner
+browser flows passed locally in Chromium. The live deployment is unchanged:
+file catalog, `owner_security` disabled, no redeploy.

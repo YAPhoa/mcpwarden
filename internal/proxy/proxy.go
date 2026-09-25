@@ -56,7 +56,7 @@ func New(reg *registry.Registry, pol *policy.Policy, approver approval.Approver,
 					filtered = append(filtered, t)
 					continue
 				}
-				if entry, ok := p.Registry.Lookup(t.Name); ok && (entry.Healthy || p.requiresLease(entry)) && p.Policy.Allow(t.Name) && p.isVisible(t.Name) {
+				if entry, ok := p.Registry.Lookup(t.Name); ok && (entry.Healthy || p.leaseListed(entry)) && p.Policy.Allow(t.Name) && p.isVisible(t.Name) {
 					filtered = append(filtered, t)
 				}
 			}
@@ -257,6 +257,7 @@ type ToolItem struct {
 	Healthy     bool      `json:"healthy"`
 	Allowed     bool      `json:"allowed"`
 	Visible     bool      `json:"visible"`
+	Custody     string    `json:"custody,omitempty"`
 	Tool        *mcp.Tool `json:"tool"`
 }
 
@@ -277,7 +278,11 @@ func (p *Proxy) ToolItems(provider, search string) []ToolItem {
 		if search != "" && !strings.Contains(strings.ToLower(name+" "+e.Tool.Description), search) {
 			continue
 		}
-		out = append(out, ToolItem{ID: e.ID, UpstreamID: e.UpstreamID, DisplayName: e.Original, Name: name, Upstream: e.Upstream, Description: e.Tool.Description, Healthy: e.Healthy, Allowed: p.Policy.Allow(name), Visible: p.isVisible(name), Tool: e.Tool})
+		item := ToolItem{ID: e.ID, UpstreamID: e.UpstreamID, DisplayName: e.Original, Name: name, Upstream: e.Upstream, Description: e.Tool.Description, Healthy: e.Healthy, Allowed: p.Policy.Allow(name), Visible: p.isVisible(name), Tool: e.Tool}
+		if p.requiresLease(e) {
+			item.Custody = "vault"
+		}
+		out = append(out, item)
 	}
 	return out
 }

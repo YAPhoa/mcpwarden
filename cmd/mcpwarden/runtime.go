@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -49,6 +50,8 @@ type runtimes struct {
 	// changes a provider's availability or visible tools. The PostgreSQL
 	// catalog does this in its own transaction and leaves it unset.
 	providerGuard accessGuard
+	// guarded is set in custody_mode client_release, before any runtime exists.
+	guarded *guardedCustody
 }
 
 func newRuntimes(ctx context.Context, cfg config.Config, pol *policy.Policy, log audit.Store, store catalog.Repository, logger *slog.Logger) *runtimes {
@@ -80,6 +83,7 @@ func (rs *runtimes) getLocked(owner string) *userRuntime {
 	}
 	p := proxy.New(reg, rs.policy, approval.None{}, rs.audit, rs.logger)
 	p.Owner = owner
+
 	p.Server.AddReceivingMiddleware(rs.access.middleware)
 	p.AdminServer.AddReceivingMiddleware(rs.access.middleware)
 	if rs.store != nil {
@@ -105,6 +109,9 @@ func (rs *runtimes) getLocked(owner string) *userRuntime {
 		}
 	})
 	p.Manager = m
+	if rs.guarded != nil {
+		p.Security = rs.guarded.execution(m)
+	}
 	rs.registerGatewayTools(owner, p)
 	m.Start(rs.ctx)
 	rt := &userRuntime{proxy: p, manager: m}
@@ -262,10 +269,11 @@ func (rs *runtimes) providers(w http.ResponseWriter, r *http.Request) {
 		LastDiscovered *time.Time `json:"last_discovered,omitempty"`
 		VisibilityMode string     `json:"visibility_mode"`
 		EnabledTools   []string   `json:"enabled_tools"`
+		Custody        string     `json:"custody,omitempty"`
 	}
 	out := make([]provider, 0)
 	for _, state := range rt.manager.States() {
-		p := provider{Enabled: state.Enabled, ID: rt.proxy.Registry.ProviderID(state.Name), Name: state.Name, Transport: state.Transport, Healthy: state.Healthy, Error: state.Error, ToolCount: len(rt.proxy.ToolItems(state.Name, "")), Source: "config"}
+		p := provider{Custody: state.Custody, Enabled: state.Enabled, ID: rt.proxy.Registry.ProviderID(state.Name), Name: state.Name, Transport: state.Transport, Healthy: state.Healthy, Error: state.Error, ToolCount: len(rt.proxy.ToolItems(state.Name, "")), Source: "config"}
 		if managed[state.Name] {
 			p.Source = "personal"
 		}
@@ -466,6 +474,9 @@ func (rs *runtimes) discovery(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "does not exist") {
 			status = http.StatusNotFound
 		}
+		if errors.Is(err, upstream.ErrGuarded) {
+			status = http.StatusConflict
+		}
 		jsonResponse(w, status, map[string]string{"error": err.Error()})
 		return
 	}
@@ -522,6 +533,10 @@ func (rs *runtimes) upstreamConfig(e catalog.Entry) config.Upstream {
 	}
 	if rs.store != nil {
 		u.Disabled = rs.store.Visibility(e.Owner, e.Name).Disabled
+	}
+	if rs.guarded != nil && rs.guarded.bound(e.Owner, e.ID) {
+		u.Guarded = true
+		u.Headers, u.OAuthHandler = nil, nil
 	}
 	return u
 }

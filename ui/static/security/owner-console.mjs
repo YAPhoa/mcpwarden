@@ -62,8 +62,23 @@ function pageError(message, refresh = false) { $('vault-error').textContent = me
 function unlocked() { return state.unlocked && vault.active; }
 function ownerCaller(id) { return state.accessItems.find(item => item.id === id); }
 function handleFor(publicID) { return publicHandle(publicID, state.accessItems.map(item => item.public_id).filter(Boolean)); }
+// Copy that depends on whether the gateway runs vault connectors through
+// access windows (custody_mode client_release). The HTML holds the legacy text.
+const legacyCopy = {};
+function clientRelease() { return state.vaultState?.custody_mode === 'client_release'; }
+function custodyCopy() {
+  const copy = {
+    'vault-scope-note': 'Tool calls to a connector with a vault credential run only inside an access window you start. Connectors without one keep using gateway-managed credentials.',
+    'vault-credentials-help': 'Credentials are encrypted in this browser before upload. Saving one moves its connector to the vault: its tool calls then run only inside access windows, and the gateway stops using its own copy of the header. Every save ends pending requests and all access windows for your account.',
+    'vault-remove-effect': 'The encrypted copy is removed and cannot be added again for this connector. Its tools stay locked until you delete the connector and add it again. Pending requests and access windows for your account end now.',
+  };
+  for (const [id, text] of Object.entries(copy)) {
+    legacyCopy[id] ??= $(id).textContent;
+    $(id).textContent = clientRelease() ? text : legacyCopy[id];
+  }
+}
 function connectorName(credential) { return credential?.connector_name || 'Unknown connector'; }
-function providerHealthy(name) { const p = state.providers.find(p => p.name === name); return !p || p.enabled !== false && p.healthy; }
+function providerHealthy(name) { const p = state.providers.find(p => p.name === name); return !p || p.enabled !== false && (p.healthy || p.custody === 'vault'); }
 function currentCredential(id) { return state.wrappers?.credentials.find(c => c.credential_id === id && !c.deleted); }
 function modeLabel(mode) { return mode === 'none' ? 'No extra confirmation' : 'Confirm each request'; }
 function startLabel(mode, seconds) { return `${mode === 'none' ? 'Start access' : 'Allow'} for ${durationLabel(seconds)}`; }
@@ -195,6 +210,7 @@ async function load() {
     Object.assign(state, {vaultState, bootID: vaultState.gateway_boot_id, wrappers: wrappers.data, requests: requests.data || [], windows: leases.data || [],
       connections: connections || [], providers: providers || [], tools: tools || [], accessItems: access?.items || [], phase: 'ready', loaded: true});
     if (!vaultState.configured && state.unlocked) lockBrowser();
+    custodyCopy();
     if (refreshError) pageError('');
   } catch (error) {
     if (error.code === 'discarded') return;
@@ -702,7 +718,7 @@ $('vault-credentials').addEventListener('click', event => {
     const bearer = connection.auth_type === 'bearer' && name.toLowerCase() === 'authorization';
     return el('label', {for: `vault-header-${i}`, text: bearer ? 'Bearer token' : `${name} header value`}, el('input', {id: `vault-header-${i}`, type: 'password', autocomplete: 'off', spellcheck: 'false', 'data-header': name, 'aria-describedby': 'vault-credential-error'}));
   }));
-  $('vault-credential-effect').textContent = `${stored ? 'Replacing starts a new credential version with a new key.' : 'This adds the vault copy for this connector.'} Saving ends pending requests and all access windows for your account. The gateway-managed header is not changed or removed.`;
+  $('vault-credential-effect').textContent = `${stored ? 'Replacing starts a new credential version with a new key.' : 'This adds the vault copy for this connector.'} Saving ends pending requests and all access windows for your account. ${clientRelease() ? 'Tool calls to this connector will then need an access window. The gateway keeps its own copy of the header but stops using it.' : 'The gateway-managed header is not changed or removed.'}`;
   setError('vault-credential-error', '');
   $('vault-credential-dialog').showModal(); $('vault-header-0')?.focus();
 });
