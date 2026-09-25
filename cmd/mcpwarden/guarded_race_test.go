@@ -90,9 +90,19 @@ func TestLegacyAdmissionAfterConversionIsDenied(t *testing.T) {
 	<-pause.reached // Selected the legacy path; its durable admission has not been written.
 	calls, legacyRequests := upstream.calls.Load(), upstream.requests(legacy)
 
+	// Vault setup and the record are prepared here; only the credential save,
+	// which converts the connector, runs off the test goroutine.
+	root := rootFixture(alice)
+	f.expect(req{method: "POST", path: "/api/vault/setup", user: "alice", body: encode(map[string]any{"current_password": testPassword, "root": root})}, 201, nil)
+	record := f.credentialRecord(root, identity.New(), "1", "1", f.cek)
+	var token struct {
+		Token string `json:"token"`
+	}
+	f.expect(req{path: "/api/security/csrf", user: "alice"}, 200, &token)
+	save := req{method: "PUT", path: "/api/vault/credentials/" + record.CredentialID, user: "alice", csrf: token.Token, body: encode(map[string]any{"expected": nil, "record": record})}
 	g.rs.mu.Lock() // Another runtime operation holds rs.mu.
-	provisioned := make(chan struct{})
-	go func() { defer close(provisioned); f.provision("none") }()
+	saved := make(chan int, 1)
+	go func() { saved <- f.do(save).Code }()
 	deadline := time.Now().Add(10 * time.Second)
 	for !g.rs.guarded.bound(alice, f.entry.ID) {
 		if time.Now().After(deadline) {
@@ -107,13 +117,28 @@ func TestLegacyAdmissionAfterConversionIsDenied(t *testing.T) {
 	r := <-done
 	ran, usedLegacy := upstream.calls.Load() > calls, upstream.requests(legacy) > legacyRequests
 	g.rs.mu.Unlock()
-	<-provisioned
+	if code := <-saved; code != http.StatusCreated {
+		t.Fatalf("credential save = %d", code)
+	}
 	t.Logf("lock-execution=%d result=%q is_error=%v upstream_ran=%v legacy_header_used=%v", lock.Code, r.text, r.failed, ran, usedLegacy)
 	if ran || usedLegacy || !r.failed || !strings.Contains(r.text, "MCPWARDEN_LEASE_REQUIRED") {
 		t.Fatal("a legacy call admitted after the custody switch executed upstream")
 	}
 	if lock.Code != http.StatusNoContent {
 		t.Fatalf("lock-execution = %d", lock.Code)
+	}
+	rows, _, _, _, err := g.history.QueryHistoryPerformance(audit.HistoryFilter{Owner: alice, Page: 1, Size: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := false
+	for _, row := range rows {
+		if row.EventType == audit.DispatchCompleted && row.Tool == "remote__search" && row.Status == "denied" && row.Timing != nil && !row.Timing.Forwarded {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Fatal("call history does not record the denied legacy call")
 	}
 }
 

@@ -466,7 +466,9 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
   `MCPWARDEN_LEASE_REQUIRED` denial, recorded as not forwarded. A call whose
   re-check ran before the binding published is ordered before conversion; the
   credential save returns only after the legacy session is closed (review
-  round 3, 2026-09-25).
+  round 3, 2026-09-25). The denial keeps the admission's `allow` decision and
+  records status `denied`, since audit accepts `deny` only on
+  `tool.dispatch.denied` (round 4).
 - **Startup loads custody before any runtime.** The file backend now opens the
   owner security executor and loads its caches before the first runtime is
   built, as the PostgreSQL backend already did. A converted connector is built

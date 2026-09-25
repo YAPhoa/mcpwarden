@@ -430,31 +430,44 @@ func (m *Manager) SetEnabled(name string, enabled bool) error {
 // generation reconnects it. Cached registry tools are kept (unhealthy), so
 // clients still see them while calls wait for an access window.
 func (m *Manager) SetGuarded(name string) error {
+	stop, err := m.Guard(name)
+	if err != nil {
+		return err
+	}
+	stop()
+	return nil
+}
+
+// Guard swaps in the guarded generation and returns a function that closes the
+// old legacy session. Callers that hold their own lock can swap under it and
+// close after releasing it; from the swap on, Call returns ErrGuarded.
+func (m *Manager) Guard(name string) (func(), error) {
 	m.mu.Lock()
 	old := m.items[name]
 	if old == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("upstream %s does not exist", name)
+		return nil, fmt.Errorf("upstream %s does not exist", name)
 	}
 	if old.cfg.Guarded {
 		m.mu.Unlock()
-		return nil
+		return func() {}, nil
 	}
 	cfg := old.cfg
 	cfg.Guarded = true
 	m.items[name] = newConnection(cfg)
 	m.onChange(name, nil, false)
 	m.mu.Unlock()
-	if old.cancel != nil {
-		old.cancel()
-	}
-	old.mu.RLock()
-	session := old.session
-	old.mu.RUnlock()
-	if session != nil {
-		_ = session.Close()
-	}
-	return nil
+	return func() {
+		if old.cancel != nil {
+			old.cancel()
+		}
+		old.mu.RLock()
+		session := old.session
+		old.mu.RUnlock()
+		if session != nil {
+			_ = session.Close()
+		}
+	}, nil
 }
 
 // stdioInherited lists the only gateway environment variables a stdio upstream

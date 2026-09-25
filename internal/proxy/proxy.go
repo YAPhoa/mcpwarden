@@ -225,8 +225,9 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 	// above. Re-check after the durable admission so a call admitted once the
 	// binding is published never reaches the legacy session.
 	if _, required := p.leaseBinding(entry); required {
+		// The completion keeps the admission's allow decision; only the
+		// status records the denial.
 		record.EventType, record.Status = audit.DispatchCompleted, "denied"
-		record.Decision = "deny"
 		return leaseError(lease.ErrRequired), nil
 	}
 	// The upstream's timeout starts after the durable admission write, so a
@@ -240,8 +241,8 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 	timing.UpstreamUS = time.Since(upstreamStart).Microseconds()
 	if errors.Is(err, upstream.ErrGuarded) {
 		// Conversion replaced the legacy connection before dispatch.
-		timing.Forwarded = false
-		record.Decision, record.Status = "deny", "denied"
+		timing.Forwarded, timing.UpstreamUS = false, 0
+		record.Status = "denied"
 		return leaseError(lease.ErrRequired), nil
 	}
 	if err != nil {

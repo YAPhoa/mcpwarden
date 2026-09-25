@@ -1411,3 +1411,17 @@ the call timeout. Round-2 optional items: timeout scope in the runtime doc, the
 vault custody. New tests: `TestLegacyAdmissionAfterConversionIsDenied` and
 `TestHistoryCopyDoesNotDelayDispatch` (both fail on 22b151b). `gofmt`, build,
 vet, `go test -race -count=1 ./...` with PostgreSQL and `npm test` (66) passed.
+
+### Review round 4 (2026-09-25)
+
+Fixed: the round-3 conversion denials wrote `tool.dispatch.completed` with
+decision `deny`, which audit validation rejects, so history kept only the
+admission as unknown. The completion now keeps the admission's `allow` decision
+with status `denied`; the `ErrGuarded` branch also zeroes upstream time. New
+proxy tests `TestRecheckAfterAdmissionRecordsDenial` and
+`TestGuardedManagerRecordsDenial` check both audit records, and
+`TestLegacyAdmissionAfterConversionIsDenied` checks call history. `converted`
+swaps in the guarded generation under `rs.mu` (`Manager.Guard`) and closes the
+old session after releasing it; the race test no longer fails off the test
+goroutine. `gofmt`, build, vet and `go test -race -count=1 ./...` with
+PostgreSQL passed.
