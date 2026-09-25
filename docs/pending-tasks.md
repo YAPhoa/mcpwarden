@@ -2,9 +2,10 @@
 
 Current boundary: the running gateway still uses the encrypted file catalog.
 The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter,
-owner security API and owner vault console are implemented and tested. The
-owner API and console are opt-in, and tool execution does not use client-release
-custody yet. The original
+owner security API, owner vault console and PostgreSQL catalog backend are
+implemented and tested. The owner API, console and PostgreSQL catalog are
+opt-in, live data has not been migrated, and tool execution does not use
+client-release custody yet. The original
 acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
 per-case coverage of the 68 acceptance tests is in the
 [acceptance matrix](security/acceptance-matrix.md).
@@ -32,11 +33,20 @@ per-case coverage of the 68 acceptance tests is in the
    credential (a permanent tombstone for that connector), and the flows check
    layouts at 390, 720 (200% zoom on a 1440 px screen) and 1280 px. A
    screen-reader review by a person is still open.
-3. **Full PostgreSQL catalog and authority coordination.** Preserve account/password
-   verifiers, named keys, sessions, stable provider/tool IDs, visibility, discovery
-   caches and lifecycle timestamps. Route every security change through the owner
-   coordinator and publish metadata/ciphertext together after commit. Keep custody
-   tombstones; finish mutation-specific security audit and indexed call history.
+3. **Full PostgreSQL catalog and authority coordination.** Implemented behind
+   `managed_upstreams.backend: postgres` (requires `owner_security`); see
+   [catalog storage](catalog-storage.md) and [history storage](history-storage.md).
+   Accounts, password verifiers, keys, sessions, connectors, tombstones,
+   discovery, visibility and indexed call history live in PostgreSQL. Secrets
+   stay sealed under the existing catalog key (legacy managed custody). Every
+   catalog change commits with its security event and any lease revocation in
+   one owner transaction and publishes after commit; storage failure stops the
+   gateway without falling back to the file. `mcpwarden-catalog` imports from a
+   protected snapshot with checkpointed, field-by-field verification, then cuts
+   over. Its rollback reconciles revocations, suspends windows, requires OAuth
+   reauthorization for rotated grants and keeps new history. The
+   [cutover procedure](catalog-migration.md) awaits review before live data
+   moves; a second import after a rollback is not supported yet.
 4. **Startup and guarded execution integration.** Add explicit supported custody
    configuration, load coherent caches while locked, install the guarded proxy and
    disable legacy credential resolution/reconnect for converted providers. Restart
@@ -62,11 +72,10 @@ per-case coverage of the 68 acceptance tests is in the
    SSRF/redirect protection, permitted private-network selection and stdio
    process isolation. Stdio commands already receive only an allowlisted
    environment. Keep all credential use bounded by authority.
-9. **Migration, restore and rollout.** Implement a protected legacy export/import
-   with checkpointed, interrupted-run-safe conversion. Verify counts, stable IDs,
-   verifiers, scopes, hashes, lifecycle and historical audit before cutover.
-   Exercise full application backup/restore, restart-locked recovery, token/access
-   reconciliation and rollback without losing audit or reviving old authority.
+9. **Migration, restore and rollout.** The file-to-PostgreSQL catalog and
+   history migration, its verification and its rollback are done (step 3).
+   Still open: the live cutover itself, a full application backup and database
+   restore drill, and restart-locked recovery after a restore.
 10. **Release qualification.** Run complete spec acceptance families (track them
     in the [acceptance matrix](security/acceptance-matrix.md)), actual owner
     UI/device tests, Argon2/WASM review, mobile KDF measurements, load/failure tests,

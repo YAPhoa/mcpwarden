@@ -22,6 +22,7 @@ func (s *Latency) observe(us int64) {
 	s.P50UpperUS = s.percentile(50)
 	s.P95UpperUS = s.percentile(95)
 }
+
 // Bucket is the fixed logarithmic bucket for a duration in microseconds.
 func Bucket(us int64) int {
 	i := 0

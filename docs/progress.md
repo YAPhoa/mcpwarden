@@ -1223,3 +1223,48 @@ reviewing screenshots at that width found the two vault settings forms touching,
 now spaced. `npm test` (64) and the Chromium owner flows passed locally against
 PostgreSQL 16; Firefox and WebKit run in CI. A screen-reader review is still open.
 No Go code changed.
+
+## 2026-09-25 — PostgreSQL catalog, verified migration and rollback (step 3)
+
+Implemented roadmap step 3 behind `managed_upstreams.backend: postgres`, under
+the user's three conditions. The live file backend is unchanged apart from
+holding a shared lock on `<catalog>.lock` for its lifetime, and no live data
+moved.
+
+- Schema v4 adds catalog, catalog state and indexed history tables. The
+  runtime role cannot delete catalog rows, change catalog state or rewrite
+  history.
+- `pgcatalog.Repository` commits every catalog change with its security event
+  and any lease revocation in one owner transaction (`lease.Service.Catalog`)
+  and publishes after commit. It fails closed on an uncertain commit or a lost
+  session; the gateway then exits with no file fallback.
+- `pgcatalog.History` stores exact JSONL bytes with indexed columns and returns
+  the same results as the JSONL reader.
+- `mcpwarden-catalog` runs `status`, `import`, `cutover`, `rollback` and
+  `abort`. Import reads a hash-pinned protected snapshot under the executor and
+  file locks, resumes from history checkpoints and verifies every field and
+  history byte. Rollback suspends windows, exports the current state, requires
+  OAuth reauthorization for grants rotated after cutover and appends new
+  history. Markers and a database check block an older catalog file.
+- The gateway image now also ships `mcpwarden-security-db` and
+  `mcpwarden-catalog`.
+
+Tests cover the import and history-reader comparison, interrupted and repeated
+imports, unsafe or changed sources, a busy gateway, eight kinds of row
+tampering, abort before cutover, atomic commits, the active-key limit under
+concurrency, CAS conflicts and session loss, and rollback resume and replaced
+files. The six owner-route suites also run unchanged on the PostgreSQL catalog
+after a real import and cutover. One end-to-end case covers an approved window,
+key revocation, a password change, OAuth rotation and new history, then database
+loss, rollback and a file restart. A binary smoke run against a scratch database
+repeated this with the real gateway and CLI: register and create keys in file
+mode, import, cut over, revoke a key and change the password on PostgreSQL,
+roll back, and restart on the file. The revoked key stayed revoked, the old
+password failed, and the pre-cutover file was refused.
+
+`gofmt`, `go build ./...`, `go vet ./...`, `go mod tidy -diff`,
+`scripts/ci/integrity.py` and `go test -race -count=1 -timeout=10m ./...`
+passed with the isolated PostgreSQL fixture. govulncheck and the container smoke
+run in CI; the local toolchain and missing Docker daemon could not run them. The
+[cutover procedure](catalog-migration.md) awaits the user's review before any
+live migration.

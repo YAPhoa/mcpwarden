@@ -91,3 +91,30 @@ func TestOwnerSecurityTrustedProxyConfiguration(t *testing.T) {
 		t.Fatal("unbounded proxy network list accepted")
 	}
 }
+
+func TestManagedBackend(t *testing.T) {
+	t.Setenv("TEST_MANAGED_KEY", "key")
+	t.Setenv("TEST_SECURITY_DSN", "postgres://runtime@127.0.0.1/db")
+	for name, tt := range map[string]struct {
+		backend string
+		owner   bool
+		want    string
+	}{
+		"default":           {"", false, ""},
+		"file":              {"file", true, ""},
+		"postgres":          {"postgres", true, ""},
+		"postgres no owner": {"postgres", false, "requires owner_security"},
+		"unknown":           {"sqlite", false, "file or postgres"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY", Backend: tt.backend}}
+			if tt.owner {
+				c.OwnerSecurity = &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}
+			}
+			err := c.ResolveAndValidate()
+			if tt.want == "" && (err != nil || c.Managed.Backend == "") || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatal(err, c.Managed.Backend)
+			}
+		})
+	}
+}

@@ -140,6 +140,7 @@ func Open(path string) (*Writer, error) {
 	}
 	return w, nil
 }
+
 // Encode applies the writer's defaults and validation and returns the exact
 // bytes every history backend stores for a new event.
 func Encode(r Record) (Record, []byte, error) {

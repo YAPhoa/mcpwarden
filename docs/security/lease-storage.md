@@ -66,18 +66,24 @@ The schema has owners, requests, leases, allowlisted security events, invocation
 events and a migration ledger. Schema v2 also stores encrypted wrappers and
 credential records; it contains no unwrapped keys or plaintext credential
 payloads. Request scopes are authorization metadata and can themselves contain
-sensitive resource identifiers; restrict database/backups accordingly. It is not
-the candidate spec's complete catalog schema and not a general history importer.
+sensitive resource identifiers; restrict database/backups accordingly. Schema v4
+adds the gateway catalog and indexed history (see
+[catalog storage](../catalog-storage.md)); it is not the candidate spec's
+client-release catalog schema.
 
 ## Migration command and roles
 
 The reviewed first migration is
 [`001_leases.sql`](../../internal/lease/postgres/migrations/001_leases.sql).
 `cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql` and
-`003_owner_api.sql`, verifying every SHA-256 hash in an ordered ledger. Earlier
-migrations are unchanged. Migration 003 adds per-owner approval policies (revision
-CAS enforced by a trigger; the runtime role may insert and update, not delete) and
-the owner-route audit event types.
+`003_owner_api.sql` and `004_catalog.sql`, verifying every SHA-256 hash in an
+ordered ledger. Earlier migrations are unchanged. Migration 003 adds per-owner
+approval policies (revision CAS enforced by a trigger; the runtime role may
+insert and update, not delete) and the owner-route audit event types. Migration
+004 adds the catalog, catalog state and history tables and the catalog event
+types. The runtime role may insert and update catalog rows, replace discovery and
+visibility rows, and insert history. It cannot delete catalog rows, change
+catalog state, or update or delete history; startup checks this.
 There is no destructive down migration. Rerunning the same version is supported;
 checksum drift or a newer/unexpected ledger fails closed.
 
@@ -98,8 +104,9 @@ go run ./cmd/mcpwarden-security-db -runtime-role mcpwarden_runtime
 The command reads `MCPWARDEN_MIGRATION_DATABASE_URL`; it does not accept a DSN on
 the command line or print driver connection errors. The migration and lease
 executor contend for the same advisory lock, so a cooperating executor must stop
-before schema migration. This lock currently coordinates this lease component,
-not the legacy file gateway, which has no PostgreSQL connection.
+before schema migration. Catalog import, cutover and rollback hold the same lock
+and also an exclusive lock on the catalog file, which a running file gateway
+holds shared.
 
 ## Isolated local tests
 
@@ -135,47 +142,22 @@ were imported there. Stop the fixture without deleting its volume with:
 docker compose -f compose.postgres-test.yaml -p mcpwarden-security-test stop
 ```
 
-## Next: encrypted file/catalog and history migration
+## Catalog and history migration
 
-This is a design boundary, not an implemented conversion command. Before making
-PostgreSQL a gateway backend:
-
-1. Extend the reviewed schema for accounts, password verifiers/salts/iterations,
-   caller keys/public IDs/roles, browser/OAuth/MCP session lifecycle, connector
-   tombstones, cached tool definitions, visibility, policy and encrypted grants.
-   Implement the existing `catalog.Repository` and history query contracts,
-   including defensive cached reads, hard active limits, uniqueness and OAuth CAS.
-   Owner/caller revocation and lease admission must share database transactions.
-2. Quiesce the actual gateway and hold exclusive migration ownership over both
-   the source and target. Create a protected consistent file/config/audit backup;
-   keep decryption keys separately. Inventory source hashes, original physical
-   JSONL line positions, stable IDs and per-owner counts before importing.
-3. Preserve UUIDs, public IDs, verifiers, role/owner, timestamps, cached metadata,
-   revocations, tombstones and existing argument-hash bytes. Do not filter the
-   JSONL before deriving historical v0 event IDs: the current reader binds the
-   original physical line and raw bytes. Preserve v1/v2 event/invocation IDs and
-   unresolved admissions. The new leased-event table alone cannot accept all
-   legacy history; a versioned general history migration is still required.
-4. Keep an explicitly labelled legacy server-managed custody path for unconverted
-   records. Database backups must still encrypt secret-bearing legacy fields;
-   relocating server-decryptable ciphertext does not make it client encrypted.
-   Client conversion is a separate owner interaction that authenticates the
-   browser-created envelopes, establishes fresh CEKs/epochs, verifies decryptability
-   and recovery, then removes the old server unwrap route for converted records.
-   Migration must never receive a whole-vault root or invent a hidden server wrapper.
-5. Import to an isolated target with transactional checkpoints/manifest identity;
-   reject duplicate IDs and cross-owner references. Verify all source counts,
-   identities, hashes, lifecycle and constraints before an explicit cutover marker.
-   Trial failure and interruption at each boundary must leave the source intact
-   and target execution locked. Do not use repeated upserts to overwrite newer
-   revocations or OAuth grants.
-6. Start the new runtime locked with a new boot and empty material. Reconcile
-   access revocations and provider token rotations before enabling execution.
-   A rollback preserves new append-only audit and keeps execution stopped; it
-   must not revive old credentials/leases by restoring an older writable catalog.
-
-The browser lifecycle, encrypted envelope adapter, owner routes and actual
-runtime integration are prerequisites for that cutover, not optional follow-ups.
+Schema v4 adds the catalog and history tables. The import, cutover and rollback
+that move the file catalog and JSONL history into them are implemented in
+`mcpwarden-catalog`; see [catalog migration](../catalog-migration.md). The
+earlier design points are covered as follows. The catalog tables implement the
+full `catalog.Repository` contract. Revocation and lease changes share owner
+transactions. Import runs under the executor lock and an exclusive catalog file
+lock, from a hash-pinned protected snapshot, preserving line positions and v0
+IDs. Credentials stay in legacy managed custody under the existing catalog key.
+Import is checkpointed and verified field by field before an explicit cutover.
+A rollback exports the current state rather than restoring an older file. It
+keeps new history, suspends windows and requires OAuth reauthorization where
+grants changed. Client conversion of credentials remains a later step. The
+browser lifecycle, owner routes and runtime integration remain prerequisites for
+guarded execution (roadmap step 4).
 
 ## Sonic and reproducible measurements
 

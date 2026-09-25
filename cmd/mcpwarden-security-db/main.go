@@ -1,4 +1,5 @@
-// This deployment command migrates the security schema, not the live catalog.
+// This deployment command migrates the security schema. It copies no catalog
+// data; cmd/mcpwarden-catalog imports the catalog.
 package main
 
 import (
@@ -31,5 +32,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("Security schema v%d verified (lease metadata and ciphertext storage). Legacy credentials and catalog were not migrated.\n", postgres.SchemaVersion)
+	fmt.Printf("Security schema v%d verified (lease metadata, ciphertext and catalog tables). No catalog data was copied; use mcpwarden-catalog for that.\n", postgres.SchemaVersion)
 }

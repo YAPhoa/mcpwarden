@@ -37,7 +37,7 @@ var (
 	// or an earlier commit had an unknown outcome and the process must restart.
 	ErrUnavailable = errors.New("catalog storage unavailable")
 	// ErrNotActive means PostgreSQL is not the authoritative catalog.
-	ErrNotActive = errors.New("the PostgreSQL catalog is not active; complete the import and cutover first")
+	ErrNotActive = errors.New("the PostgreSQL catalog is not active: it was never cut over or has been rolled back")
 )
 
 // Repository implements catalog.Repository over PostgreSQL for one active
@@ -51,6 +51,7 @@ type Repository struct {
 	loader Loader
 	coord  atomic.Pointer[coordinator]
 	failed atomic.Bool
+	lost   <-chan struct{}
 	onFail func()
 	now    func() time.Time
 
@@ -70,7 +71,11 @@ func New(encodedKey string, loader Loader, onFail func()) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repository{seal: s, loader: loader, onFail: onFail, now: func() time.Time { return time.Now().UTC() }}, nil
+	r := &Repository{seal: s, loader: loader, onFail: onFail, now: func() time.Time { return time.Now().UTC() }}
+	if l, ok := loader.(interface{ Lost() <-chan struct{} }); ok {
+		r.lost = l.Lost()
+	}
+	return r, nil
 }
 
 // Load reads and verifies every row in one transaction. It requires the
@@ -112,8 +117,19 @@ func (r *Repository) fail() {
 	}
 }
 
-// Failed reports that a commit outcome was unknown; the view may be stale.
-func (r *Repository) Failed() bool { return r.failed.Load() }
+// Failed reports that a commit outcome was unknown or the database session
+// was lost; the view may be stale and authentication fails closed.
+func (r *Repository) Failed() bool {
+	if r.failed.Load() {
+		return true
+	}
+	select {
+	case <-r.lost:
+		return true
+	default:
+		return false
+	}
+}
 
 type change struct {
 	tx     catalogdb.OwnerTx
@@ -135,7 +151,7 @@ func (c *change) event(kind, subject string) {
 // apply runs one owner transaction. plan runs with the view locked and must
 // not change the view; it returns the writes and the publication.
 func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st *state) (func(), error)) error {
-	if r.failed.Load() {
+	if r.Failed() {
 		return ErrUnavailable
 	}
 	coord := r.coord.Load()
@@ -783,7 +799,7 @@ func (r *Repository) AccessByID(owner, id string) (catalog.AccessRecord, bool) {
 // AuthenticateAccess compares verifiers in constant time. Recording use at
 // most once a minute is a committed write; if it fails, authentication fails.
 func (r *Repository) AuthenticateAccess(hash, kind string) (catalog.AccessRecord, bool) {
-	if r.failed.Load() {
+	if r.Failed() {
 		return catalog.AccessRecord{}, false
 	}
 	st, done := r.view()

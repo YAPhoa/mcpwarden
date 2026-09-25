@@ -2,7 +2,7 @@
 
 Status of the 68 acceptance cases in
 [SECURITY-DESIGN.md §22](spec-v1.1/SECURITY-DESIGN.md#22-acceptance-tests),
-checked against the repository on 2026-09-24. Test names are Go test functions
+checked against the repository on 2026-09-25. Test names are Go test functions
 unless marked as UI tests (`ui/tests/`). Browser flows are steps of
 `ui/tests/owner-flows.mjs`, which drives the owner console against a real
 gateway and PostgreSQL. Update a row when its evidence changes.
@@ -20,7 +20,7 @@ Status meanings:
 - **Unselected**: depends on push, TOTP or step-up modules that remain optional
   and unselected (M3 does not block a core `none`/`confirm` release).
 
-Totals: 3 Live, 16 Opt-in, 21 Library, 19 Partial, 2 Open, 7 Unselected.
+Totals: 3 Live, 19 Opt-in, 20 Library, 17 Partial, 2 Open, 7 Unselected.
 
 ## 22.1 Multi-call workflow and time
 
@@ -90,18 +90,18 @@ Totals: 3 Live, 16 Opt-in, 21 Library, 19 Partial, 2 Open, 7 Unselected.
 
 | ID | Status | Evidence | Remaining gap |
 |---|---|---|---|
-| P01 | Library | `TestPostgresDurabilityIsolationAndPrivileges`, `TestVaultRecordsCASIsolationAndRetention` | Full PostgreSQL catalog (step 3) |
+| P01 | Opt-in | `TestPostgresDurabilityIsolationAndPrivileges`, `TestVaultRecordsCASIsolationAndRetention`, `TestImportPreservesCatalogAndHistory`, `TestRepositoryCommitsAtomicallyAndFailsClosed`, `TestOwnerFlowsOnPostgresCatalog` | Live data still on the file catalog |
 | P02 | Live | `TestDispatchAuditFailuresNeverCauseExecutionOrReplay`, `TestAdmissionUnknownUntilCompletionAcrossRestart`, `TestPostgresAdmissionCommitFailure` | None for the file-audit path |
 | P03 | Partial | `TestEncryptedDispatchThroughMCPAndPostgres` (no private data in diagnostics) | Panic paths, SQL diagnostics and support exports |
 | P04 | Partial | `TestLeaseAttributionIsAnAtomicMetadataBundle`, `TestEncryptedDispatchThroughMCPAndPostgres` | Live calls do not carry credential epoch, lease or approval yet |
 | P05 | Live | `TestInvocationImportOrderOwnerIsolationAndLegacyPreservation`, `TestStableToolIdentity`, UI test "public key handles disambiguate collisions…" | None |
 | P06 | Opt-in | Browser flows (an uncertain activation retries with the same Idempotency-Key and yields one window), `TestOwnerActivationReplayAndOwnerIsolation` (identical retry returns the same window; a new operation is refused), `TestOwnerConcurrentMutationsAndKeyRevocation` (parallel activations create one durable window), `TestOwnerActivationAndReplay`, `TestPostgresAmbiguousActivationCommit` | None |
-| P07 | Partial | `TestLegacyPublicIDMigrationPreservesCredentialsAndLifecycle`, `TestMigrationV1UpgradeAndRollback` | File-to-PostgreSQL catalog and history migration (step 9) |
-| P08 | Partial | `TestPostgresSnapshotRestartLocksExecution` | Revocation and token-rotation reconciliation after restore (step 9) |
+| P07 | Opt-in | `TestLegacyPublicIDMigrationPreservesCredentialsAndLifecycle`, `TestMigrationV1UpgradeAndRollback`, `TestImportPreservesCatalogAndHistory`, `TestImportResumesWithoutDuplicates`, `TestImportRefusesUnsafeOrChangedSources`, `TestVerificationDetectsTampering`, `TestAbortBeforeCutoverRestoresFileGateway` | Not yet run on live data |
+| P08 | Partial | `TestPostgresSnapshotRestartLocksExecution`, `TestOwnerFlowsOnPostgresCatalog/loss-and-rollback`, `TestRollbackResumesAndRefusesReplacedFiles`, `TestMarkerGatesTheFileBackend` | Database backup/restore drill (step 9) |
 | P09 | Opt-in | `TestOwnerRoutesFailClosedOnDatabaseLoss` (terminated executor session locks owner routes; restart suspends the old window), `TestPostgresExclusiveExecutorAndLoss` | Guarded execution at startup (step 4) |
 | P10 | Library | `TestPostgresDurabilityIsolationAndPrivileges` | Retention role and procedure |
 | P11 | Partial | `TestBudgetAdmissionAtomicAndConcurrency`, `TestPostgresAtomicBudget` | High-concurrency load tests (step 10) |
-| P12 | Partial | `TestOwnerConfirmModeAndPolicyChange`, `TestOwnerVaultCredentialLifecycleAndRestart` (owner policy and credential writes go through the coordinator), `TestOwnerMutationExpiryRollsBackWritesAndRevocation`, `TestSessionRevocationWaitsForOwnerCommitAndPublication`, `TestAtomicVaultCommitFailureDoesNotPublish`, `TestAtomicVaultMutationRevokesOnlyAfterCommit` | Remaining catalog mutations do not go through the coordinator yet (step 3) |
+| P12 | Opt-in | `TestOwnerConfirmModeAndPolicyChange`, `TestOwnerVaultCredentialLifecycleAndRestart` (owner policy and credential writes go through the coordinator), `TestOwnerMutationExpiryRollsBackWritesAndRevocation`, `TestSessionRevocationWaitsForOwnerCommitAndPublication`, `TestAtomicVaultCommitFailureDoesNotPublish`, `TestAtomicVaultMutationRevokesOnlyAfterCommit`, `TestRepositoryCommitsAtomicallyAndFailsClosed`, `TestOwnerFlowsOnPostgresCatalog` (all catalog mutations commit with their event and publish after commit) | File-catalog mode still guards only key and session changes |
 
 ## 22.6 Optional-mode acceptance cases
 
