@@ -131,7 +131,10 @@ Guarded execution is installed whenever `owner_security` runs; the former
   fall back to.
 - Without `owner_security` (and in `--stdio`, which has no owner routes) the
   guarded adapter is not installed. The API then accepts only `none` connectors,
-  and any stored credentialed connector stays locked and never dials.
+  and any stored credentialed connector stays locked and never dials. With
+  `owner_security`, credentialed connectors are still limited to local-account
+  workspaces, since only an account owner can unlock a vault, and to endpoints
+  the vault destination accepts.
 - Cached tool definitions stay in `tools/list` while the connector is enabled;
   each call verifies the selected definition against the upstream inside its
   window. Discovery for new credentialed connectors needs the owner setup flow

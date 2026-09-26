@@ -561,10 +561,7 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	if _, err := Rollback(t.Context(), f.db.Admin, f.src); !errors.Is(err, ErrLocked) {
 		t.Fatal("rollback ran beside a PostgreSQL gateway", err)
 	}
-	service.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = db.Close(ctx)
-	cancel()
+	f.stop(service, db)
 
 	// Interrupted after the database left the active state.
 	st, _, _ := Status(t.Context(), f.db.Admin)
@@ -619,6 +616,32 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	}
 	if marker, ok, err := catalog.ReadMarker(f.src.CatalogPath); err != nil || !ok || marker.State != "rolled_back" || marker.RollbackID != m.RollbackID {
 		t.Fatal("marker", marker, err)
+	}
+}
+
+// stop closes a gateway and waits until PostgreSQL has released its executor
+// lock. The server drops session locks when the backend exits, which can
+// happen after the client has closed, so a migration started at once could
+// still see the lock held.
+func (f *fixture) stop(service *lease.Service, db *postgres.Store) {
+	f.t.Helper()
+	service.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = db.Close(ctx)
+	for {
+		var held bool
+		if err := f.db.Admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE l.locktype = 'advisory' AND d.datname = current_database() AND l.pid <> pg_backend_pid())").Scan(&held); err != nil {
+			f.t.Fatal(err)
+		}
+		if !held {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			f.t.Fatal("gateway lock was not released")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
@@ -757,10 +780,7 @@ func TestProviderChangesMoveTheSecurityRevision(t *testing.T) {
 		}
 	}
 	// The revision is sealed with the row and survives a restart.
-	service.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = db.Close(ctx)
-	cancel()
+	f.stop(service, db)
 	restarted, _, _, _ := f.gateway()
 	if got := restarted.ConnectorSecurityRevision(f.alice, remote); got != "4" {
 		t.Fatal("revision after reload", got)
@@ -781,10 +801,7 @@ func TestImportAfterRollbackRequiresTheExport(t *testing.T) {
 	if err := repo.RevokeAccess(f.alice, agent.ID); err != nil {
 		t.Fatal(err)
 	}
-	service.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = db.Close(ctx)
-	cancel()
+	f.stop(service, db)
 	m, err := Rollback(t.Context(), f.db.Admin, f.src)
 	if err != nil {
 		t.Fatal(err)

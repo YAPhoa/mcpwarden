@@ -677,6 +677,7 @@ $('upstream-form').addEventListener('submit', async event => {
     names.push(name);
   }
   if (authType === 'bearer') names.push('Authorization');
+  if (names.length && !vaultEndpoint(endpoint.value.trim())) { invalid(endpoint, 'Connectors with credentials need a public HTTPS endpoint with a lowercase host and a path, or HTTP on this machine.'); return; }
   $('save-upstream').disabled = true; $('save-upstream').textContent = 'Adding…'; $('upstream-error').textContent = '';
   const name = $('upstream-name').value.trim();
   try {
@@ -773,6 +774,30 @@ function credentialHeader(name) {
   const lower = name.toLowerCase();
   return /^[!#$%&'*+.^_`|~0-9a-z-]{1,128}$/.test(lower) && !/^(mcp-|sec-|x-forwarded-)/.test(lower) &&
     !['host','connection','proxy-connection','proxy-authorization','proxy-authenticate','content-length','transfer-encoding','te','trailer','upgrade','keep-alive','accept','accept-encoding','content-type','user-agent','origin','referer','cookie','set-cookie','forwarded','authorization-server','idempotency-key','x-idempotency-key'].includes(lower);
+}
+// Mirrors the gateway's rule for endpoints a vault destination accepts. The
+// raw string is checked because the gateway compares it exactly; the browser
+// URL parser would add a missing path or lowercase the host. Whether an HTTPS
+// IPv6 literal is public is left to the gateway.
+function vaultEndpoint(raw) {
+  const match = /^(https?):\/\/(\[[0-9a-f:.]+\]|[^/?#@:\[\]]+)(?::([1-9][0-9]{0,4})?)?(\/[^?#]*)$/.exec(raw);
+  if (!match || raw.length > 2048) return false;
+  const [, scheme, host, port, path] = match;
+  if (port && Number(port) > 65535) return false;
+  if (!/^(?:[A-Za-z0-9\-._~!$&'()*+,;=:@/[\]]|%[0-9A-Fa-f]{2})*$/.test(path) || /%2f|%5c/i.test(path)) return false;
+  const decoded = path.replace(/%([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  if (/[\\\0\r\n]/.test(decoded) || decoded.split('/').some(s => s === '.' || s === '..')) return false;
+  const octets = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$/.test(host) && host.split('.').map(Number);
+  if (scheme === 'http') return host === 'localhost' || host === '[::1]' || (octets && octets[0] === 127);
+  if (host.startsWith('[')) return !host.includes('.');
+  if (octets) {
+    // IPv4 ranges the gateway never treats as public: this machine, private,
+    // shared, link-local, documentation, benchmarking, multicast and reserved.
+    const value = parts => parts.reduce((n, o) => n * 256 + o, 0), ip = value(octets);
+    return ![['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['168.63.129.16', 32], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 3]]
+      .some(([base, bits]) => Math.floor(ip / 2 ** (32 - bits)) === Math.floor(value(base.split('.').map(Number)) / 2 ** (32 - bits)));
+  }
+  return host.length <= 253 && host.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }
 function renderAuthFields() {
   const vault = Boolean(session?.vault);

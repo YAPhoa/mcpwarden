@@ -478,3 +478,23 @@ test('unknown completion never presents a response or success and escapes caller
  assert.doesNotMatch(html,/0 response|NaN|<script>|0 ms/);
  assert.match(html,/&lt;script&gt;/);
 });
+test('credentialed connections check the endpoint the gateway will compare',async()=>{
+ const session={mode:'account',username:'alice',subject:'account:alice',vault:true};
+ const accepted=['https://mcp.example.com/mcp','https://mcp.example.com/','https://mcp.example.com:8443/v1/mcp','https://8.8.8.8/mcp','http://localhost:8080/mcp','http://127.0.0.1/mcp','http://[::1]:9000/mcp','https://example.com/a%20b','https://mcp.example.com:/mcp','https://mcp.example.com/a[b]'];
+ const refused=['https://mcp.example.com','https://MCP.example.com/mcp','https://mcp.example.com./mcp','https://mcp.example.com/a/../b','https://mcp.example.com/a%2Fb','https://mcp.example.com/a%5cb','https://mcp.example.com:0443/mcp','https://mcp.example.com:70000/mcp','HTTPS://mcp.example.com/mcp','http://example.com/mcp','http://127.1/mcp','http://010.0.0.1/mcp','https://-bad.example/mcp','https://mcp.example.com/a b','https://user@mcp.example.com/mcp','https://mcp.example.com/mcp?x=1','https://mcp.example.com/%2e%2e/x','https://mcp.example.com/a%00b','https://127.0.0.1/mcp','https://192.168.1.1/mcp','https://224.0.0.1/mcp'];
+ const ui=await app({session});
+ for(const url of accepted)assert.equal(ui.run(`vaultEndpoint(${JSON.stringify(url)})`),true,url);
+ for(const url of refused)assert.equal(ui.run(`vaultEndpoint(${JSON.stringify(url)})`),false,url);
+ const pathless=await app({session});
+ pathless.node('upstream-url').value='https://mcp.example.com'; pathless.node('upstream-timeout').value='30s'; pathless.node('upstream-name').value='docs';
+ pathless.node('upstream-auth-type').value='bearer';
+ Object.assign(pathless.node('upstream-url'),{setCustomValidity(m){this.custom=m;},reportValidity(){}});
+ await pathless.node('upstream-form').handlers.submit({preventDefault(){}});
+ assert.ok(!pathless.requests.some(r=>r.path==='/api/connections'&&r.options.method==='POST'));
+ assert.match(pathless.node('upstream-url').custom,/public HTTPS endpoint/);
+ const open=await app({session});
+ open.node('upstream-url').value='https://mcp.example.com'; open.node('upstream-timeout').value='30s'; open.node('upstream-name').value='docs';
+ open.node('upstream-auth-type').value='none';
+ await open.node('upstream-form').handlers.submit({preventDefault(){}});
+ assert.ok(open.requests.some(r=>r.path==='/api/connections'&&r.options.method==='POST'));
+});

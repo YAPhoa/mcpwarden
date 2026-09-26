@@ -59,8 +59,9 @@ per-case coverage of the 68 acceptance tests is in the
    creation: the gateway never holds their credential or dials them in the
    background, refresh returns 409, and every call needs an owner-activated
    window. A restart starts locked with a new boot, and a tombstone keeps the
-   connector locked. Without `owner_security` only no-auth connectors can be
-   created. Catalogs from older builds (header values, OAuth settings, grant
+   connector locked. Only local-account workspaces on a gateway with
+   `owner_security` can create credentialed connectors, and only for endpoints
+   the vault destination accepts; everyone else gets no-auth connectors. Catalogs from older builds (header values, OAuth settings, grant
    IDs) are refused at load; there is no conversion.
 5. **Initial setup/discovery authorization.** Implement a bounded owner-only
    discovery capability for new providers before their tool catalog exists.

@@ -1454,3 +1454,22 @@ file `Add`, `go vet -tags flowtest` in CI and `TestNoTestRoutesWithoutFlowtestTa
 `gofmt`, tidy, build, vet (with and without `flowtest`), `go test -race
 -count=1 ./...` with PostgreSQL 16, `npm test` (68) and the Chromium owner
 flows passed.
+
+### Review round 2 (2026-09-26)
+
+No blocking findings. The add-upstream form now checks a credentialed
+endpoint as typed against the vault destination rule (`vaultEndpoint` in
+`ui/static/app.js`) and shows the gateway's wording instead of a bare HTTP
+400; the most likely case was an endpoint without a path. A differential run
+over 46,080 generated endpoints found no endpoint the gateway accepts and the
+panel refuses; the panel lets only HTTPS IPv6 loopback literals through to the
+gateway's refusal. The note shown when credentials are unavailable now fits
+both the operator workspace and gateways without the vault. Stale workspace
+wording is fixed in the API guide, encrypted runtime and roadmap. A full race
+run once hit `ErrLocked` in `TestImportAfterRollbackRequiresTheExport`:
+PostgreSQL drops a session advisory lock when the backend exits, which can
+come after the client closes, so the pgcatalog fixture now waits for the
+lock to clear after stopping a gateway (8 repeated runs clean). `gofmt`, tidy,
+`integrity.py`, build, vet (with and without `flowtest`), the `CGO_ENABLED=0`
+build, `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (69) and
+the Chromium owner flows passed.
