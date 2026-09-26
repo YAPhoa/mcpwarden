@@ -419,7 +419,9 @@ func TestImportRefusesUnsafeOrChangedSources(t *testing.T) {
 
 func TestVerificationDetectsTampering(t *testing.T) {
 	for name, sql := range map[string]string{
-		"sealed byte":      "UPDATE mcpwarden_security.catalog_access SET sealed = overlay(sealed placing '\\x00'::bytea from 30 for 1) WHERE access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access)",
+		// Flip every bit of one byte: writing a fixed value left the row unchanged
+		// whenever the random ciphertext already held it (1 run in 256).
+		"sealed byte":      "UPDATE mcpwarden_security.catalog_access SET sealed = set_byte(sealed, 29, get_byte(sealed, 29) # 255) WHERE access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access)",
 		"swapped payloads": "UPDATE mcpwarden_security.catalog_access a SET sealed = b.sealed FROM mcpwarden_security.catalog_access b WHERE a.access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access) AND b.access_id = (SELECT max(access_id) FROM mcpwarden_security.catalog_access)",
 		"plain role":       "UPDATE mcpwarden_security.catalog_access SET role = CASE role WHEN 'admin' THEN 'client' ELSE 'admin' END WHERE kind = 'api_key' AND access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access WHERE kind = 'api_key')",
 		"expiry":           "UPDATE mcpwarden_security.catalog_access SET expires_at = expires_at + interval '1 day' WHERE expires_at IS NOT NULL",
