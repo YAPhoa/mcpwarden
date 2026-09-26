@@ -120,7 +120,7 @@ func (p Destination) validate() (destination, error) {
 	slices.Sort(p.HeaderNames)
 	slices.Sort(p.PrivatePrefixes)
 	for i, name := range p.HeaderNames {
-		if name != strings.ToLower(name) || !credentialHeader(name) || i > 0 && name == p.HeaderNames[i-1] {
+		if name != strings.ToLower(name) || !CredentialHeader(name) || i > 0 && name == p.HeaderNames[i-1] {
 			return fail()
 		}
 	}
@@ -153,7 +153,10 @@ func (p Destination) validate() (destination, error) {
 	return d, nil
 }
 
-func credentialHeader(name string) bool {
+// CredentialHeader reports whether a lowercase header name may carry a vault
+// credential. The connector catalog uses it too, so every name a connector
+// declares is one the vault destination accepts.
+func CredentialHeader(name string) bool {
 	if len(name) < 1 || len(name) > 128 {
 		return false
 	}

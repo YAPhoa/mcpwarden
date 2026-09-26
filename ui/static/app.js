@@ -211,7 +211,6 @@ function date(value) { return window.MCPWardenTime.format(value); }
 function discovery(p) {
   if (p.enabled === false) return ['Disabled', '', 'Connection paused'];
   const entry = connections.get(p.name);
-  if (entry?.auth_type === 'oauth' && !entry.oauth_connected) return ['Connect account', 'warning', 'Authorization required'];
   if (inVault(p)) return ['Vault custody', 'success', `${p.tool_count} cached tool${p.tool_count === 1 ? '' : 's'} · calls need an access window`];
   const local = refreshState.get(p.name);
   if (local?.pending) return ['Refreshing…', '', 'Discovery in progress'];
@@ -257,10 +256,6 @@ function renderDetails() {
   $('connection-tool-count').textContent = p ? p.tool_count : ''; $('connection-tool-count').hidden = !p;
   for(const [id,active] of [['connection-tools-link',!settings],['connection-settings-link',settings]]) { if(active)$(id).setAttribute('aria-current','page');else $(id).removeAttribute('aria-current'); }
   $('provider-enabled-control').hidden = !p;
-  const authEntry = connections.get(p?.name);
-  $('connect-upstream-account').hidden = authEntry?.auth_type !== 'oauth';
-  $('connect-upstream-account').disabled = !access || mutating;
-  $('connect-upstream-account').textContent = authEntry?.oauth_connected ? 'Reconnect account' : 'Connect account';
   const enabled = pendingProvider && pendingProvider.name === p?.name ? pendingProvider.enabled : p?.enabled !== false;
   $('provider-enabled').dataset.enable = String(!enabled);
   $('provider-enabled').textContent = enabled ? 'Disable' : 'Enable';
@@ -273,11 +268,11 @@ function renderDetails() {
   const locked = !access || mutating;
   $('upstream-details').innerHTML = `<div class="detail-heading"><div class="eyebrow">UPSTREAM DETAILS</div><h2>${escapeHTML(p.name)}</h2><span class="badge ${tone}">${label}</span></div>
     <section class="detail-section"><h3>Upstream connection</h3><dl><dt>Managed by</dt><dd>${entry ? escapeHTML(session?.username || (session?.mode === 'local' ? 'Shared operator workspace' : session?.subject) || 'Your workspace') : 'Gateway configuration'}</dd><dt>Transport</dt><dd>${p.transport === 'stdio' ? 'stdio' : 'Streamable HTTP'}</dd>${entry ? `<dt>Endpoint</dt><dd class="mono">${escapeHTML(entry.url)}</dd><dt>Call timeout</dt><dd>${escapeHTML(entry.call_timeout || '30s')}</dd>` : '<dt>Settings</dt><dd>Defined in YAML configuration.</dd>'}</dl></section>
-    <section class="detail-section"><h3>Discovery</h3><dl><dt>Last successful discovery</dt><dd>${escapeHTML(date(p.last_discovered))}</dd><dt>Metadata</dt><dd>${p.healthy || p.last_discovered || p.tool_count ? `${p.tool_count} ${p.healthy && !local?.failed ? 'discovered' : 'cached'} tools` : 'No successful discovery recorded'}</dd><dt>Gateway-reported connection</dt><dd>${p.enabled === false ? 'Disabled' : inVault(p) ? 'Vault custody' : p.healthy ? 'Connected' : 'Unavailable'}</dd></dl>${local?.failed || p.error ? '<p class="help failure">Discovery could not complete. Check the upstream endpoint and credentials. Raw diagnostics are omitted to protect credentials.</p>' : ''}<p class="help">${inVault(p) ? 'Calls run only inside an access window. Refresh would need server-held credentials, so it is off for this connection.' : 'Refresh retrieves tool metadata. It does not invoke tools.'}</p></section>
-    ${entry ? `<section class="detail-section"><h3>Authentication</h3><p>${escapeHTML(authLabel(entry.auth_type || (entry.header_names.length ? 'headers' : 'none')))}</p>${entry.auth_type === 'oauth' ? `<p class="help">${entry.oauth_connected ? 'Account authorization saved. Reconnect if permissions have changed or access expired.' : 'Authorize this connector to discover its tools.'}</p>` : ''}</section>` : ''}
-    <section class="detail-section"><h3>Saved headers</h3>${entry ? entry.header_names.length ? entry.header_names.map(name => `<div class="saved-header"><span class="mono">${escapeHTML(name)}</span><span>Stored</span></div>`).join('') : '<p class="help">Not set</p>' : '<p class="help">Managed in gateway configuration; header names are not exposed.</p>'}${entry ? '<p class="help">Saved values remain private. This gateway does not support editing saved headers.</p>' : ''}</section>
+    <section class="detail-section"><h3>Discovery</h3><dl><dt>Last successful discovery</dt><dd>${escapeHTML(date(p.last_discovered))}</dd><dt>Metadata</dt><dd>${p.healthy || p.last_discovered || p.tool_count ? `${p.tool_count} ${p.healthy && !local?.failed ? 'discovered' : 'cached'} tools` : 'No successful discovery recorded'}</dd><dt>Gateway-reported connection</dt><dd>${p.enabled === false ? 'Disabled' : inVault(p) ? 'Vault custody' : p.healthy ? 'Connected' : 'Unavailable'}</dd></dl>${local?.failed || p.error ? '<p class="help failure">Discovery could not complete. Check the upstream endpoint and credentials. Raw diagnostics are omitted to protect credentials.</p>' : ''}<p class="help">${inVault(p) ? 'Calls run only inside an access window. Refresh is off for vault connections.' : 'Refresh retrieves tool metadata. It does not invoke tools.'}</p></section>
+    ${entry ? `<section class="detail-section"><h3>Authentication</h3><p>${escapeHTML(authLabel(entry.auth_type || 'none'))}</p>${entry.custody === 'vault' ? '<p class="help">The credential is kept in your vault. <a href="/vault/credentials">Manage it in Vault &amp; windows</a>.</p>' : ''}</section>` : ''}
+    <section class="detail-section"><h3>Credential headers</h3>${entry ? entry.header_names.length ? entry.header_names.map(name => `<div class="saved-header"><span class="mono">${escapeHTML(name)}</span><span>In vault</span></div>`).join('') : '<p class="help">None</p>' : '<p class="help">Managed in gateway configuration; header names are not exposed.</p>'}</section>
     <section class="detail-section"><h3>Agent discovery</h3><label for="visibility-mode" class="help">Tools visible to MCP clients</label><select id="visibility-mode" ${locked || !managedAvailable ? 'disabled' : ''}><option value="all" ${p.visibility_mode === 'selected' ? '' : 'selected'}>All tools visible</option><option value="selected" ${p.visibility_mode === 'selected' ? 'selected' : ''}>Selected tools only</option></select><p class="help">Selected mode exposes only enabled tools in the directory. Gateway allow/deny policy still applies.</p></section>
-    ${entry ? `<section class="detail-section"><h3>Remove connection</h3><p class="help">Remove this upstream and its saved headers from your gateway identity.</p><button id="remove-upstream" class="danger" type="button" ${locked ? 'disabled' : ''}>Remove upstream</button></section>` : ''}`;
+    ${entry ? `<section class="detail-section"><h3>Remove connection</h3><p class="help">Remove this upstream from your workspace. Call history is kept.</p><button id="remove-upstream" class="danger" type="button" ${locked ? 'disabled' : ''}>Remove upstream</button></section>` : ''}`;
 }
 function renderDashboard() {
   const disabled = providers.filter(p => p.enabled === false).length;
@@ -488,7 +483,7 @@ $('upstream-details').addEventListener('click', async event => {
 });
 function lockMutationControls() {
   // Keep the native switch and its new checked state mounted until the save completes.
-  document.querySelectorAll('.tool-visibility, .provider-toggle, .provider-refresh, #provider-enabled, #refresh-tools, #visibility-mode, #bulk-button, #add-upstream, #dashboard-add, #remove-upstream, #connect-upstream-account').forEach(el => { el.disabled = true; });
+  document.querySelectorAll('.tool-visibility, .provider-toggle, .provider-refresh, #provider-enabled, #refresh-tools, #visibility-mode, #bulk-button, #add-upstream, #dashboard-add, #remove-upstream').forEach(el => { el.disabled = true; });
 }
 async function updateVisibility(name, mode, enabled) {
   if (!access || !managedAvailable || mutating) return;
@@ -658,10 +653,10 @@ function openUpstreamForm() {
 $('add-upstream').addEventListener('click', openUpstreamForm);
 $('dashboard-add').addEventListener('click', openUpstreamForm);
 $('cancel-upstream').addEventListener('click', () => $('upstream-dialog').close());
-$('upstream-dialog').addEventListener('close', () => { $('auth-secret').value = ''; $('oauth-client-secret').value = ''; $('header-rows').replaceChildren(); $('upstream-form').reset(); });
+$('upstream-dialog').addEventListener('close', () => { $('header-rows').replaceChildren(); $('upstream-form').reset(); });
 $('add-header').addEventListener('click', () => {
   const row = document.createElement('div'); row.className = 'header-row';
-  row.innerHTML = '<label>Header name<input class="header-name" placeholder="Authorization" required autocomplete="off"></label><label>New value<input class="header-value" type="password" required autocomplete="off" placeholder="Enter value"></label><button type="button" class="danger" aria-label="Remove new header">Remove</button>';
+  row.innerHTML = '<label>Header name<input class="header-name" placeholder="X-Tenant" required autocomplete="off"></label><button type="button" class="danger" aria-label="Remove header">Remove</button>';
   row.querySelector('button').addEventListener('click', () => { row.remove(); $('add-header').focus(); });
   $('header-rows').appendChild(row); row.querySelector('input').focus();
 });
@@ -669,35 +664,25 @@ $('upstream-form').addEventListener('input', event => { if (event.target.setCust
 function invalid(input, message) { input.setCustomValidity(message); input.setAttribute('aria-invalid', 'true'); input.reportValidity(); }
 $('upstream-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const endpoint = $('upstream-url'), timeout = $('upstream-timeout'), headers = {}, names = new Set();
+  const endpoint = $('upstream-url'), timeout = $('upstream-timeout'), names = [];
   const authType = $('upstream-auth-type').value || 'none';
   const url = new URL(endpoint.value);
   if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '[::1]' || /^127\./.test(url.hostname)))) || url.username || url.password || url.search || url.hash) { invalid(endpoint, 'Use HTTPS or loopback HTTP, without credentials, a query string, or a fragment.'); return; }
   if (!/^(?:\d+(?:\.\d+)?(?:ns|us|µs|μs|ms|s|m|h))+$/.test(timeout.value.trim()) || !/[1-9]/.test(timeout.value)) { invalid(timeout, 'Enter a positive duration such as 30s or 1m.'); return; }
-  for (const row of (authType === 'headers' ? $('header-rows').children : [])) {
-    const input = row.querySelector('.header-name'), valueInput = row.querySelector('.header-value'), name = input.value.trim();
-    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || names.has(name.toLowerCase()) || /^(host|content-length|connection|transfer-encoding|upgrade|mcp-session-id)$/i.test(name)) { invalid(input, 'Enter a unique, configurable HTTP header name.'); return; }
-    if (/[\r\n]/.test(valueInput.value)) { invalid(valueInput, 'Header values cannot contain line breaks.'); return; }
-    names.add(name.toLowerCase()); Object.defineProperty(headers, name, {value: valueInput.value, enumerable: true});
+  const inputs = authType === 'headers' ? [...$('header-rows').children].map(row => row.querySelector('.header-name')) : authType === 'api_key' ? [$('auth-header')] : [];
+  if (authType === 'headers' && !inputs.length) { $('upstream-error').textContent = 'Add at least one header name.'; $('add-header').focus(); return; }
+  for (const input of inputs) {
+    const name = input.value.trim();
+    if (!credentialHeader(name) || names.some(n => n.toLowerCase() === name.toLowerCase())) { invalid(input, 'Enter a unique header name that can carry a credential.'); return; }
+    names.push(name);
   }
-  let oauth;
-  if (authType === 'bearer' || authType === 'api_key') {
-    const header = authType === 'bearer' ? 'Authorization' : $('auth-header').value.trim();
-    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header) || /^(host|content-length|connection|transfer-encoding|upgrade|mcp-session-id)$/i.test(header)) { invalid($('auth-header'), 'Enter a configurable HTTP header name.'); return; }
-    if (!$('auth-secret').value || /[\r\n]/.test($('auth-secret').value)) { invalid($('auth-secret'), 'Enter a credential without line breaks.'); return; }
-    Object.defineProperty(headers, header, {value: (authType === 'bearer' ? 'Bearer ' : '') + $('auth-secret').value, enumerable: true});
-  }
-  if (authType === 'oauth') {
-    oauth = {client_id: $('oauth-client-id').value.trim(), client_secret: $('oauth-client-secret').value, issuer: $('oauth-issuer').value.trim(), scopes: $('oauth-scopes').value.trim().split(/\s+/).filter(Boolean)};
-    if (oauth.client_id && !oauth.issuer) { invalid($('oauth-issuer'), 'Enter the issuer registered with this client.'); return; }
-    if (oauth.client_secret && !oauth.client_id) { invalid($('oauth-client-id'), 'Enter the client ID for this secret.'); return; }
-  }
+  if (authType === 'bearer') names.push('Authorization');
   $('save-upstream').disabled = true; $('save-upstream').textContent = 'Adding…'; $('upstream-error').textContent = '';
   const name = $('upstream-name').value.trim();
   try {
-    await api('/api/connections', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, url: endpoint.value.trim(), call_timeout: timeout.value.trim(), headers, auth_type: authType, oauth})});
+    await api('/api/connections', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name, url: endpoint.value.trim(), call_timeout: timeout.value.trim(), header_names: names, auth_type: authType})});
     selected = name; $('upstream-search').value = ''; $('upstream-dialog').close(); navigate(`/upstreams/${encodeURIComponent(name)}`); await refresh();
-    notice(`Added ${name}. Discovery may still be starting; reload the inventory to see its latest state.`);
+    notice(authType === 'none' ? `Added ${name}. Discovery may still be starting; reload the inventory to see its latest state.` : `Added ${name}. Save its credential in Vault & windows; calls need an access window.`);
   } catch (error) { $('upstream-error').textContent = `Connection was not added. ${error.message}`; }
   finally { $('save-upstream').disabled = false; $('save-upstream').textContent = 'Add upstream'; }
 });
@@ -782,33 +767,27 @@ async function setProviderEnabled(name, enabled) {
 }
 $('provider-enabled').addEventListener('click', async event => { await setProviderEnabled(selected, event.currentTarget.dataset.enable === 'true'); $('provider-enabled').focus(); });
 
-function authLabel(type) { return ({none:'No authentication',bearer:'Bearer token',api_key:'API key header',headers:'Custom headers',oauth:'OAuth account'})[type] || 'Custom headers'; }
+function authLabel(type) { return ({none:'No authentication',bearer:'Bearer token',api_key:'API key header',headers:'Custom headers'})[type] || 'Custom headers'; }
+// Mirrors the gateway's rule for header names that can carry a vault credential.
+function credentialHeader(name) {
+  const lower = name.toLowerCase();
+  return /^[!#$%&'*+.^_`|~0-9a-z-]{1,128}$/.test(lower) && !/^(mcp-|sec-|x-forwarded-)/.test(lower) &&
+    !['host','connection','proxy-connection','proxy-authorization','proxy-authenticate','content-length','transfer-encoding','te','trailer','upgrade','keep-alive','accept','accept-encoding','content-type','user-agent','origin','referer','cookie','set-cookie','forwarded','authorization-server','idempotency-key','x-idempotency-key'].includes(lower);
+}
 function renderAuthFields() {
+  const vault = Boolean(session?.vault);
+  for (const option of $('upstream-auth-type').querySelectorAll('option')) option.disabled = option.value !== 'none' && !vault;
+  if (!vault) $('upstream-auth-type').value = 'none';
   const type = $('upstream-auth-type').value;
-  $('auth-secret-fields').hidden = type !== 'bearer' && type !== 'api_key';
-  $('auth-secret').required = type === 'bearer' || type === 'api_key';
   $('auth-header-label').hidden = type !== 'api_key';
   $('auth-header').required = type === 'api_key';
-  $('upstream-oauth-fields').hidden = type !== 'oauth';
+  $('auth-header').disabled = type !== 'api_key';
   $('custom-header-fields').hidden = type !== 'headers';
-  $('oauth-callback-url').textContent = `${location.origin}/api/upstream-oauth/callback`;
+  $('auth-vault-note').hidden = type === 'none';
+  $('auth-vault-unavailable').hidden = vault;
   for (const input of $('custom-header-fields').querySelectorAll('input')) input.disabled = type !== 'headers';
-  for (const input of $('upstream-oauth-fields').querySelectorAll('input')) input.disabled = type !== 'oauth';
 }
 $('upstream-auth-type').addEventListener('change', renderAuthFields);
-$('connect-upstream-account').addEventListener('click', async () => {
-  const name = selected;
-  const popup = window.open('about:blank', '_blank');
-  if (!popup) { notice('Allow a new window to connect this account, then try again.'); return; }
-  popup.opener = null;
-  mutating = true; render();
-  try {
-    const result = await api(`/api/providers/${encodeURIComponent(name)}/oauth`, {method:'POST'});
-    popup.location.href = result.authorization_url;
-    notice('Finish authorization in the new window, then reload the inventory.');
-  } catch (error) { popup.close(); notice(`Account connection could not start. ${error.message}`); }
-  finally { mutating = false; render(); }
-});
 
 function activeAccess(item) { return !item.revoked_at && !item.ended_at && !item.deleted_at && (!item.expires_at || new Date(item.expires_at) > new Date()); }
 function publicAccessHandle(item, items = []) {

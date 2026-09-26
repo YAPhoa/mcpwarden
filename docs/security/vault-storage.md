@@ -129,6 +129,6 @@ the isolated PostgreSQL fixture enabled. For the real-browser check, supply
 `FIREFOX_EXECUTABLE`, then run `node ui/tests/vault-browser.mjs`.
 
 Live rollout still needs setup discovery for new providers, OAuth
-bundle/refresh lifecycle, full catalog/history migration, restore/restart and
-load qualification, and explicit startup installation of the guarded adapter.
+bundle/refresh lifecycle, restore/restart and load qualification. Startup now
+installs the guarded adapter whenever `owner_security` runs.
 No new gateway configuration switch is exposed by this slice.

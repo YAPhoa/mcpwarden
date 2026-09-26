@@ -24,7 +24,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres/pgtest"
-	"golang.org/x/oauth2"
 )
 
 // fixture is a realistic file catalog and history on a scratch database. All
@@ -81,15 +80,14 @@ func newFixture(t *testing.T) *fixture {
 		}
 	}
 	entries := []catalog.Entry{
-		{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/mcp", AuthType: "bearer", Headers: map[string]string{"Authorization": "Bearer synthetic-header"}, CallTimeout: "45s"},
-		{ID: identity.New(), Owner: f.alice, Name: "oauth", URL: "https://example.com/oauth", AuthType: "oauth", OAuth: &catalog.OAuthSettings{ClientID: "client", ClientSecret: "synthetic-client-secret", Issuer: "https://issuer.example.com", Scopes: []string{"read"}}},
+		{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/mcp", AuthType: "bearer", HeaderNames: []string{"Authorization"}, CallTimeout: "45s"},
+		{ID: identity.New(), Owner: f.alice, Name: "keyed", URL: "https://example.com/keyed", AuthType: "headers", HeaderNames: []string{"X-API-Key", "X-Tenant"}},
 		{ID: identity.New(), Owner: f.alice, Name: "gone", URL: "https://example.com/gone"},
 		{ID: identity.New(), Owner: f.bob, Name: "svc", URL: "https://example.com/svc", AuthType: "none"},
 	}
 	for _, e := range entries {
 		must(store.Add(e))
 	}
-	must(store.SaveOAuth(f.alice, entries[1].ID, "", catalog.OAuthGrant{ID: identity.New(), Token: oauth2.Token{AccessToken: "synthetic-access", RefreshToken: "synthetic-refresh", Expiry: future}}))
 	must(store.SetDiscovery(f.alice, "remote", []*mcp.Tool{{Name: "search", Description: "Synthetic", InputSchema: map[string]any{"type": "object"}}}))
 	must(store.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{"remote__search"}}))
 	must(store.SetProviderEnabled(f.bob, "svc", false))
@@ -233,9 +231,6 @@ func TestImportPreservesCatalogAndHistory(t *testing.T) {
 		for _, e := range source.Entries {
 			if e.Owner == owner {
 				// List returns copies sorted by name, as the file store does.
-				if e.Headers == nil {
-					e.Headers = map[string]string{}
-				}
 				want = append(want, e)
 			}
 		}
@@ -428,7 +423,7 @@ func TestVerificationDetectsTampering(t *testing.T) {
 		"swapped payloads": "UPDATE mcpwarden_security.catalog_access a SET sealed = b.sealed FROM mcpwarden_security.catalog_access b WHERE a.access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access) AND b.access_id = (SELECT max(access_id) FROM mcpwarden_security.catalog_access)",
 		"plain role":       "UPDATE mcpwarden_security.catalog_access SET role = CASE role WHEN 'admin' THEN 'client' ELSE 'admin' END WHERE kind = 'api_key' AND access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access WHERE kind = 'api_key')",
 		"expiry":           "UPDATE mcpwarden_security.catalog_access SET expires_at = expires_at + interval '1 day' WHERE expires_at IS NOT NULL",
-		"grant revision":   "UPDATE mcpwarden_security.catalog_connectors SET grant_revision = 1 WHERE grant_id IS NOT NULL",
+		"grant revision":   "UPDATE mcpwarden_security.catalog_connectors SET grant_revision = 1 WHERE deleted_at IS NULL",
 		"history bytes":    "UPDATE mcpwarden_security.history_events SET record = replace(record, '\"status\":\"ok\"', '\"status\":\"ok\" ') WHERE source_line = 3",
 		"history row":      "DELETE FROM mcpwarden_security.history_events WHERE source_line = 7",
 		"history order":    "UPDATE mcpwarden_security.history_events SET source_line = source_line + 1000 WHERE source_line = 1",
@@ -514,26 +509,14 @@ func TestRepositoryCommitsAtomicallyAndFailsClosed(t *testing.T) {
 		t.Fatal("active key limit", n)
 	}
 
-	// A database CAS conflict publishes nothing and records no event.
-	var oauthID, grant string
-	for _, e := range repo.List(f.alice) {
-		if e.AuthType == "oauth" {
-			oauthID, grant = e.ID, e.OAuth.Grant.ID
-		}
+	// A refused change publishes nothing, records no event and leaves the
+	// repository healthy.
+	created := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'")
+	if err := repo.Add(catalog.Entry{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/other"}); err == nil {
+		t.Fatal("duplicate connector name accepted")
 	}
-	if _, err := f.db.Admin.Exec(ctx, "UPDATE mcpwarden_security.catalog_connectors SET grant_id=$1 WHERE connector_id=$2", identity.New(), oauthID); err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.SaveOAuth(f.alice, oauthID, grant, catalog.OAuthGrant{ID: identity.New()}); err == nil {
-		t.Fatal("grant CAS ignored the stored row")
-	}
-	for _, e := range repo.List(f.alice) {
-		if e.ID == oauthID && e.OAuth.Grant.ID != grant {
-			t.Fatal("uncommitted grant published")
-		}
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.oauth_saved'"); n != 0 || *failed {
-		t.Fatal("conflict recorded an event or failed the repository", n)
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'"); n != created || *failed || len(repo.List(f.alice)) != 2 {
+		t.Fatal("refused change recorded an event, failed the repository or published", n)
 	}
 
 	// Losing the session fails closed: no authentication from the stale view,

@@ -64,27 +64,20 @@ func privateClient(token string) *http.Client {
 	})}
 }
 
-func upstreamForUser(t *testing.T, toolName, apiKey string) (*mcp.Server, *httptest.Server) {
+func upstreamForUser(t *testing.T, toolName string) (*mcp.Server, *httptest.Server) {
 	t.Helper()
 	s := mcp.NewServer(&mcp.Implementation{Name: toolName, Version: "1"}, nil)
 	s.AddTool(&mcp.Tool{Name: toolName, InputSchema: json.RawMessage(`{"type":"object"}`)}, func(_ context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: toolName}}}, nil
 	})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
-	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Api-Key") != apiKey {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		h.ServeHTTP(w, r)
-	}))
-	return s, httpServer
+	return s, httptest.NewServer(h)
 }
 
 func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
-	aliceUpstream, aliceHTTP := upstreamForUser(t, "alice_only", "alice-key")
+	aliceUpstream, aliceHTTP := upstreamForUser(t, "alice_only")
 	defer aliceHTTP.Close()
-	_, bobHTTP := upstreamForUser(t, "bob_only", "bob-key")
+	_, bobHTTP := upstreamForUser(t, "bob_only")
 	defer bobHTTP.Close()
 	path := t.TempDir() + "/connections.enc"
 	store, err := catalog.Open(path, base64.StdEncoding.EncodeToString(make([]byte, 32)))
@@ -116,8 +109,8 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 		return mutation()
 	}
 	for _, e := range []catalog.Entry{
-		{Owner: "alice", Name: "remote", URL: aliceHTTP.URL, Headers: map[string]string{"X-Api-Key": "alice-key"}, CallTimeout: "1s"},
-		{Owner: "bob", Name: "remote", URL: bobHTTP.URL, Headers: map[string]string{"X-Api-Key": "bob-key"}, CallTimeout: "1s"},
+		{Owner: "alice", Name: "remote", URL: aliceHTTP.URL, CallTimeout: "1s"},
+		{Owner: "bob", Name: "remote", URL: bobHTTP.URL, CallTimeout: "1s"},
 	} {
 		if err := rs.add(e); err != nil {
 			t.Fatal(err)
@@ -345,4 +338,59 @@ func listUpstreamTools(ctx context.Context, session *mcp.ClientSession) (*mcp.Li
 	}
 	result.Tools = tools
 	return result, nil
+}
+
+// The connections API takes header names only. Header values and OAuth
+// settings from older clients are refused, and without the owner vault only
+// no-auth connectors can be created.
+func TestConnectionsAPIHeaderNamesOnly(t *testing.T) {
+	store, err := catalog.Open(t.TempDir()+"/connections.enc", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, _ := policy.New(config.Policy{Default: "allow"})
+	auditLog, err := audit.Open(t.TempDir() + "/audit.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auditLog.Close()
+	rs := newRuntimes(t.Context(), config.Config{}, pol, auditLog, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer rs.close()
+	post := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		rs.connections(w, httptest.NewRequest(http.MethodPost, "/api/connections", strings.NewReader(body)))
+		return w
+	}
+	for name, tc := range map[string]struct {
+		body, want string
+	}{
+		"header values": {`{"name":"a","url":"https://example.test/mcp","auth_type":"bearer","headers":{"Authorization":"Bearer synthetic"}}`, "vault"},
+		"oauth":         {`{"name":"a","url":"https://example.test/mcp","auth_type":"oauth","oauth":{"scopes":["read"]}}`, "step 6"},
+		"oauth type":    {`{"name":"a","url":"https://example.test/mcp","auth_type":"oauth"}`, "step 6"},
+		"no vault":      {`{"name":"a","url":"https://example.test/mcp","auth_type":"api_key","header_names":["X-API-Key"]}`, "owner vault"},
+		"names on none": {`{"name":"a","url":"https://example.test/mcp","auth_type":"none","header_names":["X-API-Key"]}`, "headers"},
+	} {
+		w := post(tc.body)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) || strings.Contains(w.Body.String(), "synthetic") {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	if len(store.List("local")) != 0 {
+		t.Fatal("a refused connector was stored")
+	}
+	if w := post(`{"name":"open","url":"https://example.test/mcp","auth_type":"none","headers":null}`); w.Code != http.StatusCreated {
+		t.Fatalf("no-auth connector: %d %s", w.Code, w.Body.String())
+	}
+	w := httptest.NewRecorder()
+	rs.connections(w, httptest.NewRequest(http.MethodGet, "/api/connections", nil))
+	var views []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &views); err != nil || len(views) != 1 {
+		t.Fatalf("connections: %s", w.Body.String())
+	}
+	if _, ok := views[0]["custody"]; ok || views[0]["auth_type"] != "none" || len(views[0]["header_names"].([]any)) != 0 {
+		t.Fatalf("no-auth view: %v", views[0])
+	}
+	if _, ok := views[0]["oauth_connected"]; ok {
+		t.Fatal("view still reports OAuth")
+	}
 }

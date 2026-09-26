@@ -45,9 +45,6 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	if stdio && cfg.Audit.Path == "-" {
 		return fmt.Errorf("audit.path '-' cannot be used with --stdio")
 	}
-	if stdio && cfg.ClientRelease() {
-		return fmt.Errorf("--stdio cannot use owner_security.custody_mode client_release")
-	}
 	pol, err := policy.New(cfg.Policy)
 	if err != nil {
 		return err
@@ -86,7 +83,7 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		}
 	}
 	// The owner security executor and its custody caches load before any
-	// runtime exists, so no connector can start on the legacy path first.
+	// runtime exists, so no connector can start without its guard.
 	var security *securityAPI
 	var fileAccounts *accountAuth
 	if pg != nil {
@@ -104,12 +101,10 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	}
 	rs := newRuntimes(ctx, cfg, pol, history, store, logger)
 	defer rs.close()
-	if cfg.ClientRelease() {
-		if security == nil {
-			return fmt.Errorf("owner_security.custody_mode client_release requires the owner security executor")
-		}
+	// Credentialed connectors run only through access windows. Without the
+	// owner vault none can be created, and any stored one never dials.
+	if security != nil {
 		rs.guarded = &guardedCustody{api: security, store: store, history: history}
-		security.onCredential = rs.converted
 	}
 	local := rs.get("local")
 	if stdio {
@@ -212,7 +207,6 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		jsonResponse(w, 200, map[string]any{"mode": mode, "registration": cfg.Accounts != nil && cfg.Accounts.AllowRegistration})
 	})
 	mux.Handle("/mcp", mcpHandler)
-	mux.HandleFunc("/api/upstream-oauth/callback", rs.upstreamOAuthCallback)
 	mux.Handle("/api/access", apiProtect(http.HandlerFunc(rs.access.handler)))
 	mux.Handle("/api/access/", apiProtect(http.HandlerFunc(rs.access.handler)))
 	mux.Handle("/api/history", apiProtect(http.HandlerFunc(rs.history)))
@@ -223,6 +217,9 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	mux.Handle("/api/connections", apiProtect(http.HandlerFunc(rs.connections)))
 	mux.Handle("/api/connections/", apiProtect(http.HandlerFunc(rs.connection)))
 	mux.Handle("/api/discovery/", clientProtect(http.HandlerFunc(rs.discovery)))
+	if testRoutes != nil {
+		testRoutes(mux, rs, apiProtect)
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

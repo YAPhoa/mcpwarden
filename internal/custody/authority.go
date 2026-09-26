@@ -71,8 +71,6 @@ func (a *Authority) Caller(owner, id string) (lease.Caller, bool) {
 func (a *Authority) Connector(owner, id string) (catalog.Entry, bool) {
 	for _, e := range a.Catalog.List(owner) {
 		if e.ID == id {
-			clear(e.Headers)
-			e.Headers = nil
 			return e, true
 		}
 	}

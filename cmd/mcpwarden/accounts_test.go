@@ -96,11 +96,11 @@ func TestAccountsWorkspaceIsolationAndClientTokens(t *testing.T) {
 		t.Fatal("accounts share ownership")
 	}
 	for _, username := range []string{"alice", "bob"} {
-		if err := store.Add(catalog.Entry{Owner: ids[username], Name: "same-name", URL: "https://" + username + ".example.test/mcp", Headers: map[string]string{"Authorization": "private-" + username}}); err != nil {
+		if err := store.Add(catalog.Entry{Owner: ids[username], Name: "same-name", URL: "https://" + username + ".example.test/mcp"}); err != nil {
 			t.Fatal(err)
 		}
 		response := call("GET", "/api/connections", "", cookies[username])
-		if response.Code != 200 || !strings.Contains(response.Body.String(), username+".example.test") || strings.Contains(response.Body.String(), "private-") {
+		if response.Code != 200 || !strings.Contains(response.Body.String(), username+".example.test") {
 			t.Fatalf("bad private inventory: %d", response.Code)
 		}
 		other := "bob"

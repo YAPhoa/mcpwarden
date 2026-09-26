@@ -1425,3 +1425,17 @@ swaps in the guarded generation under `rs.mu` (`Manager.Guard`) and closes the
 old session after releasing it; the race test no longer fails off the test
 goroutine. `gofmt`, build, vet and `go test -race -count=1 ./...` with
 PostgreSQL passed.
+
+## 2026-09-26 — Vault-only custody for personal credentials (removal plan PR 1)
+
+Personal connectors store header names only and credentialed ones are in vault
+custody from creation; `custody_mode`, conversion and upstream OAuth are
+removed (see `docs/decisions.md`). New tests cover names-only validation and
+the shared vault header rule, refusal of older catalog data, the connections
+API (`TestConnectionsAPIHeaderNamesOnly`), a connector locked from creation
+through credential save, window, restart and deletion
+(`TestGuardedHeaderExecution`), calls racing the first credential save
+(`TestCredentialSaveDuringCallsNeverDials`), and the panel form and detail
+view. `gofmt`, `go mod tidy -diff`, `integrity.py`, `go build ./...`,
+`go vet ./...`, the `CGO_ENABLED=0` build and `go test -race -count=1 ./...`
+with PostgreSQL 16 passed; `npm test` (68) and the Chromium owner flows passed.

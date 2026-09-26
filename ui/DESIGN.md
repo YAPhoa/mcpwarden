@@ -14,14 +14,14 @@ Use separate connection, discovery, saved-header, and agent-discovery sections. 
 
 | Surface | Source or mutation |
 | --- | --- |
-| Gateway readiness and workspace | GET `/api/status`: `ready`, server-validated `session.mode`, `subject`, `username`, `authentication`, `management_scope` |
+| Gateway readiness and workspace | GET `/api/status`: `ready`, server-validated `session.mode`, `subject`, `username`, `authentication`, `management_scope`, `vault` |
 | Sign-in options | GET `/api/auth/options`: `mode`, `registration` |
 | Account entry | POST `/api/auth/register`, `/login`, `/logout` with JSON and custom request header |
 | Personal client token | POST `/api/auth/client-token` from an authenticated browser session; replaces previous token |
 | Upstream list/details | GET `/api/providers`: `name`, `transport`, `source`, `healthy`, `error` presence, `tool_count`, `last_discovered`, `visibility_mode`, `enabled_tools` |
-| Personal connection details | GET `/api/connections`: `name`, `url`, `call_timeout`, `header_names` |
+| Personal connection details | GET `/api/connections`: `name`, `url`, `call_timeout`, `auth_type`, `header_names`, `custody` |
 | Tool inventory/schema | GET `/api/tools`: exact `name`, `upstream`, `description`, `allowed`, `healthy`, `visible`, `tool` schemas/annotations |
-| Registration | POST `/api/connections`: `name`, `url`, `call_timeout`, new `headers` |
+| Registration | POST `/api/connections`: `name`, `url`, `call_timeout`, `auth_type`, `header_names` (names only) |
 | Removal | DELETE `/api/connections/{name}` after confirmation naming the upstream |
 | Explicit refresh | POST `/api/discovery/{name}/refresh`; no tool invocation |
 | Discovery visibility | PUT `/api/providers/{name}/visibility`: `mode`, exact names in `enabled` |
@@ -30,7 +30,7 @@ Only verified successful API reads enable mutations. A transient read failure re
 
 ## Credential and capability boundaries
 
-Manually entered bearer tokens stay in page memory. Basic account sign-in uses an HttpOnly session cookie; the UI does not handle its value. Personal client tokens are created only on explicit request, returned once, copied on demand, and cleared on dialog close. The encrypted store keeps only their hashes. The legacy sessionStorage token key is removed without reading it. New header values are password inputs, submitted only on registration and cleared when the dialog closes. Saved headers display names and “Stored”; values are never fetched. API diagnostics may contain sensitive upstream content, so the UI uses generic HTTP diagnostics and never renders raw error strings. Returned names, endpoints, descriptions and schemas are escaped or assigned as text.
+Manually entered bearer tokens stay in page memory. Basic account sign-in uses an HttpOnly session cookie; the UI does not handle its value. Personal client tokens are created only on explicit request, returned once, copied on demand, and cleared on dialog close. The encrypted store keeps only their hashes. The legacy sessionStorage token key is removed without reading it. Registration takes header names only; credential values are entered in the vault console and encrypted in the browser. Credential headers display names and “In vault” with a link to `/vault/credentials`. When `session.vault` is false, the credentialed methods are disabled and only no authentication can be chosen. API diagnostics may contain sensitive upstream content, so the UI uses generic HTTP diagnostics and never renders raw error strings. Returned names, endpoints, descriptions and schemas are escaped or assigned as text.
 
 The API lacks saved-header update semantics, plaintext retrieval, audit reads, and a distinct disabled-entry state. Those controls are not invented. A missing managed storage configuration (HTTP 501) leaves config upstreams inspectable while disabling unsupported mutations. Remote registration cannot launch stdio processes.
 
@@ -151,13 +151,11 @@ tabular numerals. Below 700px the status controls, facts and row actions stack.
 The page appears only for local accounts with `owner_security` enabled. A
 disabled API, untrusted transport, storage failure or shared operator/OAuth
 workspace gets a plain status line and no controls. A note on every visit says
-what windows limit. With `custody_mode: legacy_managed` (the default, from
-`/api/vault/state`) they do not yet limit ordinary tool calls, which still use
-gateway-managed credentials. With `client_release` (2026-09-25) the note, the
-credentials help, the save dialog and the remove dialog say that a connector
-with a vault credential runs only inside access windows, that the gateway stops
-using its own header copy, and that a removed credential keeps the connector
-locked. Connections in vault custody show "Vault custody" instead of a
+what windows limit: tool calls to a connector with credentials run only inside
+an access window, and connectors without authentication connect directly. The
+credentials help, the save dialog and the remove dialog say the same, and that a
+removed credential keeps the connector locked until it is deleted and added
+again. Connections in vault custody show "Vault custody" instead of a
 connection state in the main console, count as available, and have Refresh
 turned off.
 
@@ -208,7 +206,7 @@ Remove (2026-09-25) sits beside Replace on a stored credential and works while
 the vault is locked, since it needs no key. A confirmation dialog focuses "Keep
 credential" first. Removal writes a tombstone: the connector shows "Removed from
 the vault" and cannot get a vault copy again, and pending requests and windows
-end. The gateway-managed header is untouched. nginx sends the page CSP the
+end. Its tools stay locked until the connector is deleted and added again. nginx sends the page CSP the
 browser flows use; the flows also check layout at 720 px (200% zoom on a
 1440 px laptop).
 

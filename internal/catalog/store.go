@@ -11,11 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -25,22 +25,33 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/jsoncodec"
-	"golang.org/x/oauth2"
+	"github.com/yaphoa/mcpwarden/internal/secret"
 )
 
-// Entry is a user-owned remote MCP connection. Headers are only returned by
-// List internally and are never included in API responses or logs.
+// Entry is a user-owned remote MCP connection. A credentialed connector
+// declares only the names of its credential headers; the values live in the
+// owner's vault and are released per access window. The gateway never stores
+// them in the catalog.
 type Entry struct {
 	Lifecycle
-	AuthType    string            `json:"auth_type,omitempty"`
-	OAuth       *OAuthSettings    `json:"oauth,omitempty"`
-	ID          string            `json:"id"`
-	Owner       string            `json:"owner"`
-	Name        string            `json:"name"`
-	URL         string            `json:"url"`
-	Headers     map[string]string `json:"headers"`
-	CallTimeout string            `json:"call_timeout"`
+	AuthType    string   `json:"auth_type,omitempty"`
+	ID          string   `json:"id"`
+	Owner       string   `json:"owner"`
+	Name        string   `json:"name"`
+	URL         string   `json:"url"`
+	HeaderNames []string `json:"header_names,omitempty"`
+	CallTimeout string   `json:"call_timeout"`
 }
+
+// Credentialed reports whether the connector needs a vault credential. Such a
+// connector never connects without an owner-activated access window.
+func (e Entry) Credentialed() bool {
+	return e.AuthType == "bearer" || e.AuthType == "api_key" || e.AuthType == "headers"
+}
+
+// ErrOldFormat refuses catalog data written before vault-only custody: stored
+// header values or upstream OAuth settings. There is no conversion.
+var ErrOldFormat = errors.New("created by an older build; start with a new catalog")
 
 type Store struct {
 	mu         sync.RWMutex
@@ -91,6 +102,14 @@ type Account struct {
 	ClientTokenHash string `json:"client_token_hash,omitempty"`
 }
 
+// legacyEntries finds the fields an older build stored in each connector.
+type legacyEntries struct {
+	Entries []struct {
+		Headers map[string]string `json:"headers"`
+		OAuth   json.RawMessage   `json:"oauth"`
+	} `json:"entries"`
+}
+
 type diskState struct {
 	Access     map[string]AccessRecord `json:"access,omitempty"`
 	Deleted    map[string]Lifecycle    `json:"deleted,omitempty"`
@@ -139,6 +158,17 @@ func readDisk(path string, aead cipher.AEAD) (diskState, bool, error) {
 		return state, false, fmt.Errorf("decrypt managed upstreams: %w", err)
 	}
 	defer clear(plain)
+	var legacy legacyEntries
+	if err := json.Unmarshal(plain, &legacy); err != nil {
+		return state, false, fmt.Errorf("decode managed upstreams: %w", err)
+	}
+	for _, e := range legacy.Entries {
+		old := len(e.Headers) > 0 || len(e.OAuth) > 0 && string(e.OAuth) != "null"
+		clear(e.Headers)
+		if old {
+			return state, false, fmt.Errorf("managed upstream store was %w", ErrOldFormat)
+		}
+	}
 	if err := json.Unmarshal(plain, &state); err != nil {
 		return state, false, fmt.Errorf("decode managed upstreams: %w", err)
 	}
@@ -264,46 +294,24 @@ func open(path string, aead cipher.AEAD) (*Store, error) {
 
 func Validate(e Entry) error {
 	switch e.AuthType {
-	case "", "none", "headers", "bearer", "api_key":
-		if e.AuthType == "none" && len(e.Headers) > 0 {
+	case "", "none":
+		if len(e.HeaderNames) > 0 {
 			return fmt.Errorf("no authentication cannot include headers")
 		}
-		if e.AuthType == "bearer" || e.AuthType == "api_key" {
-			if len(e.Headers) != 1 {
-				return fmt.Errorf("credential requires exactly one header")
-			}
-			for name, value := range e.Headers {
-				if value == "" {
-					return fmt.Errorf("credential cannot be empty")
-				}
-				if e.AuthType == "bearer" && (!strings.EqualFold(name, "Authorization") || !strings.HasPrefix(value, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")) == "") {
-					return fmt.Errorf("invalid bearer credential")
-				}
-			}
+	case "bearer":
+		if len(e.HeaderNames) != 1 || !strings.EqualFold(e.HeaderNames[0], "Authorization") {
+			return fmt.Errorf("a bearer credential uses the Authorization header")
 		}
-		if e.OAuth != nil {
-			return fmt.Errorf("OAuth settings require OAuth authentication")
+	case "api_key":
+		if len(e.HeaderNames) != 1 {
+			return fmt.Errorf("an API key needs exactly one header name")
+		}
+	case "headers":
+		if len(e.HeaderNames) < 1 || len(e.HeaderNames) > 32 {
+			return fmt.Errorf("custom headers need 1 to 32 header names")
 		}
 	case "oauth":
-		if e.OAuth == nil {
-			return fmt.Errorf("OAuth settings are required")
-		}
-		for name := range e.Headers {
-			if strings.EqualFold(name, "Authorization") {
-				return fmt.Errorf("OAuth cannot be combined with an Authorization header")
-			}
-		}
-		if e.OAuth.ClientID != "" && e.OAuth.Issuer == "" {
-			return fmt.Errorf("registered OAuth clients require an issuer")
-		}
-		if e.OAuth.ClientSecret != "" && e.OAuth.ClientID == "" {
-			return fmt.Errorf("OAuth client secret requires a client ID")
-		}
-		if e.OAuth.Issuer != "" {
-			if err := ValidateEndpoint(e.OAuth.Issuer); err != nil {
-				return fmt.Errorf("invalid OAuth issuer")
-			}
-		}
+		return fmt.Errorf("OAuth connectors return with roadmap step 6")
 	default:
 		return fmt.Errorf("unsupported authentication method")
 	}
@@ -332,14 +340,21 @@ func Validate(e Entry) error {
 	if err != nil || d <= 0 {
 		return fmt.Errorf("invalid call_timeout")
 	}
-	for name, value := range e.Headers {
-		if !headerPattern.MatchString(name) || strings.ContainsAny(value, "\r\n") {
-			return fmt.Errorf("invalid HTTP header")
+	// The vault destination accepts exactly the names checked here, so a
+	// credential can be saved for every connector the catalog accepts.
+	seen := make(map[string]bool, len(e.HeaderNames))
+	for _, name := range e.HeaderNames {
+		if !headerPattern.MatchString(name) {
+			return fmt.Errorf("invalid HTTP header name")
 		}
-		switch http.CanonicalHeaderKey(name) {
-		case "Host", "Content-Length", "Connection", "Transfer-Encoding", "Upgrade", "Mcp-Session-Id":
-			return fmt.Errorf("header %s cannot be configured", name)
+		lower := strings.ToLower(name)
+		if !secret.CredentialHeader(lower) {
+			return fmt.Errorf("header %s cannot carry a credential", name)
 		}
+		if seen[lower] {
+			return fmt.Errorf("header %s is listed twice", name)
+		}
+		seen[lower] = true
 	}
 	return nil
 }
@@ -350,7 +365,7 @@ func (e Entry) Upstream() config.Upstream {
 		timeout = "30s"
 	}
 	d, _ := time.ParseDuration(timeout)
-	return config.Upstream{Name: e.Name, Transport: "http", URL: e.URL, Headers: e.Headers, CallTimeout: timeout, Timeout: d}
+	return config.Upstream{Name: e.Name, Transport: "http", URL: e.URL, CallTimeout: timeout, Timeout: d, Guarded: e.Credentialed()}
 }
 
 func (s *Store) List(owner string) []Entry {
@@ -360,15 +375,7 @@ func (s *Store) List(owner string) []Entry {
 	for _, e := range s.entries {
 		if e.Owner == owner {
 			copyEntry := e
-			if e.OAuth != nil {
-				data, _ := json.Marshal(e.OAuth)
-				copyEntry.OAuth = nil
-				_ = json.Unmarshal(data, &copyEntry.OAuth)
-			}
-			copyEntry.Headers = make(map[string]string, len(e.Headers))
-			for k, v := range e.Headers {
-				copyEntry.Headers[k] = v
-			}
+			copyEntry.HeaderNames = slices.Clone(e.HeaderNames)
 			out = append(out, copyEntry)
 		}
 	}
@@ -674,55 +681,6 @@ func (s *Store) SetProviderEnabled(owner, provider string, enabled bool) error {
 		return err
 	}
 	return nil
-}
-
-// OAuth material is encrypted with the catalog and never returned in API views.
-type OAuthSettings struct {
-	ClientID     string      `json:"client_id,omitempty"`
-	ClientSecret string      `json:"client_secret,omitempty"`
-	Issuer       string      `json:"issuer,omitempty"`
-	Scopes       []string    `json:"scopes,omitempty"`
-	Grant        *OAuthGrant `json:"grant,omitempty"`
-}
-type OAuthGrant struct {
-	ID     string        `json:"id"`
-	Config oauth2.Config `json:"config"`
-	Token  oauth2.Token  `json:"token"`
-}
-
-func ValidateEndpoint(endpoint string) error {
-	return Validate(Entry{Owner: "validation", Name: "validation", URL: endpoint})
-}
-func (s *Store) SaveOAuth(owner, id, previousGrant string, grant OAuthGrant) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for key, e := range s.entries {
-		if e.Owner != owner || e.ID != id {
-			continue
-		}
-		if e.AuthType != "oauth" || e.OAuth == nil {
-			break
-		}
-		current := ""
-		if e.OAuth.Grant != nil {
-			current = e.OAuth.Grant.ID
-		}
-		if current != previousGrant {
-			return fmt.Errorf("OAuth connection changed")
-		}
-		old := e
-		copied := *e.OAuth
-		copied.Grant = &grant
-		e.OAuth = &copied
-		e.UpdatedAt = time.Now().UTC()
-		s.entries[key] = e
-		if err := s.save(); err != nil {
-			s.entries[key] = old
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("OAuth connection no longer exists")
 }
 
 func (s *Store) ChangePassword(username string, expected, salt, hash []byte, iterations int, keepSession string) ([]string, error) {

@@ -1,6 +1,6 @@
 # Accounts and access
 
-Panel accounts give each person a private workspace with their own remote connections, private headers, and tool visibility. This page covers signing up, API keys, sessions, and limits. For upstream setup, see [Upstreams](upstreams.md).
+Panel accounts give each person a private workspace with their own remote connections, vault credentials, and tool visibility. This page covers signing up, API keys, sessions, and limits. For upstream setup, see [Upstreams](upstreams.md).
 
 ## Enable accounts
 
@@ -76,6 +76,6 @@ OAuth revocation blocks that observed access token locally at this gateway; it d
 
 ## Workspaces and storage
 
-Each registered upstream belongs to one gateway user. Operator-token access has one shared user named `local`; registered accounts use separate internal identities. With OAuth mode, the validated access-token `sub` identifies the user for both `/mcp` and `/api`; each user can register a separate endpoint and headers, even under the same upstream name. Static YAML upstreams remain available to every user.
+Each registered upstream belongs to one gateway user. Operator-token access has one shared user named `local`; registered accounts use separate internal identities. With OAuth mode, the validated access-token `sub` identifies the user for both `/mcp` and `/api`; each user can register a separate endpoint, even under the same upstream name (only connectors without authentication, since the owner vault needs panel accounts). Static YAML upstreams remain available to every user.
 
 By default, the gateway stores personal connections and the last successful tool discovery in an AES-GCM encrypted file under `/data`. Managed state and audit history sit behind separate backend interfaces so a database adapter can be added without changing runtime or authentication logic; a PostgreSQL driver and schema are not bundled for the catalog. See [the catalog storage contract](../catalog-storage.md) and [the history storage contract](../history-storage.md).

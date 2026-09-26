@@ -20,7 +20,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/policy"
-	"golang.org/x/oauth2"
 )
 
 // The owner security flows run unchanged on the PostgreSQL catalog after a
@@ -165,11 +164,8 @@ func testPostgresCatalogLossAndRollback(t *testing.T) {
 	if w := f.do(req{method: "POST", path: "/api/auth/password", user: "alice", body: `{"current_password":"` + testPassword + `","new_password":"replacement synthetic password"}`}); w.Code != 204 {
 		t.Fatal("password change", w.Code, w.Body.String())
 	}
-	oauthEntry := catalog.Entry{ID: identity.New(), Owner: alice, Name: "oauth", URL: "https://example.com/oauth-mcp", AuthType: "oauth", OAuth: &catalog.OAuthSettings{}}
-	if err := f.store.Add(oauthEntry); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.SaveOAuth(alice, oauthEntry.ID, "", catalog.OAuthGrant{ID: identity.New(), Token: oauth2.Token{AccessToken: "synthetic-access", RefreshToken: "synthetic-refresh"}}); err != nil {
+	keyed := catalog.Entry{ID: identity.New(), Owner: alice, Name: "keyed", URL: "https://example.com/keyed-mcp", AuthType: "api_key", HeaderNames: []string{"X-API-Key"}}
+	if err := f.store.Add(keyed); err != nil {
 		t.Fatal(err)
 	}
 	live := audit.Record{Owner: alice, Tool: "remote__search", ToolID: f.toolID, Upstream: "remote", Decision: "allow", Status: "ok", TS: time.Now().UTC(), ArgsSHA256: strings.Repeat("a", 64)}
@@ -177,7 +173,7 @@ func testPostgresCatalogLossAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Every change committed with its security event.
-	for _, event := range []string{"access.revoked", "account.password_changed", "connector.created", "connector.oauth_saved"} {
+	for _, event := range []string{"access.revoked", "account.password_changed", "connector.created"} {
 		var n int
 		if err := f.db.Admin.QueryRow(ctx, "SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1 AND event_type=$2", alice, event).Scan(&n); err != nil || n != 1 {
 			t.Fatal("missing security event", event, n, err)
@@ -211,7 +207,7 @@ func testPostgresCatalogLossAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.SuspendedLeases != 1 || m.LiveHistory != 1 || !slices.Equal(m.Reauthorize, []string{oauthEntry.ID}) {
+	if m.SuspendedLeases != 1 || m.LiveHistory != 1 || len(m.Reauthorize) != 0 {
 		t.Fatalf("rollback manifest: %+v", m)
 	}
 	var suspended int
@@ -234,8 +230,8 @@ func testPostgresCatalogLossAndRollback(t *testing.T) {
 		t.Fatal("rollback lost an active key")
 	}
 	for _, e := range store.List(alice) {
-		if e.ID == oauthEntry.ID && (e.OAuth == nil || e.OAuth.Grant != nil) {
-			t.Fatal("rotated OAuth grant was exported instead of requiring reauthorization")
+		if e.ID == keyed.ID && !slices.Equal(e.HeaderNames, keyed.HeaderNames) {
+			t.Fatal("rollback changed a connector's header names")
 		}
 	}
 	accounts := newAccountAuth(store, config.Config{Accounts: &config.Accounts{}})

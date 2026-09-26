@@ -14,6 +14,8 @@ Start from [the example config](../../examples/config.yaml) for a local binary o
 
 Panel registration requires `managed_upstreams.path` and `managed_upstreams.key_env` in YAML; the key must be base64-encoded 32 bytes. Remote URLs must use HTTPS, except loopback HTTP for local testing.
 
+Personal connectors store header names only. Their credentials live in the owner vault, which needs `owner_security` in accounts mode; without it, only connectors without authentication can be added. `owner_security.custody_mode` no longer exists, and a config that still sets it fails to load. A catalog written by an older build (with stored header values or upstream OAuth settings) is refused with "created by an older build; start with a new catalog"; there is no conversion.
+
 In Compose, the key comes from `MCPWARDEN_CREDENTIAL_KEY` in `.env`. Keep it stable across restarts; losing it makes saved connections unreadable.
 
 ## Stdio upstreams

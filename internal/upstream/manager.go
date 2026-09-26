@@ -29,9 +29,9 @@ type State struct {
 	Custody string `json:"custody,omitempty"`
 }
 
-// ErrGuarded reports an operation that would need server-held credentials for
-// a connector in vault custody. Discovery for such connectors needs the owner
-// setup flow (roadmap step 5); legacy refresh never runs for them.
+// ErrGuarded reports an operation that would need a connector's credential
+// outside an access window. Discovery for such connectors needs the owner
+// setup flow (roadmap step 5); background refresh never runs for them.
 var ErrGuarded = errors.New("connector credentials are in vault custody; the gateway cannot refresh it without an access window")
 
 type connection struct {
@@ -61,19 +61,19 @@ func New(cfg []config.Upstream, logger *slog.Logger, onChange func(string, []*mc
 	return m
 }
 
-// newConnection drops a guarded connector's server-held headers and OAuth
-// handler, so the manager holds nothing that could reach it with them.
+// newConnection drops any headers from a guarded connector, so the manager
+// holds nothing that could reach it.
 func newConnection(u config.Upstream) *connection {
 	c := &connection{initialDone: make(chan struct{}), cfg: u, state: State{Name: u.Name, Transport: u.Transport, Enabled: !u.Disabled}}
 	if u.Guarded {
-		c.cfg.Headers, c.cfg.OAuthHandler = nil, nil
+		c.cfg.Headers = nil
 		c.state.Custody = "vault"
 		close(c.initialDone)
 	}
 	return c
 }
 
-// runs reports whether the legacy connection loop may start.
+// runs reports whether the connection loop may start.
 func (c *connection) runs() bool { return !c.cfg.Disabled && !c.cfg.Guarded }
 func (m *Manager) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
@@ -215,7 +215,7 @@ func (m *Manager) connect(ctx context.Context, c *connection) (*mcp.ClientSessio
 		transport = compatTransport{&mcp.CommandTransport{Command: cmd, TerminateDuration: 5 * time.Second}}
 	} else {
 		base := http.DefaultTransport.(*http.Transport).Clone()
-		transport = &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, OAuthHandler: c.cfg.OAuthHandler, HTTPClient: &http.Client{Transport: compatRoundTripper{headerTransport{base, c.cfg.Headers}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1, MaxEventSize: maxSSEEventBytes}
+		transport = &mcp.StreamableClientTransport{Endpoint: c.cfg.URL, HTTPClient: &http.Client{Transport: compatRoundTripper{headerTransport{base, c.cfg.Headers}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, MaxRetries: -1, MaxEventSize: maxSSEEventBytes}
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -423,51 +423,6 @@ func (m *Manager) SetEnabled(name string, enabled bool) error {
 		_ = session.Close()
 	}
 	return nil
-}
-
-// SetGuarded moves a connector into vault custody for good: its legacy session
-// closes, its server-held headers are dropped from the manager and no later
-// generation reconnects it. Cached registry tools are kept (unhealthy), so
-// clients still see them while calls wait for an access window.
-func (m *Manager) SetGuarded(name string) error {
-	stop, err := m.Guard(name)
-	if err != nil {
-		return err
-	}
-	stop()
-	return nil
-}
-
-// Guard swaps in the guarded generation and returns a function that closes the
-// old legacy session. Callers that hold their own lock can swap under it and
-// close after releasing it; from the swap on, Call returns ErrGuarded.
-func (m *Manager) Guard(name string) (func(), error) {
-	m.mu.Lock()
-	old := m.items[name]
-	if old == nil {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("upstream %s does not exist", name)
-	}
-	if old.cfg.Guarded {
-		m.mu.Unlock()
-		return func() {}, nil
-	}
-	cfg := old.cfg
-	cfg.Guarded = true
-	m.items[name] = newConnection(cfg)
-	m.onChange(name, nil, false)
-	m.mu.Unlock()
-	return func() {
-		if old.cancel != nil {
-			old.cancel()
-		}
-		old.mu.RLock()
-		session := old.session
-		old.mu.RUnlock()
-		if session != nil {
-			_ = session.Close()
-		}
-	}, nil
 }
 
 // stdioInherited lists the only gateway environment variables a stdio upstream

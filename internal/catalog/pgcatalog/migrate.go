@@ -70,8 +70,8 @@ type Counts struct {
 	Providers  int `json:"providers"`
 }
 
-// RollbackManifest describes a rollback. Reauthorize lists connectors whose
-// OAuth grant changed after cutover; their grants are not exported.
+// RollbackManifest describes a rollback. Reauthorize stays empty: connectors
+// no longer hold upstream OAuth grants.
 type RollbackManifest struct {
 	RollbackID      string    `json:"rollback_id"`
 	ImportID        string    `json:"import_id"`

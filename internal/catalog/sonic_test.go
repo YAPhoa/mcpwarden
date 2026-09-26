@@ -21,7 +21,7 @@ func TestSonicCatalogWireCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 22, 12, 1, 2, 123456789, time.UTC)
-	entry := Entry{ID: identity.New(), Owner: "alice", Name: "remote", URL: "https://example.test/mcp", Headers: map[string]string{"X-Key": "synthetic <&> credential"}, Lifecycle: Lifecycle{CreatedAt: at, UpdatedAt: at}}
+	entry := Entry{ID: identity.New(), Owner: "alice", Name: "remote", URL: "https://example.test/mcp", AuthType: "headers", HeaderNames: []string{"X-Key", "X-Tenant"}, Lifecycle: Lifecycle{CreatedAt: at, UpdatedAt: at}}
 	key := keyFor("alice", "remote")
 	s.entries[key] = entry
 	s.discovery[key] = Discovery{UpdatedAt: at, Tools: []*mcp.Tool{{Name: "echo", Description: "Unicode 😀 <&>", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"n": map[string]any{"type": "integer", "maximum": 9007199254740991}}}, OutputSchema: map[string]any{"type": "object"}}}}

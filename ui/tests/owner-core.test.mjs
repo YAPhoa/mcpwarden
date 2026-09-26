@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {webcrypto, randomBytes} from 'node:crypto';
-import {OwnerClient, OwnerError, b64url, callsLabel, credentialSaveEffect, custodyCopy, destinationDigest, destinationFor, durationLabel, formatRecoveryKey, headerBundle,
+import {OwnerClient, OwnerError, b64url, callsLabel, credentialSaveEffect, destinationDigest, destinationFor, durationLabel, formatRecoveryKey, headerBundle,
   headerValueProblem, jcs, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, reviewedScope, windowPhase} from '../static/security/owner-core.mjs';
 
 globalThis.crypto ??= webcrypto;
@@ -158,17 +158,12 @@ test('owner client discards responses that arrive after reset', async () => {
   await assert.rejects(failing.request('GET', '/api/vault/state'), {code: 'discarded'});
 });
 
-test('console copy follows the gateway custody mode', async () => {
+test('console copy describes vault-only custody', async () => {
   const {readFileSync} = await import('node:fs');
   const html = readFileSync(new URL('../static/index.html', import.meta.url), 'utf8');
-  const legacy = custodyCopy('legacy_managed'), release = custodyCopy('client_release');
-  assert.deepEqual(Object.keys(legacy).sort(), Object.keys(release).sort());
-  assert.deepEqual(custodyCopy(undefined), legacy);
-  // The page's static text is the legacy copy, so nothing changes before the state loads.
-  for (const [id, text] of Object.entries(legacy)) assert.ok(html.includes(`id="${id}">${text}<`), id);
-  assert.match(legacy['vault-remove-effect'], /stays locked until you delete it/);
-  assert.match(release['vault-scope-note'], /only inside an access window/);
-  assert.match(release['vault-remove-effect'], /stay locked until you delete the connector/);
-  assert.match(credentialSaveEffect('client_release', false), /need an access window.*stops using it/);
-  assert.match(credentialSaveEffect('legacy_managed', true), /^Replacing .*not changed or removed\.$/);
+  assert.match(html, /id="vault-scope-note">Tool calls to a connector with credentials run only inside an access window/);
+  assert.match(html, /id="vault-remove-effect">[^<]*stay locked until you delete the connector/);
+  assert.doesNotMatch(html, /gateway-managed|guarded execution is|custody_mode|upstream-oauth|oauth-client/);
+  assert.match(credentialSaveEffect(false), /^This stores the credential.*need an access window\.$/);
+  assert.match(credentialSaveEffect(true), /^Replacing starts a new credential version/);
 });

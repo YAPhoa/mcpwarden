@@ -49,9 +49,9 @@ test('never discovered, failure, stale cache, and pending refresh remain distinc
 });
 test('untrusted names, descriptions and saved header names are escaped', async () => {
   const name = '<img src=x onerror=alert(1)>';
-  const ui = await app({providers: [provider({name})], connections: [{name, url: 'https://example.test/mcp', header_names: ['<script>'], call_timeout: '30s'}], tools: [{name, upstream: name, description: '<script>alert(1)</script>', allowed: true, healthy: true, visible: true}]});
+  const ui = await app({providers: [provider({name})], connections: [{name, url: 'https://example.test/mcp', header_names: ['<script>'], auth_type: 'headers', custody: 'vault', call_timeout: '30s'}], tools: [{name, upstream: name, description: '<script>alert(1)</script>', allowed: true, healthy: true, visible: true}]});
   for (const id of ['upstreams', 'upstream-details', 'tools']) assert.doesNotMatch(ui.node(id).innerHTML, /<script>|<img/);
-  assert.match(ui.node('upstream-details').innerHTML, /Stored/);
+  assert.match(ui.node('upstream-details').innerHTML, /In vault/);
   assert.doesNotMatch(ui.node('upstream-details').innerHTML, /type="password"/);
 });
 test('failed requests retain snapshot and disable mutations without reporting zero', async () => {
@@ -193,15 +193,42 @@ test('provider switch is independent of tool preferences and disabled is not a f
  assert.deepEqual(JSON.parse(req.options.body),{enabled:true});
 });
 
-test('OAuth connections expose consent action and no stored credential values',async()=>{
- const ui=await app({providers:[provider({healthy:false})],connections:[{name:'docs',header_names:[],auth_type:'oauth',oauth_connected:false}],hash:'#/upstreams/docs'});
- assert.equal(ui.node('connect-upstream-account').hidden,false);
- assert.equal(ui.node('connect-upstream-account').textContent,'Connect account');
- assert.match(ui.node('upstreams').innerHTML,/Authorization required/);
- ui.run("connections.get('docs').oauth_connected=true; render()");
- assert.equal(ui.node('connect-upstream-account').textContent,'Reconnect account');
+test('vault connections show header names and link to the vault, never values',async()=>{
+ const ui=await app({providers:[provider({healthy:false,custody:'vault'})],connections:[{name:'docs',url:'https://example.test/mcp',header_names:['Authorization'],auth_type:'bearer',custody:'vault',call_timeout:'30s'}],hash:'#/upstreams/docs'});
+ const html=ui.node('upstream-details').innerHTML;
+ assert.match(html,/Bearer token/);
+ assert.match(html,/Authorization<\/span><span>In vault/);
+ assert.match(html,/href="\/vault\/credentials"/);
+ assert.doesNotMatch(html,/OAuth|Connect account|type="password"/);
 });
 
+async function submitConnection(ui, authType, headerName) {
+ ui.node('upstream-url').value='https://example.test/mcp'; ui.node('upstream-timeout').value='30s'; ui.node('upstream-name').value='docs';
+ ui.node('upstream-auth-type').value=authType; ui.node('auth-header').value=headerName||'';
+ await ui.node('upstream-form').handlers.submit({preventDefault(){}});
+ const req=ui.requests.find(r=>r.path==='/api/connections'&&r.options.method==='POST');
+ return req&&JSON.parse(req.options.body);
+}
+test('adding a connection sends header names only',async()=>{
+ const session={mode:'account',username:'alice',subject:'account:alice',vault:true};
+ const keyed=await submitConnection(await app({session}),'api_key','X-API-Key');
+ assert.deepEqual(keyed.header_names,['X-API-Key']);
+ assert.equal(keyed.auth_type,'api_key');
+ assert.ok(!('headers' in keyed)&&!('oauth' in keyed));
+ const bearer=await submitConnection(await app({session}),'bearer');
+ assert.deepEqual(bearer.header_names,['Authorization']);
+ const open=await submitConnection(await app({session}),'none');
+ assert.deepEqual(open.header_names,[]);
+});
+test('without the owner vault only no-auth connections can be added',async()=>{
+ const ui=await app();
+ ui.run('renderAuthFields()');
+ assert.equal(ui.node('auth-vault-unavailable').hidden,false);
+ assert.equal(ui.node('upstream-auth-type').value,'none');
+ const withVault=await app({session:{mode:'account',username:'alice',subject:'account:alice',vault:true}});
+ withVault.run('renderAuthFields()');
+ assert.equal(withVault.node('auth-vault-unavailable').hidden,true);
+});
 
 test('upstream summary distinguishes provider state from saved tool choices', async () => {
  const ui = await app({providers:[provider(),provider({name:'paused',enabled:false})],tools:[{name:'docs__a',upstream:'docs',visible:true},{name:'docs__b',upstream:'docs',visible:false}]});

@@ -492,3 +492,34 @@ beyond counts and IDs. The live file backend stays unchanged and the default.
 - **Status reporting.** Providers and tools report `custody: "vault"`. Such a
   connector is not `healthy` (it has no session), counts as ready while enabled,
   and its cached tools leave `tools/list` while it is disabled.
+
+## 2026-09-26 — Vault-only custody for personal credentials
+
+Yohanes decided on 2026-09-25 that there is no legacy deployment to preserve,
+and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
+
+- **Header names, never values.** A personal connector stores only the header
+  names its credential uses: `bearer` is exactly `Authorization`, `api_key`
+  one name, `headers` 1 to 32 unique names, `none` none. The catalog checks
+  names with the vault destination's own rule (`secret.CredentialHeader`), so
+  every connector the catalog accepts can receive a credential.
+- **Vault custody from creation.** A credentialed connector is guarded when it
+  is created. The manager never dials it, refresh returns 409
+  (`upstream.ErrGuarded`) and every call needs an owner-activated access
+  window; with no credential, or after deletion, it stays locked. The
+  post-admission re-check and `Manager.Guard` existed only for conversion and
+  are gone; the proxy still maps `ErrGuarded` to `MCPWARDEN_LEASE_REQUIRED`.
+- **No custody switch.** `owner_security.custody_mode` is removed and a config
+  that sets it fails to load. Guarded execution is installed whenever the
+  owner vault runs. Without it only `none` connectors can be created.
+- **Upstream OAuth waits for step 6.** The SDK `OAuthHandler` wiring, the
+  callback route and the per-connector grant are removed; `auth_type: oauth`
+  is refused until OAuth grants live in the vault.
+- **No conversion.** Catalog data with stored header values, OAuth settings or
+  a PostgreSQL `grant_id` is refused with "created by an older build; start
+  with a new catalog". The rollback manifest's reauthorization list is always
+  empty.
+- **Browser flows.** Until setup discovery (step 5), the owner-flow gateway is
+  built with the `flowtest` tag, which adds a route that stores a given tool
+  list as a vault connector's cached discovery without dialing it. Release
+  builds do not include it.
