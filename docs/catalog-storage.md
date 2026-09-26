@@ -53,7 +53,7 @@ JSON or unencrypted text columns are not acceptable for secret-bearing fields.
 
 ## PostgreSQL backend
 
-`pgcatalog.Repository` implements this contract on PostgreSQL schema v4 and is
+`pgcatalog.Repository` implements this contract on PostgreSQL schema v5 and is
 selected with `managed_upstreams.backend: postgres`, which requires
 `owner_security`. The default stays `file`. Moving data between the two is the
 [catalog migration](catalog-migration.md).

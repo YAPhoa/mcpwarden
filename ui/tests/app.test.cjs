@@ -498,3 +498,11 @@ test('credentialed connections check the endpoint the gateway will compare',asyn
  await open.node('upstream-form').handlers.submit({preventDefault(){}});
  assert.ok(open.requests.some(r=>r.path==='/api/connections'&&r.options.method==='POST'));
 });
+test('capped history shows 25,000+ and says which calls the timings cover',async()=>{
+ const ui=await app();
+ assert.equal(ui.run(`callCount({total:25000,total_capped:true},'matching call')`),'25,000+ matching calls');
+ assert.equal(ui.run(`callCount({total:1,total_capped:false},'matching call')`),'1 matching call');
+ const perf=`{timed_calls:3,upstream:{mean_us:1000},gateway:{mean_us:1000},handler:{p95_upper_us:2000}}`;
+ assert.match(ui.run(`performanceSummary(${perf},true)`),/timings from the latest 25,000 calls/);
+ assert.doesNotMatch(ui.run(`performanceSummary(${perf},false)`),/latest 25,000/);
+});

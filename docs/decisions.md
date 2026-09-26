@@ -529,3 +529,34 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   built with the `flowtest` tag, which adds a route that stores a given tool
   list as a vault connector's cached discovery without dialing it. Release
   builds do not include it.
+
+## 2026-09-26 — Store hardening: cancellation, heartbeat, bounded history
+
+- The executor session runs statements on a store context detached from the
+  caller (5 s for owner transactions and history writes, 30 s for the startup
+  load and custody load). pgx closes a session whose statement context ends, so
+  a client disconnect used to stop the gateway. The caller's context is checked
+  before COMMIT instead: a caller that has gone gets its context error, nothing
+  is committed and `Lost()` stays open. Revoke, deny and lock execution detach
+  from the request, so a closed tab never loses them.
+- The heartbeat pings only when the executor gate is idle. A busy gate is
+  bounded by the holder's store deadline, so contention is never read as loss.
+- History pages run on a second, read-only session with its own mutex, one
+  REPEATABLE READ transaction per page; after an error it reopens at most once a
+  second. A failed page never stops the executor.
+- Each page reads at most the newest 25,000 matching events (the page limit),
+  reports `total_capped`, and refuses pages beyond the window. Time ranges use
+  history time in both readers.
+- Deviation from the plan's index list, found by the scale test: with plain
+  per-filter indexes over every event, pages at 1,000,000 calls took 520 to
+  870 ms, because half the events are admissions of finished calls that each
+  page walked and probed. The filter indexes are now partial on
+  `event_type IS NULL OR event_type <> 'tool.dispatch.admitted'` (settled
+  events), and open admissions come from `history_open`, merged in history
+  order. The page rows, count and timing buckets come from one statement over a
+  materialized window, read once. The same cases now take 11 to 181 ms. The
+  planned `visible` anti-join is gone; `history_open` is the source of truth
+  for which admissions are shown, and a test checks the backfill matches live
+  writes.
+- Open MCP session records are ended at startup, one owner transaction per
+  owner with `access.ended` events, as the file store does when it opens.

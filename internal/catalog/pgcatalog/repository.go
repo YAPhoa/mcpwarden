@@ -28,9 +28,10 @@ type Coordinator interface {
 	BootID() string
 }
 
-// Loader reads committed rows on the executor session.
+// Loader reads committed rows on the executor session, under the startup
+// deadline.
 type Loader interface {
-	Run(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
+	Load(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
 }
 
 var (
@@ -83,7 +84,7 @@ func New(encodedKey string, loader Loader, onFail func()) (*Repository, error) {
 // catalog state to be active (cut over and not rolled back).
 func (r *Repository) Load(ctx context.Context) error {
 	var st *state
-	err := r.loader.Run(ctx, func(ctx context.Context, db catalogdb.DB) error {
+	err := r.loader.Load(ctx, func(ctx context.Context, db catalogdb.DB) error {
 		cs, ok, err := catalogdb.ReadState(ctx, db, false)
 		if err != nil {
 			return err
@@ -931,6 +932,54 @@ func (r *Repository) UpdateAccess(owner, id, name string, end bool) error {
 		a.UpdatedAt = c.now
 		return r.putAccess(c, st, a, event)
 	})
+}
+
+// EndStaleSessions ends every open MCP session record, one owner transaction
+// per affected owner with an access.ended event each. No MCP session survives
+// a restart, so it runs after Load and Attach and before the listener opens,
+// as the file store does when it opens.
+func (r *Repository) EndStaleSessions() error {
+	st, done := r.view()
+	open := map[string][]string{}
+	for id, a := range st.access {
+		if a.Kind == "mcp" && a.EndedAt.IsZero() {
+			open[a.Owner] = append(open[a.Owner], id)
+		}
+	}
+	done()
+	owners := make([]string, 0, len(open))
+	for owner := range open {
+		owners = append(owners, owner)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		ids := open[owner]
+		sort.Strings(ids)
+		err := r.apply(owner, false, func(c *change, st *state) (func(), error) {
+			var publish []func()
+			for _, id := range ids {
+				a, ok := st.access[id]
+				if !ok || a.Owner != owner || !a.EndedAt.IsZero() {
+					continue
+				}
+				a.EndedAt, a.UpdatedAt = c.now, c.now
+				p, err := r.putAccess(c, st, a, "access.ended")
+				if err != nil {
+					return nil, err
+				}
+				publish = append(publish, p)
+			}
+			return func() {
+				for _, p := range publish {
+					p()
+				}
+			}, nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Repository) TouchAccess(owner, id string) error {

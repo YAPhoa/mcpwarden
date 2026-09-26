@@ -76,14 +76,18 @@ client-release catalog schema.
 The reviewed first migration is
 [`001_leases.sql`](../../internal/lease/postgres/migrations/001_leases.sql).
 `cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql` and
-`003_owner_api.sql` and `004_catalog.sql`, verifying every SHA-256 hash in an
+`003_owner_api.sql`, `004_catalog.sql` and `005_history_index.sql`, verifying every SHA-256 hash in an
 ordered ledger. Earlier migrations are unchanged. Migration 003 adds per-owner
 approval policies (revision CAS enforced by a trigger; the runtime role may
 insert and update, not delete) and the owner-route audit event types. Migration
 004 adds the catalog, catalog state and history tables and the catalog event
 types. The runtime role may insert and update catalog rows, replace discovery and
 visibility rows, and insert history. It cannot delete catalog rows, change
-catalog state, or update or delete history; startup checks this.
+catalog state, or update or delete history; startup checks this. Migration 005
+adds the history filter indexes, `history_tools` (the latest name of each tool)
+and `history_open` (admissions without a stored completion), backfilled from
+history. The runtime role may insert and update `history_tools` and insert and
+delete `history_open`, never truncate either; `history_events` stays insert-only.
 There is no destructive down migration. Rerunning the same version is supported;
 checksum drift or a newer/unexpected ledger fails closed.
 

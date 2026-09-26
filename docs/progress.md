@@ -1462,8 +1462,8 @@ endpoint as typed against the vault destination rule (`vaultEndpoint` in
 `ui/static/app.js`) and shows the gateway's wording instead of a bare HTTP
 400; the most likely case was an endpoint without a path. A differential run
 over 46,080 generated endpoints found no endpoint the gateway accepts and the
-panel refuses; the panel lets only HTTPS IPv6 loopback literals through to the
-gateway's refusal. The note shown when credentials are unavailable now fits
+panel refuses; the panel leaves every HTTPS IPv6 literal to the gateway, which
+refuses non-public ones (loopback, ULA, link-local and so on). The note shown when credentials are unavailable now fits
 both the operator workspace and gateways without the vault. Stale workspace
 wording is fixed in the API guide, encrypted runtime and roadmap. A full race
 run once hit `ErrLocked` in `TestImportAfterRollbackRequiresTheExport`:
@@ -1473,3 +1473,28 @@ lock to clear after stopping a gateway (8 repeated runs clean). `gofmt`, tidy,
 `integrity.py`, build, vet (with and without `flowtest`), the `CGO_ENABLED=0`
 build, `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (69) and
 the Chromium owner flows passed.
+
+## 2026-09-26 — Store hardening (removal plan PR 2)
+
+The PostgreSQL executor no longer treats a caller's cancellation or gate
+contention as session loss. Statements run on a detached store context, the
+caller is checked before COMMIT, and revoke, deny and lock execution detach from
+the request. The heartbeat pings only an idle gate. History pages run on a
+read-only session and read at most the newest 25,000 matches, with per-filter
+predicates, history-time ranges in both readers, `total_capped`, partial
+per-filter indexes and the new `history_tools` and `history_open` tables
+(migration 005). Open MCP session records are ended at startup. The history page
+explains which time a range uses and shows "25,000+" with the window's timings.
+New tests: `TestCancelledCallerCommitsNothing`, `TestCancelledViewAndRevoke`,
+`TestLongHolderIsNotSessionLoss` (both store fixes mutation-checked),
+`TestHistoryWindow`, `TestHistoryPlansUseFilterIndexes` (generic plans, fails on
+a catch-all), `TestHistoryRangesUseHistoryTime`, `TestHistoryToolListForwardOnly`,
+`TestHistoryOpenCalls`, `TestHistoryBackfillMatchesLiveWrites`,
+`TestHistorySessionFailureAndConcurrency`, `TestStaleMCPSessionsEndAtStartup`,
+`TestCappedHistoryDiffersFromJSONL`, the repeated import after an abort, and
+`TestHistoryScale` (build tag `historyscale`, in CI without the race detector):
+at 1,000,000 calls every page took 11 to 181 ms locally, and an admission during
+a page took 4 ms. `gofmt`, tidy, `integrity.py`, build, vet (plain, `flowtest`,
+`historyscale`), the `CGO_ENABLED=0` build, `go test -race -count=1 ./...` with
+PostgreSQL 16, `npm test` (70) and the Chromium owner flows passed. The R3-T1
+wording nit from PR 1 is fixed above.

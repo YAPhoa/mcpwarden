@@ -26,9 +26,12 @@ var ownerMigration string
 //go:embed migrations/004_catalog.sql
 var catalogMigration string
 
-var migrations = []string{migration, vaultMigration, ownerMigration, catalogMigration}
+//go:embed migrations/005_history_index.sql
+var historyMigration string
 
-const SchemaVersion = 4
+var migrations = []string{migration, vaultMigration, ownerMigration, catalogMigration, historyMigration}
+
+const SchemaVersion = 5
 
 const executorLock int64 = 0x4d43505753454331 // MCPWSEC1, shared by migration and executor
 
@@ -158,6 +161,10 @@ func Migrate(ctx context.Context, conn *pgx.Conn, runtimeRole string) error {
 		"GRANT INSERT, UPDATE ON mcpwarden_security.catalog_accounts,mcpwarden_security.catalog_access,mcpwarden_security.catalog_connectors TO " + role,
 		"GRANT INSERT, UPDATE, DELETE ON mcpwarden_security.catalog_discovery,mcpwarden_security.catalog_visibility TO " + role,
 		"GRANT INSERT ON mcpwarden_security.history_events TO " + role,
+		// Each history insert maintains the tool list and the open calls in
+		// the same transaction; history_events stays insert-only.
+		"GRANT INSERT, UPDATE ON mcpwarden_security.history_tools TO " + role,
+		"GRANT INSERT, DELETE ON mcpwarden_security.history_open TO " + role,
 	} {
 		if _, err = tx.Exec(ctx, sql); err != nil {
 			return ErrMigration

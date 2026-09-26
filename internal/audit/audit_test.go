@@ -238,10 +238,13 @@ func TestHistoryFiltersKeepOwnerBoundaries(t *testing.T) {
 	defer w.Close()
 	base := time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)
 	for _, r := range []Record{
-		{Owner: "alice", ToolID: "a", Tool: "alpha", Status: "ok", TS: base},
-		{Owner: "alice", ToolID: "a", Tool: "alpha", Status: "timeout", TS: base.Add(time.Hour)},
-		{Owner: "alice", ToolID: "b", Tool: "beta", Status: "timeout", TS: base.Add(2 * time.Hour)},
-		{Owner: "bob", ToolID: "private", Tool: "secret", Status: "timeout", TS: base.Add(time.Hour)},
+		{Owner: "alice", ToolID: "a", Tool: "alpha", Status: "ok", TS: base, CompletedAt: base},
+		{Owner: "alice", ToolID: "a", Tool: "alpha", Status: "timeout", TS: base.Add(time.Hour), CompletedAt: base.Add(time.Hour)},
+		{Owner: "alice", ToolID: "b", Tool: "beta", Status: "timeout", TS: base.Add(2 * time.Hour), CompletedAt: base.Add(2 * time.Hour)},
+		{Owner: "bob", ToolID: "private", Tool: "secret", Status: "timeout", TS: base.Add(time.Hour), CompletedAt: base.Add(time.Hour)},
+		// Time ranges match history time: this call started inside the
+		// range but finished after it.
+		{Owner: "alice", ToolID: "a", Tool: "alpha", Status: "timeout", TS: base.Add(90 * time.Minute), CompletedAt: base.Add(3 * time.Hour)},
 	} {
 		if err := w.Write(r); err != nil {
 			t.Fatal(err)

@@ -361,7 +361,8 @@ func empty(ctx context.Context, db catalogdb.DB) (bool, error) {
 	err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM mcpwarden_security.catalog_accounts) OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_access)
         OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_connectors) OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_legacy_tombstones)
         OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_discovery) OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_visibility)
-        OR EXISTS (SELECT 1 FROM mcpwarden_security.history_events)`).Scan(&any)
+        OR EXISTS (SELECT 1 FROM mcpwarden_security.history_events) OR EXISTS (SELECT 1 FROM mcpwarden_security.history_tools)
+        OR EXISTS (SELECT 1 FROM mcpwarden_security.history_open)`).Scan(&any)
 	if err != nil {
 		return false, catalogdb.ErrStorage
 	}
@@ -950,7 +951,7 @@ func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 		return err
 	}
 	err = inTx(ctx, conn, func(tx pgx.Tx) error {
-		for _, table := range []string{"history_events", "catalog_discovery", "catalog_visibility", "catalog_legacy_tombstones", "catalog_connectors", "catalog_access", "catalog_accounts"} {
+		for _, table := range []string{"history_events", "history_tools", "history_open", "catalog_discovery", "catalog_visibility", "catalog_legacy_tombstones", "catalog_connectors", "catalog_access", "catalog_accounts"} {
 			if _, err := tx.Exec(ctx, "DELETE FROM mcpwarden_security."+table); err != nil {
 				return catalogdb.ErrStorage
 			}

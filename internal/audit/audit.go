@@ -280,7 +280,7 @@ func (w *Writer) queryHistory(q HistoryFilter, stats *Performance) ([]Record, in
 			refs[r.ToolID] = ToolRef{ID: r.ToolID, Name: r.Tool, Upstream: r.Upstream}
 			latest[r.ToolID] = r
 		}
-		if (q.ActorAccessID != "" && r.ActorAccessID != q.ActorAccessID) || (q.Upstream != "" && !((q.Upstream == "__gateway__" && r.Upstream == "") || q.Upstream == r.Upstream)) || (q.ToolID != "" && r.ToolID != q.ToolID) || (q.Status != "" && r.Status != q.Status) || (!q.From.IsZero() && r.TS.Before(q.From)) || (!q.To.IsZero() && !r.TS.Before(q.To)) {
+		if (q.ActorAccessID != "" && r.ActorAccessID != q.ActorAccessID) || (q.Upstream != "" && !((q.Upstream == "__gateway__" && r.Upstream == "") || q.Upstream == r.Upstream)) || (q.ToolID != "" && r.ToolID != q.ToolID) || (q.Status != "" && r.Status != q.Status) || (!q.From.IsZero() && HistoryTime(r).Before(q.From)) || (!q.To.IsZero() && !HistoryTime(r).Before(q.To)) {
 			return
 		}
 		if stats != nil {

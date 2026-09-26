@@ -58,6 +58,10 @@ func openPostgresCatalog(ctx context.Context, cfg config.Config, pol *policy.Pol
 		return nil, errors.New("PostgreSQL catalog could not be loaded")
 	}
 	repo.Attach(security.service)
+	if err := repo.EndStaleSessions(); err != nil {
+		security.close()
+		return nil, errors.New("PostgreSQL catalog could not end stale MCP sessions")
+	}
 	go func() {
 		select {
 		case <-db.Lost():

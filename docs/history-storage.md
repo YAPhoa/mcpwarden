@@ -10,7 +10,7 @@ Legacy v1 rows represent completed invocations, including failures and denials:
 
 - `schema_version`: 1; readers also support v0 and the current v2 below.
 - `event_id`: unique identity assigned by `audit.NewRecord` before persistence.
-- `ts`: UTC call start; From/Until filters continue to use this field.
+- `ts`: UTC call start, shown as the call's time. From/Until filters use history time (below), not this field.
 - `completed_at`: UTC completion before persistence and response encoding.
 - `owner`, `tool_id`, `upstream_id`: stable identities. Gateway management tools
   use their reserved names as tool IDs and have no upstream ID.
@@ -56,7 +56,9 @@ unique event IDs and one admission/completion per invocation. This backend remai
 single-writer; an indexed adapter is needed for large history.
 
 History sorts by `(completed_at DESC, event_id DESC)`, with lexical event-ID ordering
-as the tie-breaker, independent of arrival/import order. Clock adjustments can affect
+as the tie-breaker, independent of arrival/import order. This is history time:
+completion, or `occurred_at` for an unresolved admission. From/Until filters use it
+too, in both readers, so a range ends where an index scan in history order can start. Clock adjustments can affect
 completion order; this is not causal ordering. Page-based pagination can shift during
 new writes. Tool options use the latest snapshot in this order for the owner, across
 all their records. Performance summaries cover all matches, not just the current page.
@@ -120,5 +122,21 @@ byte order, tool options and timing summaries. Latency summaries are rebuilt
 from stored bucket counts, sums and maxima. Their means are sum/count, which can
 differ from the reader's streaming mean in the last floating-point digits.
 `TestImportPreservesCatalogAndHistory` compares both readers on the same data.
+
+Pages run on a separate read-only session (`mcpwarden-history`, 5 s statement
+timeout), one REPEATABLE READ transaction per page, so a slow page never holds
+the executor and a failed page never stops the gateway. Each page reads at most
+the newest 25,000 matching events, which is the page limit (1,000 pages of 25);
+a page ending beyond that is refused. The total and the timing summaries cover
+the same window, and the API adds `total_capped: true` when more calls match.
+Older calls stay reachable through the time range. Each filter that is set adds
+one bound predicate, with no catch-alls, and every single filter has an index in
+history order. Those indexes hold settled events only (everything but
+admissions); open admissions come from `history_open`, which each insert keeps
+equal to the admissions without a stored completion, so a page never walks the
+admissions of finished calls. The tool filter reads `history_tools`, which each
+insert moves forward only. At 1,000,000 calls every measured page returns within
+500 ms (`TestHistoryScale`, build tag `historyscale`). Above 25,000 matches the
+JSONL reader still counts everything (`TestCappedHistoryDiffersFromJSONL`).
 A rollback writes the imported bytes back followed by the live rows, so the file
 backend continues the same history.

@@ -12,14 +12,21 @@ import (
 )
 
 // History is the indexed audit.Store. Each write is its own committed
-// transaction, so a successful admission is durable before dispatch. A failed
-// or uncertain write is returned; the caller never retries the tool, and a
-// commit failure also stops the executor session.
-type History struct{ db Loader }
+// transaction on the executor session, so a successful admission is durable
+// before dispatch. A failed or uncertain write is returned; the caller never
+// retries the tool, and a commit failure also stops the executor session.
+// Pages read on a separate read-only session, so they never hold the executor.
+type History struct{ db HistoryDB }
+
+// HistoryDB writes on the executor session and reads on the history session.
+type HistoryDB interface {
+	Run(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
+	ReadHistory(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
+}
 
 var _ audit.Store = (*History)(nil)
 
-func NewHistory(db Loader) *History { return &History{db: db} }
+func NewHistory(db HistoryDB) *History { return &History{db: db} }
 
 func (h *History) Write(r audit.Record) error {
 	r, raw, err := audit.Encode(r)
@@ -69,7 +76,7 @@ func decodeHistory(row catalogdb.HistoryRow) (audit.Record, error) {
 
 func (h *History) QueryHistoryPerformance(q audit.HistoryFilter) ([]audit.Record, int, []audit.ToolRef, audit.Performance, error) {
 	var stats audit.Performance
-	if q.Page < 1 || q.Page > 1000 || q.Size < 1 || q.Size > 100 {
+	if q.Page < 1 || q.Size < 1 || q.Page*q.Size > catalogdb.HistoryWindow {
 		return nil, 0, nil, stats, fmt.Errorf("invalid pagination")
 	}
 	query := catalogdb.HistoryQuery{Owner: q.Owner, ToolID: q.ToolID, Status: q.Status, Upstream: q.Upstream, ActorAccessID: q.ActorAccessID,
@@ -81,9 +88,7 @@ func (h *History) QueryHistoryPerformance(q audit.HistoryFilter) ([]audit.Record
 		query.ToNano = q.To.UnixNano()
 	}
 	var result catalogdb.HistoryResult
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	err := h.db.Run(ctx, func(ctx context.Context, db catalogdb.DB) error {
+	err := h.db.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
 		var err error
 		result, err = catalogdb.QueryHistory(ctx, db, query)
 		return err
@@ -109,7 +114,7 @@ func (h *History) QueryHistoryPerformance(q audit.HistoryFilter) ([]audit.Record
 		}
 		return tools[i].Name < tools[j].Name
 	})
-	stats.TimedCalls, stats.FailedCalls = result.TimedCalls, result.FailedCalls
+	stats.TimedCalls, stats.FailedCalls, stats.Capped = result.TimedCalls, result.FailedCalls, result.Capped
 	stats.Handler = audit.LatencyFromBuckets(result.Handler.Count, result.Handler.Sum, result.Handler.Max, result.Handler.Buckets)
 	stats.Gateway = audit.LatencyFromBuckets(result.Gateway.Count, result.Gateway.Sum, result.Gateway.Max, result.Gateway.Buckets)
 	stats.Upstream = audit.LatencyFromBuckets(result.Forward.Count, result.Forward.Sum, result.Forward.Max, result.Forward.Buckets)
