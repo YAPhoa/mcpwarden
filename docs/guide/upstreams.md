@@ -17,7 +17,7 @@ The connection stores header names only, never values. For any method other than
 - Every tool call needs an access window that you start; without one the call fails with `MCPWARDEN_LEASE_REQUIRED`.
 - Tool discovery for them arrives with setup discovery (roadmap step 5). Until then a new credentialed connector has no tools and cannot be used.
 
-Credentialed methods need the owner vault (`owner_security`). Without it, the panel disables them and the API accepts only no authentication. Upstream OAuth is not available; it returns under the vault in roadmap step 6.
+Credentialed methods need the owner vault (`owner_security`) and a signed-in local account; the shared operator workspace gets no authentication only. Without them, the panel disables these methods and the API accepts only no authentication. The endpoint must be public HTTPS with a lowercase host and a path, or HTTP on this machine for development. A hostname that resolves to a private address passes this check but fails when a call inside a window dials it. Upstream OAuth is not available; it returns under the vault in roadmap step 6.
 
 Remote URLs must use HTTPS, except loopback HTTP for local testing. Upstream credentials are independent of gateway sign-in and downstream client tokens. Changing a connection's authentication method or header names is not yet supported; remove the connection and add it again.
 

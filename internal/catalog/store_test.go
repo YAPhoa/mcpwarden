@@ -230,6 +230,38 @@ func TestCatalogHeaderNamesMatchVaultDestinations(t *testing.T) {
 	}
 }
 
+// A credentialed connector's endpoint must be one the vault destination the
+// console builds accepts; a no-auth connector keeps the looser URL rule.
+func TestCatalogEndpointsMatchVaultDestinations(t *testing.T) {
+	for endpoint, want := range map[string]bool{
+		"https://example.com/mcp": true, "https://example.com:8443/mcp": true,
+		"http://localhost:8080/mcp": true, "http://127.0.0.1:8080/mcp": true, "http://[::1]:8080/mcp": true,
+		"https://Example.com/mcp": false, "https://example.com": false, "https://example.com./mcp": false,
+		"https://example.com/./mcp": false, "https://example.com/a%2Fb": false, "https://example.com:0443/mcp": false,
+		"https://10.0.0.5/mcp": false, "https://[::1]/mcp": false,
+	} {
+		e := Entry{Owner: "alice", Name: "remote", URL: endpoint, AuthType: "bearer", HeaderNames: []string{"Authorization"}}
+		network, prefixes := "public", []string{}
+		if strings.HasPrefix(endpoint, "http:") {
+			network, prefixes = "private", []string{"127.0.0.0/8", "::1/128"}
+			if strings.Contains(endpoint, "127.0.0.1") {
+				prefixes = []string{"127.0.0.0/8"}
+			} else if strings.Contains(endpoint, "[::1]") {
+				prefixes = []string{"::1/128"}
+			}
+		}
+		d := secret.Destination{Schema: "mcpwarden.destination.v1", Endpoint: endpoint, HeaderNames: []string{"authorization"}, Network: network, PrivatePrefixes: prefixes, AllowLoopbackHTTP: network == "private"}
+		_, derr := d.Digest()
+		if got := Validate(e) == nil; got != want || (derr == nil) != want {
+			t.Errorf("%s: catalog %v, destination %v, want %v", endpoint, got, derr == nil, want)
+		}
+		e.AuthType, e.HeaderNames = "none", nil
+		if strings.HasPrefix(endpoint, "https://Example") && Validate(e) != nil {
+			t.Errorf("no-auth connector refused %s", endpoint)
+		}
+	}
+}
+
 func TestOldFormatRefused(t *testing.T) {
 	for name, entry := range map[string]string{
 		"header values": `{"id":"` + identity.New() + `","owner":"alice","name":"old","url":"https://example.test/mcp","auth_type":"bearer","headers":{"Authorization":"Bearer synthetic"}}`,

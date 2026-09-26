@@ -83,7 +83,7 @@ type OAuth struct {
 type Upstream struct {
 	Disabled bool `yaml:"-"` // Per-user runtime setting from the encrypted catalog.
 	// Guarded marks a connector whose credential is in vault custody. The
-	// legacy manager never connects it; calls run through access windows.
+	// manager never connects it; calls run through access windows.
 	Guarded     bool              `yaml:"-"`
 	Name        string            `yaml:"name"`
 	Transport   string            `yaml:"transport"`

@@ -43,7 +43,9 @@ func guardedDenialCall(t *testing.T, u config.Upstream, security *LeasedExecutio
 	defer cancel()
 	m.Start(ctx)
 	defer m.Close()
-	// A healthy cached entry, as left by an earlier discovery.
+	// A healthy entry, so the call passes routing and reaches the manager.
+	// Production never publishes a guarded connector as healthy; this checks
+	// the backstop after admission.
 	p.Changed(u.Name, []*mcp.Tool{{Name: "search", InputSchema: map[string]any{"type": "object"}}}, true)
 	name := u.Name + "__search"
 	res, err := p.call(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: name, Arguments: []byte(`{}`)}}, name)
@@ -82,8 +84,9 @@ func assertGuardedDenial(t *testing.T, res *mcp.CallToolResult, records []audit.
 	}
 }
 
-// A guarded connector reached without a lease adapter (no owner vault): the
-// manager returns ErrGuarded and nothing is forwarded.
+// Backstop: a guarded connector that reached dispatch without a lease adapter
+// gets ErrGuarded from the manager, and nothing is forwarded. Without the
+// vault a real call stops earlier, as unavailable, before admission.
 func TestGuardedManagerRecordsDenial(t *testing.T) {
 	res, records := guardedDenialCall(t, config.Upstream{Name: "g", Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second, Guarded: true}, nil)
 	assertGuardedDenial(t, res, records)

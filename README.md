@@ -15,7 +15,7 @@ It ships as two parts: a headless Go server, and a separate admin panel for mana
 - **Control over tools.** Per-tool allow/deny policy, per-user tool visibility, an approval interface, and a JSONL call audit.
 - **Personal connections.** Each user adds their own remote MCP servers, with saved tool discovery and provider search. Credentials for them live only in the owner vault and are used inside access windows the owner starts.
 - **Access control.** Panel accounts with named, revocable API keys; operator bearer auth in local mode; or optional OAuth for remote clients such as ChatGPT. Origin checks, `/healthz`, and `/readyz`.
-- **Nothing extra to run.** Encrypted local storage by default, behind backend-neutral catalog and audit interfaces; no external database is required.
+- **Nothing extra to run.** Encrypted local storage by default, behind backend-neutral catalog and audit interfaces; no external database is required. Connectors with credentials need the owner vault (`owner_security`), which uses PostgreSQL until the SQLite store lands.
 
 ## Quick start with Docker Compose
 

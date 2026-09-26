@@ -509,6 +509,12 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   window; with no credential, or after deletion, it stays locked. The
   post-admission re-check and `Manager.Guard` existed only for conversion and
   are gone; the proxy still maps `ErrGuarded` to `MCPWARDEN_LEASE_REQUIRED`.
+- **Only vault-ready connectors.** The catalog also checks a credentialed
+  connector's endpoint against the destination the console will send (public
+  HTTPS, or the loopback profile for HTTP), through
+  `secret.ConnectorDestination`. Only a local account may create one: owner
+  routes need that account's browser session, so the shared operator
+  workspace could never unlock it (review round 1, R1-N1 and R1-N2).
 - **No custody switch.** `owner_security.custody_mode` is removed and a config
   that sets it fails to load. Guarded execution is installed whenever the
   owner vault runs. Without it only `none` connectors can be created.

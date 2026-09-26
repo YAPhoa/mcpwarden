@@ -356,6 +356,13 @@ func Validate(e Entry) error {
 		}
 		seen[lower] = true
 	}
+	// The endpoint must also be one the vault accepts: public HTTPS, or
+	// loopback HTTP for development.
+	if e.Credentialed() {
+		if _, err := secret.ConnectorDestination(e.URL, e.HeaderNames); err != nil {
+			return fmt.Errorf("connectors with credentials need a public HTTPS endpoint with a lowercase host and a path, or HTTP on this machine")
+		}
+	}
 	return nil
 }
 
@@ -401,6 +408,7 @@ func (s *Store) Add(e Entry) error {
 			return fmt.Errorf("upstream ID already exists")
 		}
 	}
+	e.HeaderNames = slices.Clone(e.HeaderNames)
 	e.CreatedAt = time.Now().UTC()
 	e.UpdatedAt = e.CreatedAt
 	s.entries[k] = e

@@ -886,3 +886,57 @@ func TestAbortResumesAfterItsDatabaseCommit(t *testing.T) {
 		t.Fatal("state left after the second resumed abort", st.ImportID)
 	}
 }
+
+// A PostgreSQL catalog holding a connector sealed by an older build (header
+// values, OAuth settings or a grant) is refused at load. An older no-auth
+// connector (empty header map, null OAuth) still loads.
+func TestOldFormatRefusedOnLoad(t *testing.T) {
+	for name, tc := range map[string]struct {
+		connector string
+		mutate    func(p map[string]any) (grant bool)
+		refused   bool
+	}{
+		"header values": {"remote", func(p map[string]any) bool {
+			p["headers"] = map[string]string{"Authorization": "Bearer synthetic"}
+			return false
+		}, true},
+		"oauth":         {"remote", func(p map[string]any) bool { p["oauth"] = map[string]any{"scopes": []string{"read"}}; return false }, true},
+		"grant id":      {"remote", func(p map[string]any) bool { return true }, true},
+		"empty headers": {"svc", func(p map[string]any) bool { p["headers"] = map[string]string{}; p["oauth"] = nil; return false }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.cutover()
+			repo, _, _, _ := f.gateway()
+			var e catalog.Entry
+			for _, owner := range []string{f.alice, f.bob} {
+				for _, x := range repo.List(owner) {
+					if x.Name == tc.connector {
+						e = x
+					}
+				}
+			}
+			p := map[string]any{"id": e.ID, "owner": e.Owner, "name": e.Name, "url": e.URL, "auth_type": e.AuthType, "header_names": e.HeaderNames,
+				"call_timeout": e.CallTimeout, "created_at": e.CreatedAt, "updated_at": e.UpdatedAt}
+			q, args := "UPDATE mcpwarden_security.catalog_connectors SET grant_id='g1' WHERE connector_id=$1", []any{e.ID}
+			if !tc.mutate(p) {
+				sealed, err := repo.seal.seal(connectorAAD(e.ID), p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				q, args = "UPDATE mcpwarden_security.catalog_connectors SET sealed=$1 WHERE connector_id=$2", []any{sealed, e.ID}
+			}
+			if _, err := f.db.Admin.Exec(t.Context(), q, args...); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := New(f.src.CatalogKey, repo.loader, func() {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = fresh.Load(t.Context())
+			if tc.refused != errors.Is(err, catalog.ErrOldFormat) || !tc.refused && err != nil {
+				t.Fatalf("%s: got %v", name, err)
+			}
+		})
+	}
+}

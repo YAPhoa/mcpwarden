@@ -51,7 +51,7 @@ test('untrusted names, descriptions and saved header names are escaped', async (
   const name = '<img src=x onerror=alert(1)>';
   const ui = await app({providers: [provider({name})], connections: [{name, url: 'https://example.test/mcp', header_names: ['<script>'], auth_type: 'headers', custody: 'vault', call_timeout: '30s'}], tools: [{name, upstream: name, description: '<script>alert(1)</script>', allowed: true, healthy: true, visible: true}]});
   for (const id of ['upstreams', 'upstream-details', 'tools']) assert.doesNotMatch(ui.node(id).innerHTML, /<script>|<img/);
-  assert.match(ui.node('upstream-details').innerHTML, /In vault/);
+  assert.match(ui.node('upstream-details').innerHTML, /Value kept in your vault/);
   assert.doesNotMatch(ui.node('upstream-details').innerHTML, /type="password"/);
 });
 test('failed requests retain snapshot and disable mutations without reporting zero', async () => {
@@ -197,7 +197,7 @@ test('vault connections show header names and link to the vault, never values',a
  const ui=await app({providers:[provider({healthy:false,custody:'vault'})],connections:[{name:'docs',url:'https://example.test/mcp',header_names:['Authorization'],auth_type:'bearer',custody:'vault',call_timeout:'30s'}],hash:'#/upstreams/docs'});
  const html=ui.node('upstream-details').innerHTML;
  assert.match(html,/Bearer token/);
- assert.match(html,/Authorization<\/span><span>In vault/);
+ assert.match(html,/Authorization<\/span><span>Value kept in your vault/);
  assert.match(html,/href="\/vault\/credentials"/);
  assert.doesNotMatch(html,/OAuth|Connect account|type="password"/);
 });

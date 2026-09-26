@@ -1439,3 +1439,18 @@ through credential save, window, restart and deletion
 view. `gofmt`, `go mod tidy -diff`, `integrity.py`, `go build ./...`,
 `go vet ./...`, the `CGO_ENABLED=0` build and `go test -race -count=1 ./...`
 with PostgreSQL 16 passed; `npm test` (68) and the Chromium owner flows passed.
+
+### Review round 1 (2026-09-26)
+
+No blocking findings. Fixed the three notes: a credentialed connector's
+endpoint must now pass the vault destination the console sends
+(`secret.ConnectorDestination`, `TestCatalogEndpointsMatchVaultDestinations`);
+only a local account can create one, and `/api/status` reports `vault` per
+request (`TestCredentialedConnectorsNeedAccountOwner`, which also covers
+`warden_add_provider` passing `header_names` and refusing values); PostgreSQL
+old-format refusal is pinned (`TestOldFormatRefusedOnLoad`). Nits: stale
+wording, neutral "Value kept in your vault" copy, a cloned `HeaderNames` in the
+file `Add`, `go vet -tags flowtest` in CI and `TestNoTestRoutesWithoutFlowtestTag`.
+`gofmt`, tidy, build, vet (with and without `flowtest`), `go test -race
+-count=1 ./...` with PostgreSQL 16, `npm test` (68) and the Chromium owner
+flows passed.

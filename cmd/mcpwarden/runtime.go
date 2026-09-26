@@ -117,6 +117,14 @@ func (rs *runtimes) getLocked(owner string) *userRuntime {
 	return rt
 }
 
+// vaultOwner reports whether owner can hold credentialed connectors: the
+// owner vault runs and owner is a local account. Owner routes need that
+// account's browser session, so the shared operator workspace could never
+// unlock one.
+func (rs *runtimes) vaultOwner(owner string) bool {
+	return rs.guarded != nil && strings.HasPrefix(owner, "account:")
+}
+
 func (rs *runtimes) add(e catalog.Entry) error {
 	if rs.store == nil {
 		return fmt.Errorf("panel-managed upstreams are not configured")
@@ -127,8 +135,8 @@ func (rs *runtimes) add(e catalog.Entry) error {
 	if err := catalog.Validate(e); err != nil {
 		return err
 	}
-	if e.Credentialed() && rs.guarded == nil {
-		return fmt.Errorf("connectors with credentials need the owner vault (owner_security); only auth type none is available")
+	if e.Credentialed() && !rs.vaultOwner(e.Owner) {
+		return fmt.Errorf("connectors with credentials need the owner vault (owner_security) and a signed-in local account; only auth type none is available here")
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -236,7 +244,7 @@ func (rs *runtimes) status(w http.ResponseWriter, r *http.Request) {
 	// Report only server-validated identity, never claims decoded by the browser.
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ready": rt.manager.Ready(), "upstreams": rt.manager.States(),
-		"session": map[string]any{"mode": mode, "subject": requestOwner(r), "authentication": authentication, "management_scope": scope, "username": username, "role": "admin", "access_id": func() string { a, _ := accessFrom(r.Context()); return a.ID }(), "vault": rs.guarded != nil},
+		"session": map[string]any{"mode": mode, "subject": requestOwner(r), "authentication": authentication, "management_scope": scope, "username": username, "role": "admin", "access_id": func() string { a, _ := accessFrom(r.Context()); return a.ID }(), "vault": rs.vaultOwner(requestOwner(r))},
 	})
 }
 

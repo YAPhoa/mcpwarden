@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -94,7 +95,11 @@ func (f *ownerFixture) guardedGateway() *guardedGateway {
 	rs.guarded = &guardedCustody{api: f.api, store: f.store, history: history}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", f.accounts.protect(rs.access.bindMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		return rs.get(requestOwner(r)).proxy.Server
+		p := rs.get(requestOwner(r)).proxy
+		if a, ok := accessFrom(r.Context()); ok && a.Role == "admin" {
+			return p.AdminServer
+		}
+		return p.Server
 	}, nil)), false))
 	mux.Handle("/api/discovery/", f.accounts.protect(http.HandlerFunc(rs.discovery), true, true))
 	g := &guardedGateway{rs: rs, server: httptest.NewServer(mux), history: history}
@@ -292,6 +297,68 @@ func TestGuardedHeaderExecution(t *testing.T) {
 	}
 	if upstream.total() != upstream.requests(owner) {
 		t.Fatal("a request without the vault credential reached the upstream")
+	}
+}
+
+// Only a local account can hold credentialed connectors: owner routes need its
+// browser session. The shared operator workspace gets no-auth connectors only,
+// and its status reports no vault. The admin MCP tool passes header names
+// through for an account.
+func TestCredentialedConnectorsNeedAccountOwner(t *testing.T) {
+	upstream := newHeaderUpstream(t)
+	f := newOwnerFixture(t, upstream.server.URL+"/mcp")
+	g := f.guardedGateway()
+	alice := f.owners["alice"]
+	as := func(r *http.Request, owner string) *http.Request {
+		if owner == "" {
+			return r
+		}
+		return r.WithContext(context.WithValue(r.Context(), accountContextKey{}, accountIdentity{Owner: owner}))
+	}
+	for owner, want := range map[string]bool{"": false, "local": false, alice: true} {
+		add := as(httptest.NewRequest(http.MethodPost, "/api/connections", strings.NewReader(`{"name":"shared","url":"https://example.test/mcp","auth_type":"bearer","header_names":["Authorization"]}`)), owner)
+		w := httptest.NewRecorder()
+		g.rs.connections(w, add)
+		if (w.Code == http.StatusCreated) != want || !want && !strings.Contains(w.Body.String(), "local account") {
+			t.Fatalf("owner %q: bearer connector %d %s", owner, w.Code, w.Body.String())
+		}
+		w = httptest.NewRecorder()
+		g.rs.status(w, as(httptest.NewRequest(http.MethodGet, "/api/status", nil), owner))
+		var status struct {
+			Session struct {
+				Vault bool `json:"vault"`
+			} `json:"session"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil || status.Session.Vault != want {
+			t.Fatalf("owner %q: status %s", owner, w.Body.String())
+		}
+	}
+	if len(f.store.List("local")) != 0 {
+		t.Fatal("the shared workspace stored a credentialed connector")
+	}
+	if err := g.rs.remove(alice, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	admin := g.client(t, f.keys["admin-agent"])
+	res, err := admin.CallTool(t.Context(), &mcp.CallToolParams{Name: "warden_add_provider", Arguments: map[string]any{"name": "keyed", "url": "https://example.test/mcp", "auth_type": "api_key", "header_names": []string{"X-API-Key"}}})
+	if err != nil || res.IsError {
+		t.Fatalf("admin tool add: %v %+v", err, res)
+	}
+	found := false
+	for _, e := range f.store.List(alice) {
+		found = found || e.Name == "keyed" && e.AuthType == "api_key" && slices.Equal(e.HeaderNames, []string{"X-API-Key"})
+	}
+	if !found {
+		t.Fatal("admin tool did not pass header names through")
+	}
+	res, err = admin.CallTool(t.Context(), &mcp.CallToolParams{Name: "warden_add_provider", Arguments: map[string]any{"name": "valued", "url": "https://example.test/mcp", "auth_type": "api_key", "headers": map[string]string{"X-API-Key": "synthetic-value"}}})
+	if err == nil && !res.IsError {
+		t.Fatal("admin tool accepted header values")
+	}
+	for _, e := range f.store.List(alice) {
+		if e.Name == "valued" {
+			t.Fatal("a connector with header values was stored")
+		}
 	}
 }
 
