@@ -24,7 +24,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres/pgtest"
-	"golang.org/x/oauth2"
 )
 
 // fixture is a realistic file catalog and history on a scratch database. All
@@ -81,15 +80,14 @@ func newFixture(t *testing.T) *fixture {
 		}
 	}
 	entries := []catalog.Entry{
-		{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/mcp", AuthType: "bearer", Headers: map[string]string{"Authorization": "Bearer synthetic-header"}, CallTimeout: "45s"},
-		{ID: identity.New(), Owner: f.alice, Name: "oauth", URL: "https://example.com/oauth", AuthType: "oauth", OAuth: &catalog.OAuthSettings{ClientID: "client", ClientSecret: "synthetic-client-secret", Issuer: "https://issuer.example.com", Scopes: []string{"read"}}},
+		{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/mcp", AuthType: "bearer", HeaderNames: []string{"Authorization"}, CallTimeout: "45s"},
+		{ID: identity.New(), Owner: f.alice, Name: "keyed", URL: "https://example.com/keyed", AuthType: "headers", HeaderNames: []string{"X-API-Key", "X-Tenant"}},
 		{ID: identity.New(), Owner: f.alice, Name: "gone", URL: "https://example.com/gone"},
 		{ID: identity.New(), Owner: f.bob, Name: "svc", URL: "https://example.com/svc", AuthType: "none"},
 	}
 	for _, e := range entries {
 		must(store.Add(e))
 	}
-	must(store.SaveOAuth(f.alice, entries[1].ID, "", catalog.OAuthGrant{ID: identity.New(), Token: oauth2.Token{AccessToken: "synthetic-access", RefreshToken: "synthetic-refresh", Expiry: future}}))
 	must(store.SetDiscovery(f.alice, "remote", []*mcp.Tool{{Name: "search", Description: "Synthetic", InputSchema: map[string]any{"type": "object"}}}))
 	must(store.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{"remote__search"}}))
 	must(store.SetProviderEnabled(f.bob, "svc", false))
@@ -233,9 +231,6 @@ func TestImportPreservesCatalogAndHistory(t *testing.T) {
 		for _, e := range source.Entries {
 			if e.Owner == owner {
 				// List returns copies sorted by name, as the file store does.
-				if e.Headers == nil {
-					e.Headers = map[string]string{}
-				}
 				want = append(want, e)
 			}
 		}
@@ -428,7 +423,7 @@ func TestVerificationDetectsTampering(t *testing.T) {
 		"swapped payloads": "UPDATE mcpwarden_security.catalog_access a SET sealed = b.sealed FROM mcpwarden_security.catalog_access b WHERE a.access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access) AND b.access_id = (SELECT max(access_id) FROM mcpwarden_security.catalog_access)",
 		"plain role":       "UPDATE mcpwarden_security.catalog_access SET role = CASE role WHEN 'admin' THEN 'client' ELSE 'admin' END WHERE kind = 'api_key' AND access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access WHERE kind = 'api_key')",
 		"expiry":           "UPDATE mcpwarden_security.catalog_access SET expires_at = expires_at + interval '1 day' WHERE expires_at IS NOT NULL",
-		"grant revision":   "UPDATE mcpwarden_security.catalog_connectors SET grant_revision = 1 WHERE grant_id IS NOT NULL",
+		"grant revision":   "UPDATE mcpwarden_security.catalog_connectors SET grant_revision = 1 WHERE deleted_at IS NULL",
 		"history bytes":    "UPDATE mcpwarden_security.history_events SET record = replace(record, '\"status\":\"ok\"', '\"status\":\"ok\" ') WHERE source_line = 3",
 		"history row":      "DELETE FROM mcpwarden_security.history_events WHERE source_line = 7",
 		"history order":    "UPDATE mcpwarden_security.history_events SET source_line = source_line + 1000 WHERE source_line = 1",
@@ -514,26 +509,14 @@ func TestRepositoryCommitsAtomicallyAndFailsClosed(t *testing.T) {
 		t.Fatal("active key limit", n)
 	}
 
-	// A database CAS conflict publishes nothing and records no event.
-	var oauthID, grant string
-	for _, e := range repo.List(f.alice) {
-		if e.AuthType == "oauth" {
-			oauthID, grant = e.ID, e.OAuth.Grant.ID
-		}
+	// A refused change publishes nothing, records no event and leaves the
+	// repository healthy.
+	created := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'")
+	if err := repo.Add(catalog.Entry{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/other"}); err == nil {
+		t.Fatal("duplicate connector name accepted")
 	}
-	if _, err := f.db.Admin.Exec(ctx, "UPDATE mcpwarden_security.catalog_connectors SET grant_id=$1 WHERE connector_id=$2", identity.New(), oauthID); err != nil {
-		t.Fatal(err)
-	}
-	if err := repo.SaveOAuth(f.alice, oauthID, grant, catalog.OAuthGrant{ID: identity.New()}); err == nil {
-		t.Fatal("grant CAS ignored the stored row")
-	}
-	for _, e := range repo.List(f.alice) {
-		if e.ID == oauthID && e.OAuth.Grant.ID != grant {
-			t.Fatal("uncommitted grant published")
-		}
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.oauth_saved'"); n != 0 || *failed {
-		t.Fatal("conflict recorded an event or failed the repository", n)
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'"); n != created || *failed || len(repo.List(f.alice)) != 2 {
+		t.Fatal("refused change recorded an event, failed the repository or published", n)
 	}
 
 	// Losing the session fails closed: no authentication from the stale view,
@@ -578,10 +561,7 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	if _, err := Rollback(t.Context(), f.db.Admin, f.src); !errors.Is(err, ErrLocked) {
 		t.Fatal("rollback ran beside a PostgreSQL gateway", err)
 	}
-	service.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = db.Close(ctx)
-	cancel()
+	f.stop(service, db)
 
 	// Interrupted after the database left the active state.
 	st, _, _ := Status(t.Context(), f.db.Admin)
@@ -636,6 +616,32 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	}
 	if marker, ok, err := catalog.ReadMarker(f.src.CatalogPath); err != nil || !ok || marker.State != "rolled_back" || marker.RollbackID != m.RollbackID {
 		t.Fatal("marker", marker, err)
+	}
+}
+
+// stop closes a gateway and waits until PostgreSQL has released its executor
+// lock. The server drops session locks when the backend exits, which can
+// happen after the client has closed, so a migration started at once could
+// still see the lock held.
+func (f *fixture) stop(service *lease.Service, db *postgres.Store) {
+	f.t.Helper()
+	service.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = db.Close(ctx)
+	for {
+		var held bool
+		if err := f.db.Admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database WHERE l.locktype = 'advisory' AND d.datname = current_database() AND l.pid <> pg_backend_pid())").Scan(&held); err != nil {
+			f.t.Fatal(err)
+		}
+		if !held {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			f.t.Fatal("gateway lock was not released")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
@@ -774,10 +780,7 @@ func TestProviderChangesMoveTheSecurityRevision(t *testing.T) {
 		}
 	}
 	// The revision is sealed with the row and survives a restart.
-	service.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = db.Close(ctx)
-	cancel()
+	f.stop(service, db)
 	restarted, _, _, _ := f.gateway()
 	if got := restarted.ConnectorSecurityRevision(f.alice, remote); got != "4" {
 		t.Fatal("revision after reload", got)
@@ -798,10 +801,7 @@ func TestImportAfterRollbackRequiresTheExport(t *testing.T) {
 	if err := repo.RevokeAccess(f.alice, agent.ID); err != nil {
 		t.Fatal(err)
 	}
-	service.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = db.Close(ctx)
-	cancel()
+	f.stop(service, db)
 	m, err := Rollback(t.Context(), f.db.Admin, f.src)
 	if err != nil {
 		t.Fatal(err)
@@ -901,5 +901,59 @@ func TestAbortResumesAfterItsDatabaseCommit(t *testing.T) {
 	}
 	if _, exists, _ := Status(t.Context(), f.db.Admin); exists {
 		t.Fatal("state left after the second resumed abort", st.ImportID)
+	}
+}
+
+// A PostgreSQL catalog holding a connector sealed by an older build (header
+// values, OAuth settings or a grant) is refused at load. An older no-auth
+// connector (empty header map, null OAuth) still loads.
+func TestOldFormatRefusedOnLoad(t *testing.T) {
+	for name, tc := range map[string]struct {
+		connector string
+		mutate    func(p map[string]any) (grant bool)
+		refused   bool
+	}{
+		"header values": {"remote", func(p map[string]any) bool {
+			p["headers"] = map[string]string{"Authorization": "Bearer synthetic"}
+			return false
+		}, true},
+		"oauth":         {"remote", func(p map[string]any) bool { p["oauth"] = map[string]any{"scopes": []string{"read"}}; return false }, true},
+		"grant id":      {"remote", func(p map[string]any) bool { return true }, true},
+		"empty headers": {"svc", func(p map[string]any) bool { p["headers"] = map[string]string{}; p["oauth"] = nil; return false }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.cutover()
+			repo, _, _, _ := f.gateway()
+			var e catalog.Entry
+			for _, owner := range []string{f.alice, f.bob} {
+				for _, x := range repo.List(owner) {
+					if x.Name == tc.connector {
+						e = x
+					}
+				}
+			}
+			p := map[string]any{"id": e.ID, "owner": e.Owner, "name": e.Name, "url": e.URL, "auth_type": e.AuthType, "header_names": e.HeaderNames,
+				"call_timeout": e.CallTimeout, "created_at": e.CreatedAt, "updated_at": e.UpdatedAt}
+			q, args := "UPDATE mcpwarden_security.catalog_connectors SET grant_id='g1' WHERE connector_id=$1", []any{e.ID}
+			if !tc.mutate(p) {
+				sealed, err := repo.seal.seal(connectorAAD(e.ID), p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				q, args = "UPDATE mcpwarden_security.catalog_connectors SET sealed=$1 WHERE connector_id=$2", []any{sealed, e.ID}
+			}
+			if _, err := f.db.Admin.Exec(t.Context(), q, args...); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := New(f.src.CatalogKey, repo.loader, func() {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = fresh.Load(t.Context())
+			if tc.refused != errors.Is(err, catalog.ErrOldFormat) || !tc.refused && err != nil {
+				t.Fatalf("%s: got %v", name, err)
+			}
+		})
 	}
 }

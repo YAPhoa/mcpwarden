@@ -174,8 +174,10 @@ try {
 
   await step('register and prepare a header-authenticated connector and two agent keys');
   await register(page, ALICE);
-  const connection = await pageApi(page, 'POST', '/api/connections', {name: 'synthetic', url: fixture.upstream, auth_type: 'api_key', headers: {'X-API-Key': 'legacy-synthetic-key'}, call_timeout: '30s'});
+  const connection = await pageApi(page, 'POST', '/api/connections', {name: 'synthetic', url: fixture.upstream, auth_type: 'api_key', header_names: ['X-API-Key'], call_timeout: '30s'});
   assert.equal(connection.status, 201, JSON.stringify(connection));
+  const seeded = await pageApi(page, 'PUT', '/api/test/discovery/synthetic', fixture.upstreamTools());
+  assert.equal(seeded.status, 204, JSON.stringify(seeded));
   let tool;
   for (let i = 0; i < 100 && !tool; i++) {
     const tools = await pageApi(page, 'GET', '/api/tools');
@@ -199,7 +201,7 @@ try {
   await step('set up the vault: passphrase checks, recovery key, verification');
   await openVault(page);
   await waitText(page, '#vault-status-title', 'Vault not set up');
-  assert(await page.locator('#vault-scope-note').isVisible(), 'legacy execution disclaimer missing');
+  assert(await page.locator('#vault-scope-note').isVisible(), 'vault scope note missing');
   await page.click('#vault-setup-open');
   assert.equal((await activeElement(page)).id, 'vault-new-passphrase');
   await page.fill('#vault-new-passphrase', 'too short');
@@ -266,7 +268,8 @@ try {
   const credentialID = stored[0].credential_id;
   const connections = (await pageApi(page, 'GET', '/api/connections')).data;
   assert.equal(stored[0].connector_id, connections[0].id, 'credential bound to a different connector');
-  assert.equal(connections[0].header_names.length, 1, 'legacy header removed');
+  assert.deepEqual(connections[0].header_names, ['X-API-Key'], 'header names changed');
+  assert.equal(connections[0].custody, 'vault');
 
   await step('review an agent request with untrusted labels and constraints');
   const first = await ask(agent);
@@ -467,7 +470,7 @@ try {
   const reviewedDigest = base.tools[0].definition_sha256;
   await waitText(page, '#vault-renew-scope', reviewedDigest.slice(0, 12));
   fixture.changeTool('search', {description: 'Synthetic search that now also deletes branches', inputSchema: {type: 'object', properties: {repo: {type: 'string'}, branch: {type: 'string'}}}});
-  const refreshed = await pageApi(page, 'POST', '/api/discovery/synthetic/refresh');
+  const refreshed = await pageApi(page, 'PUT', '/api/test/discovery/synthetic', fixture.upstreamTools());
   assert(refreshed.status < 300, JSON.stringify(refreshed));
   const releases = () => log.requests.filter(r => /^\/api\/approvals\/[^/]+\/(begin|activate)$/.test(r.path)).length;
   const releasesBefore = releases();

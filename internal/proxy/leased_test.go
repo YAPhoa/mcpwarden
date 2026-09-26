@@ -7,7 +7,7 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/registry"
 )
 
-// A converted connector keeps its own call timeout up to the guarded cap; an
+// A vault connector keeps its own call timeout up to the guarded cap; an
 // unset or invalid one falls back to 30 seconds.
 func TestLeasedTimeoutClamp(t *testing.T) {
 	for given, want := range map[time.Duration]time.Duration{

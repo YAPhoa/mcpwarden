@@ -1425,3 +1425,51 @@ swaps in the guarded generation under `rs.mu` (`Manager.Guard`) and closes the
 old session after releasing it; the race test no longer fails off the test
 goroutine. `gofmt`, build, vet and `go test -race -count=1 ./...` with
 PostgreSQL passed.
+
+## 2026-09-26 — Vault-only custody for personal credentials (removal plan PR 1)
+
+Personal connectors store header names only and credentialed ones are in vault
+custody from creation; `custody_mode`, conversion and upstream OAuth are
+removed (see `docs/decisions.md`). New tests cover names-only validation and
+the shared vault header rule, refusal of older catalog data, the connections
+API (`TestConnectionsAPIHeaderNamesOnly`), a connector locked from creation
+through credential save, window, restart and deletion
+(`TestGuardedHeaderExecution`), calls racing the first credential save
+(`TestCredentialSaveDuringCallsNeverDials`), and the panel form and detail
+view. `gofmt`, `go mod tidy -diff`, `integrity.py`, `go build ./...`,
+`go vet ./...`, the `CGO_ENABLED=0` build and `go test -race -count=1 ./...`
+with PostgreSQL 16 passed; `npm test` (68) and the Chromium owner flows passed.
+
+### Review round 1 (2026-09-26)
+
+No blocking findings. Fixed the three notes: a credentialed connector's
+endpoint must now pass the vault destination the console sends
+(`secret.ConnectorDestination`, `TestCatalogEndpointsMatchVaultDestinations`);
+only a local account can create one, and `/api/status` reports `vault` per
+request (`TestCredentialedConnectorsNeedAccountOwner`, which also covers
+`warden_add_provider` passing `header_names` and refusing values); PostgreSQL
+old-format refusal is pinned (`TestOldFormatRefusedOnLoad`). Nits: stale
+wording, neutral "Value kept in your vault" copy, a cloned `HeaderNames` in the
+file `Add`, `go vet -tags flowtest` in CI and `TestNoTestRoutesWithoutFlowtestTag`.
+`gofmt`, tidy, build, vet (with and without `flowtest`), `go test -race
+-count=1 ./...` with PostgreSQL 16, `npm test` (68) and the Chromium owner
+flows passed.
+
+### Review round 2 (2026-09-26)
+
+No blocking findings. The add-upstream form now checks a credentialed
+endpoint as typed against the vault destination rule (`vaultEndpoint` in
+`ui/static/app.js`) and shows the gateway's wording instead of a bare HTTP
+400; the most likely case was an endpoint without a path. A differential run
+over 46,080 generated endpoints found no endpoint the gateway accepts and the
+panel refuses; the panel lets only HTTPS IPv6 loopback literals through to the
+gateway's refusal. The note shown when credentials are unavailable now fits
+both the operator workspace and gateways without the vault. Stale workspace
+wording is fixed in the API guide, encrypted runtime and roadmap. A full race
+run once hit `ErrLocked` in `TestImportAfterRollbackRequiresTheExport`:
+PostgreSQL drops a session advisory lock when the backend exits, which can
+come after the client closes, so the pgcatalog fixture now waits for the
+lock to clear after stopping a gateway (8 repeated runs clean). `gofmt`, tidy,
+`integrity.py`, build, vet (with and without `flowtest`), the `CGO_ENABLED=0`
+build, `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (69) and
+the Chromium owner flows passed.

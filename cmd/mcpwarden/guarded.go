@@ -10,37 +10,37 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/upstream"
 )
 
-// guardedCustody installs guarded execution (custody_mode client_release). A
-// connector is converted once its owner stores a vault credential for it. From
-// then on the legacy manager never connects it, its server-held headers are
-// never read for it, and every call needs an owner-activated access window. A
-// deleted vault credential leaves a tombstone that keeps the connector locked;
-// it never falls back to legacy execution.
+// guardedCustody installs guarded execution. A credentialed connector is in
+// vault custody from creation: the manager never connects it, the gateway never
+// holds its credential, and every call needs an owner-activated access window.
+// Until its owner stores a vault credential, and after one is deleted, the
+// connector stays locked.
 type guardedCustody struct {
 	api     *securityAPI
 	store   catalog.Repository
 	history audit.Appender
 }
 
-// credential reports the connector's binding. A tombstone stays required with
-// no credential, which the proxy treats as locked.
+// credential reports the connector's binding. A credentialed connector is
+// always required; with no credential or a tombstone, the proxy treats it as
+// locked. A no-auth connector is required only if a credential is bound to it,
+// which fails closed.
 func (g *guardedCustody) credential(owner, connectorID string) (string, bool) {
 	if connectorID == "" {
 		return "", false
 	}
-	h, ok := g.api.index.ConnectorCredential(owner, connectorID)
-	if !ok {
-		return "", false
+	if h, ok := g.api.index.ConnectorCredential(owner, connectorID); ok {
+		if h.Deleted {
+			return "", true
+		}
+		return h.CredentialID, true
 	}
-	if h.Deleted {
-		return "", true
+	for _, e := range g.store.List(owner) {
+		if e.ID == connectorID {
+			return "", e.Credentialed()
+		}
 	}
-	return h.CredentialID, true
-}
-
-func (g *guardedCustody) bound(owner, connectorID string) bool {
-	_, required := g.credential(owner, connectorID)
-	return required
+	return "", false
 }
 
 // execution returns the owner's adapter. Calls use the connector's own call
@@ -55,37 +55,5 @@ func (g *guardedCustody) execution(m *upstream.Manager) *proxy.LeasedExecution {
 		},
 		History: g.history,
 		Timeout: func(e registry.Entry) time.Duration { return m.Timeout(e.Upstream) },
-	}
-}
-
-// converted stops the legacy session of a connector whose vault credential was
-// just committed. Routing already switched when the custody index published,
-// and the proxy re-checks the binding after each legacy admission; this swaps
-// in the guarded generation under rs.mu, so it cannot hit a connector that
-// replaced this one by name, and closes the old session, which still holds
-// server-held headers, after releasing it.
-func (rs *runtimes) converted(owner, connectorID string) {
-	if rs.guarded == nil || !rs.guarded.bound(owner, connectorID) {
-		return
-	}
-	stop := func() {}
-	defer func() { stop() }()
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	rt := rs.users[owner]
-	if rt == nil {
-		return // The runtime is built guarded on first use.
-	}
-	for _, e := range rs.store.List(owner) {
-		clear(e.Headers)
-		if e.ID == connectorID {
-			closeOld, err := rt.manager.Guard(e.Name)
-			if err != nil {
-				rs.logger.Error("could not stop legacy connection", "upstream", e.Name, "error", err)
-				return
-			}
-			stop = closeOld
-			return
-		}
 	}
 }

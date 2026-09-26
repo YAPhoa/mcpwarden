@@ -5,11 +5,13 @@ against live data, and the live gateway still uses the encrypted file catalog.
 This procedure is for review before any live migration.
 
 The PostgreSQL backend stores the same catalog the file holds: accounts and
-password verifiers, access keys and sessions, connectors with headers and OAuth
-grants, tombstones, discovery caches and visibility. It also stores tool-call
-history. Secret-bearing values stay encrypted with the existing catalog key
-(legacy server-managed custody), so the database never holds them in plain
-text. Browser-controlled credential access is a later step. See
+password verifiers, access keys and sessions, connectors with their header
+names, tombstones, discovery caches and visibility. It also stores tool-call
+history. Secret-bearing values stay encrypted with the existing catalog key, so
+the database never holds them in plain text. Connector credentials are not part
+of the catalog; they live in the owner vault. A file catalog from an older build
+(with header values or upstream OAuth settings) is refused, so it cannot be
+imported. See
 [catalog storage](catalog-storage.md) and [history storage](history-storage.md).
 
 ## Guarantees
@@ -29,7 +31,7 @@ text. Browser-controlled credential access is a later step. See
   and compare the whole catalog with a fresh read of the snapshot, field by
   field. This covers ownership, password salts and hashes, key verifiers,
   public IDs, roles, expiry, all lifecycle timestamps, tombstones, discovery,
-  visibility, headers, OAuth settings and grants, and grant revisions. Every
+  visibility and header names. Every
   history line is compared byte for byte with its line number, and every
   column that history queries read (owner, event ID including derived v0 IDs,
   filters, ordering time and timing) must equal what the JSONL reader derives
@@ -70,10 +72,10 @@ text. Browser-controlled credential access is a later step. See
 ## Coordination while running on PostgreSQL
 
 Every catalog change is one owner transaction under the lease service's owner
-gate. That covers accounts, passwords, keys and sessions, connectors, OAuth
-grants, visibility, availability and discovery. The same transaction writes the
+gate. That covers accounts, passwords, keys and sessions, connectors,
+visibility, availability and discovery. The same transaction writes the
 change, its security event (`access.revoked`, `account.password_changed`,
-`connector.oauth_saved` and so on), and any lease revocation. Revoking an API
+`connector.deleted` and so on), and any lease revocation. Revoking an API
 key or deleting a connector ends the owner's access windows in that commit;
 the file mode's guard does this for key revocation only. Password changes and
 session revocation end no windows. Disabling or enabling a provider, or
@@ -85,7 +87,7 @@ changes nothing. With the file catalog and `owner_security`, such a change
 ends all of the owner's windows before the file is written. The
 in-memory view changes only after the commit succeeds. Hard limits on active
 keys and sessions are checked in memory and again by a count inside the
-transaction. OAuth grant updates use compare-and-swap on the stored grant ID.
+transaction.
 Tool-call history rows commit before the call is dispatched, as before.
 
 ## Before you start
@@ -147,8 +149,6 @@ passwords changed since. Rollback exports the current PostgreSQL state instead.
      active windows, each with a security event under the rollback ID;
    - exports the PostgreSQL catalog to the catalog file with revocations, ended
      sessions and changed passwords intact, and ends any open MCP sessions;
-   - drops every OAuth grant that changed after cutover and lists those
-     connectors under `reauthorize_connectors`;
    - rewrites history as the verified pre-cutover bytes followed by every record
      written after cutover, in commit order;
    - reads both files back and compares them with the database (the history
@@ -162,18 +162,20 @@ passwords changed since. Rollback exports the current PostgreSQL state instead.
    finished one only rewrites the marker.
 3. **Switch the config** back to `backend: file` and start the gateway. With
    owner security it starts with a new boot, and suspended windows stay ended.
-4. **Reauthorize** each connector in `reauthorize_connectors` from the panel.
+
+The manifest's `reauthorize_connectors` list is always empty: connectors hold no
+upstream OAuth grants.
 
 Access windows never survive the rollback. An approved call that was running
 keeps its admission record. If its completion was never written, history shows
 it as unknown, and the call is never replayed. Tested by
 `testPostgresCatalogLossAndRollback` (a real approved window, key revocation,
-password change, OAuth rotation and new history, then database loss, rollback
+password change and new history, then database loss, rollback
 and a file restart) and `TestRollbackResumesAndRefusesReplacedFiles`.
 
 **Forward fixes.** A database snapshot or rollback cannot undo changes made
-outside the gateway. If a provider rotated or revoked a token, reauthorize that
-connector. If a key or password leaked, revoke or change it after the rollback
+outside the gateway. If a provider rotated or revoked a credential, save the new
+one in the vault. If a key or password leaked, revoke or change it after the rollback
 as usual. Credentials copied elsewhere must be rotated at the provider.
 
 ## Limits

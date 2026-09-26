@@ -442,10 +442,10 @@ func TestMalformedToolResponseDoesNotDisconnect(t *testing.T) {
 	}
 }
 
-// A guarded connector never connects with its server-held headers, whether it
-// starts guarded or converts while connected, and later enable/disable
-// generations keep it guarded.
-func TestGuardedConnectorNeverUsesLegacyHeaders(t *testing.T) {
+// A guarded connector never dials its upstream, even when headers are set, and
+// later enable/disable generations keep it guarded. An unguarded connector on
+// the same upstream shows the server is reachable.
+func TestGuardedConnectorNeverDials(t *testing.T) {
 	var legacy, other atomicCounter
 	s := mcp.NewServer(&mcp.Implementation{Name: "remote", Version: "1"}, nil)
 	s.AddTool(&mcp.Tool{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -476,7 +476,7 @@ func TestGuardedConnectorNeverUsesLegacyHeaders(t *testing.T) {
 	m.Start(ctx)
 	defer m.Close()
 	if !<-events {
-		t.Fatal("legacy connector did not connect")
+		t.Fatal("unguarded connector did not connect")
 	}
 	if err := m.Refresh(ctx, "locked"); !errors.Is(err, ErrGuarded) {
 		t.Fatalf("refresh of a guarded connector: %v", err)
@@ -484,22 +484,19 @@ func TestGuardedConnectorNeverUsesLegacyHeaders(t *testing.T) {
 	if _, err := m.Call(ctx, "locked", "echo", nil); !errors.Is(err, ErrGuarded) {
 		t.Fatalf("call through a guarded connector: %v", err)
 	}
-	if err := m.SetGuarded("open"); err != nil {
-		t.Fatal(err)
-	}
 	before := legacy.get()
 	for _, enabled := range []bool{false, true} {
-		if err := m.SetEnabled("open", enabled); err != nil {
+		if err := m.SetEnabled("locked", enabled); err != nil {
 			t.Fatal(err)
 		}
 	}
 	time.Sleep(200 * time.Millisecond)
-	if err := m.Refresh(ctx, "open"); !errors.Is(err, ErrGuarded) {
-		t.Fatalf("refresh after conversion: %v", err)
+	if err := m.Refresh(ctx, "locked"); !errors.Is(err, ErrGuarded) {
+		t.Fatalf("refresh after enable: %v", err)
 	}
 	for _, st := range m.States() {
-		if st.Custody != "vault" || st.Healthy {
-			t.Fatalf("state after conversion: %+v", st)
+		if st.Name == "locked" && (st.Custody != "vault" || st.Healthy) {
+			t.Fatalf("guarded state: %+v", st)
 		}
 	}
 	if legacy.get() != before || other.get() != 0 {

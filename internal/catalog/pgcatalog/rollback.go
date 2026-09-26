@@ -10,7 +10,6 @@ import (
 	"hash"
 	"io"
 	"os"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,8 +29,7 @@ import (
 //     active leases, with security events under the rollback ID;
 //  2. exports the current PostgreSQL catalog, not the pre-cutover file:
 //     revoked keys, ended sessions and changed passwords stay that way, and
-//     MCP sessions are ended. OAuth grants that changed after cutover are
-//     dropped, so those connectors must be reauthorized;
+//     MCP sessions are ended;
 //  3. rebuilds history as the verified pre-cutover bytes followed by every
 //     record written after cutover, in commit order;
 //  4. reads both files back and compares them with the database;
@@ -187,18 +185,9 @@ func export(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 		if err != nil {
 			return err
 		}
+		// Connectors hold no upstream OAuth grants any more, so none needs
+		// reauthorization.
 		m.Reauthorize, m.EndedMCP = nil, 0
-		for id, e := range decoded.entries {
-			if decoded.grants[id] > 0 && e.OAuth != nil && e.OAuth.Grant != nil {
-				next := copyEntry(e)
-				copied := *next.OAuth
-				copied.Grant = nil
-				next.OAuth = &copied
-				decoded.entries[id] = next
-				m.Reauthorize = append(m.Reauthorize, id)
-			}
-		}
-		sort.Strings(m.Reauthorize)
 		for id, a := range decoded.access {
 			if a.Kind == "mcp" && a.EndedAt.IsZero() {
 				a.EndedAt, a.UpdatedAt = at, at

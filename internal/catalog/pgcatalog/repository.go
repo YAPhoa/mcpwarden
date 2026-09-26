@@ -3,7 +3,6 @@ package pgcatalog
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -232,15 +231,7 @@ func (r *Repository) view() (*state, func()) {
 
 func copyEntry(e catalog.Entry) catalog.Entry {
 	out := e
-	if e.OAuth != nil {
-		data, _ := json.Marshal(e.OAuth)
-		out.OAuth = nil
-		_ = json.Unmarshal(data, &out.OAuth)
-	}
-	out.Headers = make(map[string]string, len(e.Headers))
-	for k, v := range e.Headers {
-		out.Headers[k] = v
-	}
+	out.HeaderNames = slices.Clone(e.HeaderNames)
 	return out
 }
 
@@ -289,11 +280,7 @@ func (r *Repository) Add(e catalog.Entry) error {
 		}
 		e.CreatedAt = c.now
 		e.UpdatedAt = e.CreatedAt
-		var revision int64
-		if grantID(e) != "" {
-			revision = 1
-		}
-		row, err := r.seal.connectorRow(e, revision)
+		row, err := r.seal.connectorRow(e, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +288,7 @@ func (r *Repository) Add(e catalog.Entry) error {
 			return nil, err
 		}
 		c.event("connector.created", e.ID)
-		return func() { st.entries[e.ID] = e; st.grants[e.ID] = revision }, nil
+		return func() { st.entries[e.ID] = e; st.grants[e.ID] = 0 }, nil
 	})
 }
 
@@ -526,42 +513,6 @@ func (r *Repository) ConnectorSecurityRevision(owner, connectorID string) string
 		return "1"
 	}
 	return strconv.FormatInt(st.revisions[catalog.ProviderKey{Owner: owner, Provider: e.Name}]+1, 10)
-}
-
-// SaveOAuth stores a new grant only if the stored grant is still previousGrant,
-// checked in memory and again by the database row.
-func (r *Repository) SaveOAuth(owner, id, previousGrant string, grant catalog.OAuthGrant) error {
-	return r.apply(owner, false, func(c *change, st *state) (func(), error) {
-		e, ok := st.entries[id]
-		if !ok || e.Owner != owner {
-			return nil, fmt.Errorf("OAuth connection no longer exists")
-		}
-		if e.AuthType != "oauth" || e.OAuth == nil {
-			return nil, fmt.Errorf("OAuth connection no longer exists")
-		}
-		if grantID(e) != previousGrant {
-			return nil, fmt.Errorf("OAuth connection changed")
-		}
-		next := copyEntry(e)
-		copied := *next.OAuth
-		g := grant
-		copied.Grant = &g
-		next.OAuth = &copied
-		next.UpdatedAt = c.now
-		revision := st.grants[id] + 1
-		row, err := r.seal.connectorRow(next, revision)
-		if err != nil {
-			return nil, err
-		}
-		if err := catalogdb.PutConnector(c.ctx(), c.db(), row, true, previousGrant); err != nil {
-			if errors.Is(err, catalogdb.ErrConflict) {
-				return nil, fmt.Errorf("OAuth connection changed")
-			}
-			return nil, err
-		}
-		c.event("connector.oauth_saved", id)
-		return func() { st.entries[id] = next; st.grants[id] = revision }, nil
-	})
 }
 
 // ---- Accounts ----

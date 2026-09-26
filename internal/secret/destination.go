@@ -120,7 +120,7 @@ func (p Destination) validate() (destination, error) {
 	slices.Sort(p.HeaderNames)
 	slices.Sort(p.PrivatePrefixes)
 	for i, name := range p.HeaderNames {
-		if name != strings.ToLower(name) || !credentialHeader(name) || i > 0 && name == p.HeaderNames[i-1] {
+		if name != strings.ToLower(name) || !CredentialHeader(name) || i > 0 && name == p.HeaderNames[i-1] {
 			return fail()
 		}
 	}
@@ -153,7 +153,45 @@ func (p Destination) validate() (destination, error) {
 	return d, nil
 }
 
-func credentialHeader(name string) bool {
+// ConnectorDestination returns the destination the owner console builds for a
+// credentialed connector: public for HTTPS, the loopback private profile for
+// HTTP on this machine. It fails for an endpoint or header names the vault
+// would refuse, so the catalog can reject a connector no credential could
+// ever unlock.
+func ConnectorDestination(endpoint string, headerNames []string) (Destination, error) {
+	names := make([]string, len(headerNames))
+	for i, name := range headerNames {
+		names[i] = strings.ToLower(name)
+	}
+	slices.Sort(names)
+	d := Destination{Schema: "mcpwarden.destination.v1", Endpoint: endpoint, HeaderNames: names, Network: "public", PrivatePrefixes: []string{}}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return Destination{}, ErrInvalid
+	}
+	if u.Scheme == "http" {
+		d.Network, d.AllowLoopbackHTTP = "private", true
+		switch host := u.Hostname(); {
+		case host == "localhost":
+			d.PrivatePrefixes = []string{"127.0.0.0/8", "::1/128"}
+		case host == "::1":
+			d.PrivatePrefixes = []string{"::1/128"}
+		default:
+			if a, e := netip.ParseAddr(host); e == nil && a.Is4() && a.IsLoopback() {
+				d.PrivatePrefixes = []string{"127.0.0.0/8"}
+			}
+		}
+	}
+	if _, err := d.validate(); err != nil {
+		return Destination{}, ErrInvalid
+	}
+	return d, nil
+}
+
+// CredentialHeader reports whether a lowercase header name may carry a vault
+// credential. The connector catalog uses it too, so every name a connector
+// declares is one the vault destination accepts.
+func CredentialHeader(name string) bool {
 	if len(name) < 1 || len(name) > 128 {
 		return false
 	}

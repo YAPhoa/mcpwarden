@@ -126,7 +126,7 @@ export function destinationDigest(d) {
 // HTTP development endpoints are the supported network profiles for now.
 export function destinationFor(connection) {
   const kinds = new Set(['bearer', 'api_key', 'headers']);
-  if (!connection || !kinds.has(connection.auth_type)) return {reason: connection?.auth_type === 'oauth' ? 'OAuth connectors are not supported yet.' : 'This connector has no credential headers.'};
+  if (!connection || !kinds.has(connection.auth_type)) return {reason: 'This connector has no credential headers.'};
   const names = (connection.header_names || []).map(n => String(n).toLowerCase());
   if (!names.length || names.length > 32 || new Set(names).size !== names.length) return {reason: 'This connector has no credential headers.'};
   let url;
@@ -256,21 +256,7 @@ export function callsLabel(l) {
   return l.in_flight ? `${base} · ${l.in_flight} in progress` : base;
 }
 
-// Copy that depends on the gateway's custody mode (`custody_mode` in the vault
-// state). In client_release a connector with a vault credential runs only inside
-// access windows; a removed credential leaves it locked in either mode once
-// client_release is on.
-const legacyCopy = {
-  'vault-scope-note': 'Access windows are recorded by the gateway’s owner security service. Ordinary tool calls still use the gateway-managed credentials until guarded execution is enabled, so these windows do not yet limit those calls.',
-  'vault-credentials-help': 'Credentials are encrypted in this browser before upload. Saving replaces the vault copy only: the gateway-managed copy of the header stays in place and is still used for ordinary tool calls. Every save ends pending requests and all access windows for your account.',
-  'vault-remove-effect': 'The encrypted copy is removed and cannot be added again for this connector. Pending requests and access windows for your account end now. The gateway-managed header is not changed, but if guarded execution is turned on later, this connector stays locked until you delete it and add it again.',
-};
-const releaseCopy = {
-  'vault-scope-note': 'Tool calls to a connector with a vault credential run only inside an access window you start. Connectors without one keep using gateway-managed credentials.',
-  'vault-credentials-help': 'Credentials are encrypted in this browser before upload. Saving one moves its connector to the vault: its tool calls then run only inside access windows, and the gateway stops using its own copy of the header. Every save ends pending requests and all access windows for your account.',
-  'vault-remove-effect': 'The encrypted copy is removed and cannot be added again for this connector. Its tools stay locked until you delete the connector and add it again. Pending requests and access windows for your account end now.',
-};
-export function custodyCopy(mode) { return {...(mode === 'client_release' ? releaseCopy : legacyCopy)}; }
-export function credentialSaveEffect(mode, replacing) {
-  return `${replacing ? 'Replacing starts a new credential version with a new key.' : 'This adds the vault copy for this connector.'} Saving ends pending requests and all access windows for your account. ${mode === 'client_release' ? 'Tool calls to this connector will then need an access window. The gateway keeps its own copy of the header but stops using it.' : 'The gateway-managed header is not changed or removed.'}`;
+// A connector's credential lives only in the vault; its calls need a window.
+export function credentialSaveEffect(replacing) {
+  return `${replacing ? 'Replacing starts a new credential version with a new key.' : 'This stores the credential for this connector.'} Saving ends pending requests and all access windows for your account. Tool calls to this connector need an access window.`;
 }

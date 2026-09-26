@@ -10,11 +10,11 @@ import (
 //
 // Implementations must be safe for concurrent use, preserve owner isolation,
 // return defensive copies from read methods, and make each mutation durable
-// before returning success. Secret-bearing fields (including headers, password
-// material, access hashes, and OAuth grants) must be protected at rest and must
-// never be logged. Implementations backed by a transactional database should
-// enforce uniqueness and active-access limits in the same transaction as the
-// corresponding write.
+// before returning success. Secret-bearing fields (password material and access
+// hashes) must be protected at rest and must never be logged. Connector
+// credentials are never stored here; they live in the owner's vault.
+// Implementations backed by a transactional database should enforce uniqueness
+// and active-access limits in the same transaction as the corresponding write.
 //
 // Read methods intentionally do not return storage errors because some are used
 // in synchronous MCP visibility callbacks. A remote-database implementation
@@ -36,7 +36,6 @@ type Repository interface {
 	Discovery(owner, name string) (Discovery, bool)
 	SetDiscovery(owner, name string, tools []*mcp.Tool) error
 	SetProviderEnabled(owner, provider string, enabled bool) error
-	SaveOAuth(owner, id, previousGrant string, grant OAuthGrant) error
 
 	Account(username string) (Account, bool)
 	AccountOwner(owner string) (Account, bool)

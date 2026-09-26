@@ -60,11 +60,9 @@ func TestOwnerSecurityRequiresAccountsAndDatabaseEnv(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		"operator mode":   {Config{OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, "requires accounts"},
-		"missing env":     {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "MISSING_MCPWARDEN_TEST"}}, "unset"},
-		"accounts":        {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, ""},
-		"client release":  {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN", CustodyMode: "client_release"}}, ""},
-		"unknown custody": {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN", CustodyMode: "server_unlock"}}, "custody_mode"},
+		"operator mode": {Config{OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, "requires accounts"},
+		"missing env":   {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "MISSING_MCPWARDEN_TEST"}}, "unset"},
+		"accounts":      {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := tt.cfg.ResolveAndValidate()
@@ -73,9 +71,6 @@ func TestOwnerSecurityRequiresAccountsAndDatabaseEnv(t *testing.T) {
 			}
 			if tt.want == "" && tt.cfg.OwnerSecurity.DatabaseURL != "postgres://runtime@127.0.0.1/db" {
 				t.Fatal("database URL not resolved")
-			}
-			if tt.want == "" && tt.cfg.ClientRelease() != (name == "client release") {
-				t.Fatal("custody mode default or selection is wrong")
 			}
 		})
 	}

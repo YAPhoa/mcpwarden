@@ -88,7 +88,7 @@ func newOwnerFixture(t *testing.T, endpoint ...string) *ownerFixture {
 		f.owners[username] = account.ID
 		f.cookies[username] = f.session(username)
 	}
-	f.entry = catalog.Entry{Owner: f.owners["alice"], Name: "remote", URL: append(endpoint, "https://example.com/mcp")[0], Headers: map[string]string{"Authorization": "Bearer legacy-synthetic"}}
+	f.entry = catalog.Entry{Owner: f.owners["alice"], Name: "remote", URL: append(endpoint, "https://example.com/mcp")[0], AuthType: "bearer", HeaderNames: []string{"Authorization"}}
 	if err := store.Add(f.entry); err != nil {
 		t.Fatal(err)
 	}

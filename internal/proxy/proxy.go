@@ -221,15 +221,6 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 		return errorResult("MCPWARDEN_AUDIT_UNAVAILABLE: No upstream action was executed. Durable audit storage is unavailable."), nil
 	}
 	admitted = true
-	// The connector may have converted to vault custody after the routing check
-	// above. Re-check after the durable admission so a call admitted once the
-	// binding is published never reaches the legacy session.
-	if _, required := p.leaseBinding(entry); required {
-		// The completion keeps the admission's allow decision; only the
-		// status records the denial.
-		record.EventType, record.Status = audit.DispatchCompleted, "denied"
-		return leaseError(lease.ErrRequired), nil
-	}
 	// The upstream's timeout starts after the durable admission write, so a
 	// slow fsync does not shorten the time the upstream gets.
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -240,7 +231,7 @@ func (p *Proxy) call(ctx context.Context, req *mcp.CallToolRequest, name string)
 	record.EventType = audit.DispatchCompleted
 	timing.UpstreamUS = time.Since(upstreamStart).Microseconds()
 	if errors.Is(err, upstream.ErrGuarded) {
-		// Conversion replaced the legacy connection before dispatch.
+		// A guarded connector never dials outside an access window.
 		timing.Forwarded, timing.UpstreamUS = false, 0
 		record.Status = "denied"
 		return leaseError(lease.ErrRequired), nil

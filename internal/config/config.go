@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,26 +32,13 @@ type Config struct {
 }
 
 // OwnerSecurity enables the owner vault, access-request and lease routes backed
-// by PostgreSQL. CustodyMode selects tool execution: legacy_managed (default)
-// keeps every provider on server-held credentials; client_release runs each
-// HTTP header connector that has a vault credential only through access
-// windows, and never through its server-held headers.
+// by PostgreSQL. Credentialed personal connectors run only through access
+// windows; the server never holds their credentials.
 type OwnerSecurity struct {
 	DatabaseURLEnv        string   `yaml:"database_url_env"`
 	DatabaseURL           string   `yaml:"-"`
 	TrustedProxies        []string `yaml:"trusted_proxies"`
 	AllowInsecureLoopback bool     `yaml:"allow_insecure_loopback"`
-	CustodyMode           string   `yaml:"custody_mode"`
-}
-
-const (
-	CustodyLegacyManaged = "legacy_managed"
-	CustodyClientRelease = "client_release"
-)
-
-// ClientRelease reports whether converted connectors use guarded execution.
-func (c *Config) ClientRelease() bool {
-	return c.OwnerSecurity != nil && c.OwnerSecurity.CustodyMode == CustodyClientRelease
 }
 
 // ProxyPrefixes accepts explicit, canonical IP networks, never hostnames or a
@@ -95,10 +81,9 @@ type OAuth struct {
 	ClientSecret                 string   `yaml:"-"`
 }
 type Upstream struct {
-	OAuthHandler auth.OAuthHandler `yaml:"-"`
-	Disabled     bool              `yaml:"-"` // Per-user runtime setting from the encrypted catalog.
+	Disabled bool `yaml:"-"` // Per-user runtime setting from the encrypted catalog.
 	// Guarded marks a connector whose credential is in vault custody. The
-	// legacy manager never connects it; calls run through access windows.
+	// manager never connects it; calls run through access windows.
 	Guarded     bool              `yaml:"-"`
 	Name        string            `yaml:"name"`
 	Transport   string            `yaml:"transport"`
@@ -154,13 +139,6 @@ func (c *Config) ResolveAndValidate() error {
 		}
 		if _, err := c.OwnerSecurity.ProxyPrefixes(); err != nil {
 			return err
-		}
-		switch c.OwnerSecurity.CustodyMode {
-		case "":
-			c.OwnerSecurity.CustodyMode = CustodyLegacyManaged
-		case CustodyLegacyManaged, CustodyClientRelease:
-		default:
-			return fmt.Errorf("owner_security.custody_mode must be legacy_managed or client_release")
 		}
 		if c.OwnerSecurity.DatabaseURLEnv == "" {
 			return fmt.Errorf("owner_security.database_url_env is required")

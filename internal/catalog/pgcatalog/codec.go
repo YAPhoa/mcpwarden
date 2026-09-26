@@ -3,6 +3,7 @@ package pgcatalog
 import (
 	"bytes"
 	"crypto/hmac"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -54,11 +55,19 @@ func sameTime(payload, column time.Time) bool {
 	return payload.Truncate(time.Microsecond).Equal(column.Truncate(time.Microsecond))
 }
 
-func grantID(e catalog.Entry) string {
-	if e.OAuth != nil && e.OAuth.Grant != nil {
-		return e.OAuth.Grant.ID
-	}
-	return ""
+// storedEntry catches the fields an older build sealed into a connector:
+// header values and upstream OAuth settings. Such a catalog is refused.
+type storedEntry struct {
+	catalog.Entry
+	Headers map[string]string `json:"headers"`
+	OAuth   json.RawMessage   `json:"oauth"`
+}
+
+func (e *storedEntry) old() bool {
+	old := len(e.Headers) > 0 || len(e.OAuth) > 0 && string(e.OAuth) != "null"
+	clear(e.Headers)
+	e.Headers, e.OAuth = nil, nil
+	return old
 }
 
 func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
@@ -102,11 +111,15 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 			st.tombstones[row.ID] = tombstone{owner: row.OwnerID, life: life}
 			continue
 		}
-		var e catalog.Entry
-		if err := s.open(connectorAAD(row.ID), row.Sealed, &e); err != nil {
+		var stored storedEntry
+		if err := s.open(connectorAAD(row.ID), row.Sealed, &stored); err != nil {
 			return nil, err
 		}
-		if e.ID != row.ID || e.Owner != row.OwnerID || e.Name != row.Name || e.AuthType != row.AuthType || grantID(e) != row.GrantID ||
+		if stored.old() || row.GrantID != "" {
+			return nil, fmt.Errorf("stored connector was %w", catalog.ErrOldFormat)
+		}
+		e := stored.Entry
+		if e.ID != row.ID || e.Owner != row.OwnerID || e.Name != row.Name || e.AuthType != row.AuthType ||
 			!sameTime(e.CreatedAt, row.CreatedAt) || !sameTime(e.UpdatedAt, row.UpdatedAt) || !e.DeletedAt.IsZero() {
 			return nil, bad("connector")
 		}
@@ -200,7 +213,7 @@ func (s *sealer) accessRow(r catalog.AccessRecord) (catalogdb.Access, error) {
 
 func (s *sealer) connectorRow(e catalog.Entry, revision int64) (catalogdb.Connector, error) {
 	sealed, err := s.seal(connectorAAD(e.ID), e)
-	return catalogdb.Connector{ID: e.ID, OwnerID: e.Owner, Name: e.Name, AuthType: e.AuthType, GrantID: grantID(e), GrantRevision: revision,
+	return catalogdb.Connector{ID: e.ID, OwnerID: e.Owner, Name: e.Name, AuthType: e.AuthType, GrantRevision: revision,
 		CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Sealed: sealed}, err
 }
 

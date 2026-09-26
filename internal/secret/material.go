@@ -104,7 +104,7 @@ func parseBundle(raw []byte, names []string) ([]privateHeader, error) {
 	}()
 	for _, h := range bundle.Headers {
 		name := strings.ToLower(h.Name)
-		if !credentialHeader(name) || !slices.Contains(names, name) || seen[name] || h.Value == nil || !utf8.ValidString(*h.Value) {
+		if !CredentialHeader(name) || !slices.Contains(names, name) || seen[name] || h.Value == nil || !utf8.ValidString(*h.Value) {
 			return nil, ErrInvalid
 		}
 		// RFC field values cannot contain CR/LF, NUL, DEL or other controls.

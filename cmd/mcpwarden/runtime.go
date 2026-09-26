@@ -25,7 +25,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/proxy"
 	"github.com/yaphoa/mcpwarden/internal/registry"
 	"github.com/yaphoa/mcpwarden/internal/upstream"
-	"github.com/yaphoa/mcpwarden/internal/upstreamauth"
 )
 
 type userRuntime struct {
@@ -36,26 +35,26 @@ type userRuntime struct {
 // runtimes gives each authenticated user separate upstream sessions and tools.
 // Static YAML upstreams are present for every user; panel entries belong to one user.
 type runtimes struct {
-	access       *accessManager
-	upstreamAuth *upstreamauth.Service
-	mu           sync.Mutex
-	ctx          context.Context
-	cfg          config.Config
-	policy       *policy.Policy
-	audit        audit.Store
-	store        catalog.Repository
-	logger       *slog.Logger
-	users        map[string]*userRuntime
+	access *accessManager
+	mu     sync.Mutex
+	ctx    context.Context
+	cfg    config.Config
+	policy *policy.Policy
+	audit  audit.Store
+	store  catalog.Repository
+	logger *slog.Logger
+	users  map[string]*userRuntime
 	// providerGuard ends the owner's access windows before a file catalog
 	// changes a provider's availability or visible tools. The PostgreSQL
 	// catalog does this in its own transaction and leaves it unset.
 	providerGuard accessGuard
-	// guarded is set in custody_mode client_release, before any runtime exists.
+	// guarded is set when the owner vault runs, before any runtime exists.
+	// Without it, credentialed connectors cannot be created.
 	guarded *guardedCustody
 }
 
 func newRuntimes(ctx context.Context, cfg config.Config, pol *policy.Policy, log audit.Store, store catalog.Repository, logger *slog.Logger) *runtimes {
-	return &runtimes{access: newAccessManager(store), upstreamAuth: upstreamauth.New(store), ctx: ctx, cfg: cfg, policy: pol, audit: log, store: store, logger: logger, users: map[string]*userRuntime{}}
+	return &runtimes{access: newAccessManager(store), ctx: ctx, cfg: cfg, policy: pol, audit: log, store: store, logger: logger, users: map[string]*userRuntime{}}
 }
 
 func (rs *runtimes) get(owner string) *userRuntime {
@@ -118,6 +117,14 @@ func (rs *runtimes) getLocked(owner string) *userRuntime {
 	return rt
 }
 
+// vaultOwner reports whether owner can hold credentialed connectors: the
+// owner vault runs and owner is a local account. Owner routes need that
+// account's browser session, so the shared operator workspace could never
+// unlock one.
+func (rs *runtimes) vaultOwner(owner string) bool {
+	return rs.guarded != nil && strings.HasPrefix(owner, "account:")
+}
+
 func (rs *runtimes) add(e catalog.Entry) error {
 	if rs.store == nil {
 		return fmt.Errorf("panel-managed upstreams are not configured")
@@ -127,6 +134,9 @@ func (rs *runtimes) add(e catalog.Entry) error {
 	}
 	if err := catalog.Validate(e); err != nil {
 		return err
+	}
+	if e.Credentialed() && !rs.vaultOwner(e.Owner) {
+		return fmt.Errorf("connectors with credentials need the owner vault (owner_security) and a signed-in local account; only auth type none is available here")
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -234,7 +244,7 @@ func (rs *runtimes) status(w http.ResponseWriter, r *http.Request) {
 	// Report only server-validated identity, never claims decoded by the browser.
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ready": rt.manager.Ready(), "upstreams": rt.manager.States(),
-		"session": map[string]any{"mode": mode, "subject": requestOwner(r), "authentication": authentication, "management_scope": scope, "username": username, "role": "admin", "access_id": func() string { a, _ := accessFrom(r.Context()); return a.ID }()},
+		"session": map[string]any{"mode": mode, "subject": requestOwner(r), "authentication": authentication, "management_scope": scope, "username": username, "role": "admin", "access_id": func() string { a, _ := accessFrom(r.Context()); return a.ID }(), "vault": rs.vaultOwner(requestOwner(r))},
 	})
 }
 
@@ -296,7 +306,7 @@ func (rs *runtimes) providers(w http.ResponseWriter, r *http.Request) {
 
 func (rs *runtimes) providerTools(w http.ResponseWriter, r *http.Request) {
 	name, suffix, ok := strings.Cut(strings.TrimPrefix(r.URL.Path, "/api/providers/"), "/")
-	if !ok || name == "" || suffix != "tools" && suffix != "visibility" && suffix != "enabled" && suffix != "oauth" {
+	if !ok || name == "" || suffix != "tools" && suffix != "visibility" && suffix != "enabled" {
 		http.Error(w, "invalid provider path", http.StatusBadRequest)
 		return
 	}
@@ -310,10 +320,6 @@ func (rs *runtimes) providerTools(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found {
 		http.Error(w, "provider not found", http.StatusNotFound)
-		return
-	}
-	if suffix == "oauth" {
-		rs.startUpstreamOAuth(w, r, name)
 		return
 	}
 	if suffix == "enabled" {
@@ -387,7 +393,7 @@ func (rs *runtimes) connections(w http.ResponseWriter, r *http.Request) {
 		entries := rs.store.List(owner)
 		type view struct {
 			AuthType       string     `json:"auth_type"`
-			OAuthConnected bool       `json:"oauth_connected"`
+			Custody        string     `json:"custody,omitempty"`
 			ID             string     `json:"id"`
 			Name           string     `json:"name"`
 			URL            string     `json:"url"`
@@ -400,15 +406,11 @@ func (rs *runtimes) connections(w http.ResponseWriter, r *http.Request) {
 			kind := entry.AuthType
 			if kind == "" {
 				kind = "none"
-				if len(entry.Headers) > 0 {
-					kind = "headers"
-				}
 			}
-			v := view{AuthType: kind, OAuthConnected: entry.OAuth != nil && entry.OAuth.Grant != nil, ID: entry.ID, Name: entry.Name, URL: entry.URL, CallTimeout: entry.CallTimeout, HeaderNames: []string{}}
-			for name := range entry.Headers {
-				v.HeaderNames = append(v.HeaderNames, name)
+			v := view{AuthType: kind, ID: entry.ID, Name: entry.Name, URL: entry.URL, CallTimeout: entry.CallTimeout, HeaderNames: append([]string{}, entry.HeaderNames...)}
+			if entry.Credentialed() {
+				v.Custody = "vault"
 			}
-			sort.Strings(v.HeaderNames)
 			if cached, ok := rs.store.Discovery(owner, entry.Name); ok {
 				v.LastDiscovered = &cached.UpdatedAt
 			}
@@ -417,21 +419,23 @@ func (rs *runtimes) connections(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, out)
 	case http.MethodPost:
 		var input struct {
-			AuthType    string                 `json:"auth_type"`
-			OAuth       *catalog.OAuthSettings `json:"oauth"`
-			Name        string                 `json:"name"`
-			URL         string                 `json:"url"`
-			Headers     map[string]string      `json:"headers"`
-			CallTimeout string                 `json:"call_timeout"`
+			AuthType    string          `json:"auth_type"`
+			Name        string          `json:"name"`
+			URL         string          `json:"url"`
+			HeaderNames []string        `json:"header_names"`
+			CallTimeout string          `json:"call_timeout"`
+			Headers     json.RawMessage `json:"headers"`
+			OAuth       json.RawMessage `json:"oauth"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&input); err != nil {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
 		}
-		if input.OAuth != nil {
-			input.OAuth.Grant = nil
+		if err := oldConnectorFields(input.Headers, input.OAuth); err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
 		}
-		e := catalog.Entry{AuthType: input.AuthType, OAuth: input.OAuth, Owner: owner, Name: input.Name, URL: input.URL, Headers: input.Headers, CallTimeout: input.CallTimeout}
+		e := catalog.Entry{AuthType: input.AuthType, Owner: owner, Name: input.Name, URL: input.URL, HeaderNames: input.HeaderNames, CallTimeout: input.CallTimeout}
 		if err := rs.add(e); err != nil {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -525,17 +529,22 @@ func (rs *runtimes) providerEnabled(w http.ResponseWriter, r *http.Request, name
 	jsonResponse(w, http.StatusOK, map[string]bool{"enabled": *input.Enabled})
 }
 
+// oldConnectorFields refuses header values and OAuth settings, which older
+// builds accepted. Credentials go to the owner vault, never to this API.
+func oldConnectorFields(headers, oauth json.RawMessage) error {
+	if len(headers) > 0 && string(headers) != "null" {
+		return fmt.Errorf("headers are not accepted: send header_names and store the values in the vault (/vault)")
+	}
+	if len(oauth) > 0 && string(oauth) != "null" {
+		return fmt.Errorf("OAuth connectors return with roadmap step 6")
+	}
+	return nil
+}
+
 func (rs *runtimes) upstreamConfig(e catalog.Entry) config.Upstream {
 	u := e.Upstream()
-	if e.AuthType == "oauth" {
-		u.OAuthHandler = rs.upstreamAuth.Handler(e)
-	}
 	if rs.store != nil {
 		u.Disabled = rs.store.Visibility(e.Owner, e.Name).Disabled
-	}
-	if rs.guarded != nil && rs.guarded.bound(e.Owner, e.ID) {
-		u.Guarded = true
-		u.Headers, u.OAuthHandler = nil, nil
 	}
 	return u
 }

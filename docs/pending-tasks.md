@@ -4,8 +4,9 @@ Current boundary: the running gateway still uses the encrypted file catalog.
 The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter,
 owner security API, owner vault console and PostgreSQL catalog backend are
 implemented and tested. The owner API, console and PostgreSQL catalog are
-opt-in, live data has not been migrated, and client-release execution
-(`custody_mode: client_release`) is opt-in and off in the live deployment. The original
+opt-in, and live data has not been migrated. Personal connectors store header
+names only; a connector with credentials is in vault custody from creation and
+needs `owner_security`, and upstream OAuth is removed until step 6. The original
 acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
 per-case coverage of the 68 acceptance tests is in the
 [acceptance matrix](security/acceptance-matrix.md).
@@ -37,32 +38,40 @@ per-case coverage of the 68 acceptance tests is in the
    `managed_upstreams.backend: postgres` (requires `owner_security`); see
    [catalog storage](catalog-storage.md) and [history storage](history-storage.md).
    Accounts, password verifiers, keys, sessions, connectors, tombstones,
-   discovery, visibility and indexed call history live in PostgreSQL. Secrets
-   stay sealed under the existing catalog key (legacy managed custody). Every
+   discovery, visibility and indexed call history live in PostgreSQL. Account
+   secrets stay sealed under the existing catalog key; connector credentials
+   are only in the vault. Every
    catalog change commits with its security event and any lease revocation in
    one owner transaction and publishes after commit; storage failure stops the
    gateway without falling back to the file. `mcpwarden-catalog` imports from a
    protected snapshot with checkpointed, field-by-field verification, then cuts
-   over. Its rollback reconciles revocations, suspends windows, requires OAuth
-   reauthorization for rotated grants and keeps new history. The
+   over. Its rollback reconciles revocations, suspends windows and keeps new
+   history; its reauthorization list is always empty now that connectors hold
+   no OAuth grants. The
    [cutover procedure](catalog-migration.md) awaits review before live data
    moves; a second import after a rollback is not supported yet.
-4. **Startup and guarded execution integration.** Implemented behind
-   `owner_security.custody_mode: client_release`; see
+4. **Startup and guarded execution integration.** Implemented; guarded
+   execution is installed whenever `owner_security` runs (the `custody_mode`
+   setting is gone). See
    [encrypted runtime](security/encrypted-runtime.md#startup-integration). Custody
-   caches load before any runtime; an HTTP header connector with a vault
-   credential runs only through the guarded proxy, its legacy session and
-   reconnect stop and its server-held headers are never read for it. A restart
-   starts locked with a new boot. A tombstone keeps the connector locked; nothing
-   falls through to legacy execution. Setting up new providers under this custody
-   requires step 5, and OAuth providers require step 6. The server-held headers
-   of converted connectors are kept unused (chosen 2026-09-25); a purge is a
-   separate step.
+   caches load before any runtime. Credentialed personal connectors (bearer,
+   API key, custom headers) store header names only and are guarded from
+   creation: the gateway never holds their credential or dials them in the
+   background, refresh returns 409, and every call needs an owner-activated
+   window. A restart starts locked with a new boot, and a tombstone keeps the
+   connector locked. Only local-account workspaces on a gateway with
+   `owner_security` can create credentialed connectors, and only for endpoints
+   the vault destination accepts; everyone else gets no-auth connectors. Catalogs from older builds (header values, OAuth settings, grant
+   IDs) are refused at load; there is no conversion.
 5. **Initial setup/discovery authorization.** Implement a bounded owner-only
    discovery capability for new providers before their tool catalog exists.
+   Until then a new credentialed connector has no tools and cannot be used;
+   browser flow tests seed discovery through a `flowtest`-tagged test route
+   that this step removes.
    Revalidate destination/header/network policy and actual discovered definitions.
    The current per-call maintenance capability is not this registration flow.
-6. **OAuth encrypted state and refresh.** Encrypt the whole token/client-secret
+6. **OAuth encrypted state and refresh.** Upstream OAuth for personal
+   connectors is removed and returns here, vault-backed. Encrypt the whole token/client-secret
    bundle, bind refresh to current authority, commit rotated tokens with revision
    CAS and nonce/write limits, and handle concurrency/failed writes safely.
    Authentication recovery must not replay a tool operation.

@@ -13,9 +13,9 @@ It ships as two parts: a headless Go server, and a separate admin panel for mana
 
 - **One endpoint for many servers.** Streamable HTTP at `/mcp`, or one-client `--stdio` mode. Upstreams connect concurrently with retry, namespaced routing, and dynamic tool refresh.
 - **Control over tools.** Per-tool allow/deny policy, per-user tool visibility, an approval interface, and a JSONL call audit.
-- **Personal connections.** Each user adds their own remote MCP servers with private headers or upstream OAuth, with saved tool discovery and provider search.
+- **Personal connections.** Each user adds their own remote MCP servers, with saved tool discovery and provider search. Credentials for them live only in the owner vault and are used inside access windows the owner starts.
 - **Access control.** Panel accounts with named, revocable API keys; operator bearer auth in local mode; or optional OAuth for remote clients such as ChatGPT. Origin checks, `/healthz`, and `/readyz`.
-- **Nothing extra to run.** Encrypted local storage by default, behind backend-neutral catalog and audit interfaces; no external database is required.
+- **Nothing extra to run.** Encrypted local storage by default, behind backend-neutral catalog and audit interfaces; no external database is required. Connectors with credentials need the owner vault (`owner_security`), which uses PostgreSQL until the SQLite store lands.
 
 ## Quick start with Docker Compose
 
@@ -69,7 +69,7 @@ claude mcp add mcpwarden -- /absolute/path/to/mcpwarden --stdio --config /absolu
 | Guide | Covers |
 | --- | --- |
 | [Accounts and access](docs/guide/accounts-and-access.md) | Registration, the panel, API keys and roles, sessions, limits, workspaces. |
-| [Upstreams](docs/guide/upstreams.md) | Adding servers, upstream auth and OAuth, enabling connectors and tools, tool identity. |
+| [Upstreams](docs/guide/upstreams.md) | Adding servers, upstream auth and the vault, enabling connectors and tools, tool identity. |
 | [OAuth mode (ChatGPT)](docs/guide/oauth-mode.md) | Using an external identity provider so ChatGPT can connect. |
 | [Configuration and operations](docs/guide/configuration.md) | `listen`, downstream auth, origins, managed storage, stdio env, health checks, audit. |
 | [Tool call history](docs/guide/call-history.md) | The History page, its API, and how calls are recorded. |
@@ -79,9 +79,9 @@ Design and project records: [decisions](docs/decisions.md), [SDK notes](docs/sdk
 
 ## Security roadmap
 
-Security spec v1.1 includes integrated public caller-key IDs and durable dispatch audit, plus a tested lease engine, PostgreSQL encrypted storage, browser [vault primitives](docs/security/vault-storage.md), and an opt-in [encrypted MCP dispatch adapter](docs/security/encrypted-runtime.md). Owner vault screens and live lease enforcement remain under development; current credential storage remains server managed.
+Security spec v1.1 includes integrated public caller-key IDs and durable dispatch audit, plus a tested lease engine, PostgreSQL encrypted storage, browser [vault primitives](docs/security/vault-storage.md), and an [encrypted MCP dispatch adapter](docs/security/encrypted-runtime.md). With `owner_security` set, personal connector credentials are held only in the owner vault and every call to a credentialed connector needs an access window. Setup discovery (step 5) and vault-backed upstream OAuth (step 6) are still to come, so new credentialed connectors have no tools yet.
 
-See the [review and implementation roadmap](docs/security/implementation.md) and the [remaining implementation tasks](docs/pending-tasks.md), which describe the work needed before client-release custody can be enabled.
+See the [review and implementation roadmap](docs/security/implementation.md) and the [remaining implementation tasks](docs/pending-tasks.md), which describe the work still needed.
 
 ## Development
 

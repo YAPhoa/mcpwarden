@@ -13,7 +13,7 @@ import {fileURLToPath} from 'node:url';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const staticRoot = fileURLToPath(new URL('../static', import.meta.url));
-export const LEGACY_HEADER = 'legacy-synthetic-key';
+export const UPSTREAM_KEY = 'upstream-synthetic-key';
 // The main page runs under a strict policy so violations fail the flows. The
 // /security/ worker scripts carry the same policy as ui/nginx.conf.
 export const PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
@@ -34,19 +34,22 @@ function psql(url, sql) { execFileSync('psql', [url.toString(), '-v', 'ON_ERROR_
 
 export function buildBinaries(dir) {
   if (process.env.MCPWARDEN_BIN_DIR) return process.env.MCPWARDEN_BIN_DIR;
-  for (const name of ['mcpwarden', 'mcpwarden-security-db']) execFileSync('go', ['build', '-o', join(dir, name), `./cmd/${name}`], {cwd: repo, stdio: 'inherit'});
+  // The flowtest tag adds a route that seeds cached discovery for vault
+  // connectors until setup discovery (roadmap step 5) exists.
+  for (const name of ['mcpwarden', 'mcpwarden-security-db']) execFileSync('go', ['build', '-tags', 'flowtest', '-o', join(dir, name), `./cmd/${name}`], {cwd: repo, stdio: 'inherit'});
   return dir;
 }
 
-// Minimal Streamable HTTP MCP server answering with JSON. It requires the
-// connector's legacy header so discovery proves the gateway used it.
+// Minimal Streamable HTTP MCP server answering with JSON. The gateway never
+// dials it: its connector is in vault custody and the flows open no calls. It
+// refuses requests without a header the gateway does not have.
 export async function startUpstream() {
   const tools = [
     {name: 'search', description: 'Synthetic search <img src=x onerror="document.title=\'pwned\'"> across one repository', inputSchema: {type: 'object', properties: {repo: {type: 'string'}}}},
     {name: 'write', description: 'Synthetic write', inputSchema: {type: 'object'}},
   ];
   const server = createServer((req, res) => {
-    if (req.headers['x-api-key'] !== LEGACY_HEADER) { res.writeHead(401); res.end(); return; }
+    if (req.headers['x-api-key'] !== UPSTREAM_KEY) { res.writeHead(401); res.end(); return; }
     if (req.method === 'DELETE') { res.writeHead(200); res.end(); return; }
     if (req.method !== 'POST') { res.writeHead(405, {Allow: 'POST'}); res.end(); return; }
     let body = '';
@@ -62,7 +65,7 @@ export async function startUpstream() {
     });
   });
   const port = await listen(server);
-  return {url: `http://127.0.0.1:${port}/mcp`, close: () => new Promise(done => server.close(done)),
+  return {url: `http://127.0.0.1:${port}/mcp`, tools, close: () => new Promise(done => server.close(done)),
     // Changes a tool definition as an upstream release would; discovery sees it on refresh.
     change: (name, patch) => Object.assign(tools.find(t => t.name === name), patch)};
 }
@@ -147,7 +150,7 @@ export async function startFixture() {
   }
   await start();
   return {
-    ui: ui.origin, gateway, upstream: upstream.url, changeTool: upstream.change, logs: () => logs,
+    ui: ui.origin, gateway, upstream: upstream.url, upstreamTools: () => structuredClone(upstream.tools), changeTool: upstream.change, logs: () => logs,
     restart: async () => { await stop(); await start(); },
     // Diagnostics for a stalled run: the Go runtime prints every goroutine on SIGQUIT.
     dumpGoroutines: async () => {

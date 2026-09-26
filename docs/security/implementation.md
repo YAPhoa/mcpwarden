@@ -4,9 +4,11 @@ Reviewed on 2026-09-22 against the actual repository and pinned Go MCP SDK v1.8.
 The user's request establishes the staged roadmap. The caller/audit part of M1 is
 integrated; subsequent slices add the lease core, PostgreSQL metadata adapter,
 real encrypted-envelope activation, browser vault primitives, encrypted-record
-persistence, and an opt-in proxy execution adapter tested through MCP with
-PostgreSQL. Application startup, owner HTTP API and UI have not
-installed this path. Client encryption is not enabled in the running gateway.
+persistence, and a guarded proxy execution adapter tested through MCP with
+PostgreSQL. Startup now installs that path whenever `owner_security` runs, and
+personal connector credentials are vault-only from creation (see
+[the last section](#vault-only-personal-credentials--2026-09-26)). The live
+deployment does not run `owner_security` yet.
 
 The [supplied specification](spec-v1.1/SECURITY-DESIGN.md) is retained byte-for-byte
 along with its checklist, candidate schema, and public interoperability fixtures.
@@ -41,7 +43,7 @@ independently revalidated in this repository review.
 | Caller identity | Exact access record and role already bind SDK sessions; live audit lacked caller identity. | Public IDs and audit snapshots implemented here; owner-coordinated admission/revocation remains. |
 | Audit durability | One synced completion event after execution; failures only logged. | Admission and completion events implemented here; transactionally linking leases/budgets to audit remains. |
 | Approval | `internal/approval.None` runs on every tool call. | Add immutable requests, finite scopes, timed leases, explicit activation and revocation. Do not adapt this per-call interface into repeated human prompts. |
-| Custody | A deployment AES-GCM key decrypts the whole catalog into memory. | Browser root/CEK lifecycle, strict envelopes, recovery, field encryption, and restart-locked activation. Current custody remains legacy server managed. |
+| Custody | A deployment AES-GCM key decrypts the whole catalog into memory. | Browser root/CEK lifecycle, strict envelopes, recovery, field encryption, and restart-locked activation. Personal connector credentials are now vault-only; the catalog key still seals account data. |
 | Storage | Coherent catalog repository and independent JSONL audit interfaces. | Reviewed PostgreSQL adapter and migration preserving all legacy metadata/verifiers; candidate SQL lacks the full transition and current MCP connection lifecycle contract. |
 | Upstreams | Startup/reconnect/discovery use stored headers or grants directly. | Setup/discovery leases, transport credential handles, epoch/revision binding, guarded refresh, and final-lease drain. |
 | Network | URL and redirect checks exist. | Connection-time DNS/IP/SSRF enforcement, explicit private-network policy, and stdio environment/process isolation. |
@@ -260,3 +262,16 @@ closed without fallback. The six owner-route suites run unchanged on it after a
 real import and cutover. Live data has not been migrated; the procedure is in
 [catalog migration](../catalog-migration.md) for review. Guarded execution at
 startup is still step 4.
+
+## Vault-only personal credentials — 2026-09-26
+
+Personal connectors store header names only (`none`, `bearer` with
+`Authorization`, `api_key` with one name, `headers` with 1 to 32). A credentialed
+connector is bound to guarded execution from creation: the gateway never holds its
+credential or dials it in the background, refresh returns 409, and every call needs
+an owner-activated window. The `custody_mode` setting and the conversion path are
+gone; guarded execution is installed whenever `owner_security` runs, and without
+it only `none` connectors can be created. Upstream OAuth for personal connectors
+is removed and returns vault-backed in step 6. Catalogs from older builds are
+refused at load, with no conversion. New credentialed connectors have no tools
+until setup discovery (step 5).

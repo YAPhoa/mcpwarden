@@ -15,7 +15,7 @@ import (
 
 // LeasedExecution is installed before serving requests. Credential reads only
 // current owner-scoped custody metadata, including tombstones: a required binding
-// MUST NOT disappear into legacy fallback when a credential is locked/deleted.
+// MUST NOT disappear into unguarded execution when a credential is locked/deleted.
 // Its security mutations use Service.Change. Complete appends to the same durable
 // store as lease admissions. Available, when set, hides a bound connector's
 // cached tools from tools/list while it is disabled. History, when set,

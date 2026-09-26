@@ -54,9 +54,9 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	defer log.Close()
 	rs := newRuntimes(ctx, cfg, pol, log, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rs.close()
-	_, remote := upstreamForUser(t, "echo", "synthetic")
+	_, remote := upstreamForUser(t, "echo")
 	defer func() { rs.close(); remote.Close() }()
-	if err := rs.add(catalog.Entry{Owner: "alice", Name: "remote", URL: remote.URL, Headers: map[string]string{"X-Api-Key": "synthetic"}}); err != nil {
+	if err := rs.add(catalog.Entry{Owner: "alice", Name: "remote", URL: remote.URL}); err != nil {
 		t.Fatal(err)
 	}
 	awaitRuntime(t, func() bool { e, ok := rs.get("alice").proxy.Registry.Lookup("remote__echo"); return ok && e.Healthy })
@@ -256,7 +256,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if call(admin, "warden_set_provider_enabled", map[string]any{"provider": "remote", "enabled": true}).IsError {
 		t.Fatal("admin could not enable")
 	}
-	if call(admin, "warden_add_provider", map[string]any{"name": "added", "url": remote.URL, "headers": map[string]string{"X-Api-Key": "synthetic"}}).IsError {
+	if call(admin, "warden_add_provider", map[string]any{"name": "added", "url": remote.URL}).IsError {
 		t.Fatal("admin could not add")
 	}
 	if call(admin, "warden_remove_provider", map[string]any{"provider": "added"}).IsError {

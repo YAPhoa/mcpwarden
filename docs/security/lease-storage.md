@@ -1,10 +1,10 @@
 # Lease storage and migration
 
 This is the tested foundation for security spec v1.1. `internal/lease` implements
-authorization state; `internal/lease/postgres` persists its metadata. The opt-in
+authorization state; `internal/lease/postgres` persists its metadata. The guarded
 proxy adapter exercises real encrypted credentials with this store; startup
-installs it only with `owner_security.custody_mode: client_release`. The live
-gateway still uses its encrypted file catalog and JSONL audit in legacy custody. The
+installs it whenever `owner_security` runs. The live gateway does not run
+`owner_security` yet and still uses its encrypted file catalog and JSONL audit. The
 new integration tests use synthetic credentials with the real envelope activator;
 isolated core tests also retain simple test materials. See [encrypted execution](encrypted-runtime.md).
 
@@ -151,13 +151,12 @@ earlier design points are covered as follows. The catalog tables implement the
 full `catalog.Repository` contract. Revocation and lease changes share owner
 transactions. Import runs under the executor lock and an exclusive catalog file
 lock, from a hash-pinned protected snapshot, preserving line positions and v0
-IDs. Credentials stay in legacy managed custody under the existing catalog key.
+IDs. Account secrets stay sealed under the existing catalog key; connectors carry
+header names only, and their credentials live in the vault.
 Import is checkpointed and verified field by field before an explicit cutover.
 A rollback exports the current state rather than restoring an older file. It
-keeps new history, suspends windows and requires OAuth reauthorization where
-grants changed. Client conversion of credentials remains a later step. The
-browser lifecycle, owner routes and runtime integration remain prerequisites for
-guarded execution (roadmap step 4).
+keeps new history and suspends windows; no OAuth reauthorization is needed, since
+connectors hold no grants.
 
 ## Sonic and reproducible measurements
 

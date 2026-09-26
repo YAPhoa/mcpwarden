@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,14 +52,24 @@ func newHeaderUpstream(t *testing.T) *headerUpstream {
 	return u
 }
 
+func (u *headerUpstream) total() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for _, c := range u.seen {
+		n += c
+	}
+	return n
+}
+
 func (u *headerUpstream) requests(value string) int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.seen[value]
 }
 
-// guardedGateway is the gateway's runtime and MCP endpoint in client_release
-// mode, wired as run() wires them.
+// guardedGateway is the gateway's runtime and MCP endpoint with the owner
+// vault, wired as run() wires them.
 type guardedGateway struct {
 	rs      *runtimes
 	server  *httptest.Server
@@ -68,9 +79,6 @@ type guardedGateway struct {
 func (f *ownerFixture) guardedGateway() *guardedGateway {
 	f.t.Helper()
 	cfg := f.cfg
-	security := *cfg.OwnerSecurity
-	security.CustodyMode = config.CustodyClientRelease
-	cfg.OwnerSecurity = &security
 	pol, _ := policy.New(config.Policy{Default: "allow"})
 	var history audit.Store
 	if f.pg != nil {
@@ -85,10 +93,13 @@ func (f *ownerFixture) guardedGateway() *guardedGateway {
 	}
 	rs := newRuntimes(f.t.Context(), cfg, pol, history, f.store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	rs.guarded = &guardedCustody{api: f.api, store: f.store, history: history}
-	f.api.onCredential = rs.converted
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", f.accounts.protect(rs.access.bindMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		return rs.get(requestOwner(r)).proxy.Server
+		p := rs.get(requestOwner(r)).proxy
+		if a, ok := accessFrom(r.Context()); ok && a.Role == "admin" {
+			return p.AdminServer
+		}
+		return p.Server
 	}, nil)), false))
 	mux.Handle("/api/discovery/", f.accounts.protect(http.HandlerFunc(rs.discovery), true, true))
 	g := &guardedGateway{rs: rs, server: httptest.NewServer(mux), history: history}
@@ -137,44 +148,74 @@ func listed(t *testing.T, s *mcp.ClientSession) map[string]bool {
 	return out
 }
 
-// TestGuardedHeaderExecution drives one header connector from legacy custody
-// through conversion, an access window, a restart and credential deletion.
-// After conversion no request may carry the server-held header.
+// TestGuardedHeaderExecution drives one bearer connector from creation
+// through its first credential, an access window, a restart and credential
+// deletion. The connector is in vault custody from creation: nothing reaches
+// the upstream outside a window, and only with the vault credential.
 func TestGuardedHeaderExecution(t *testing.T) {
 	upstream := newHeaderUpstream(t)
 	f := newOwnerFixture(t, upstream.server.URL+"/mcp")
 	f.destination = &secret.Destination{Schema: "mcpwarden.destination.v1", Endpoint: f.entry.URL, HeaderNames: []string{"authorization"}, Network: "private", PrivatePrefixes: []string{"127.0.0.1/32"}, AllowLoopbackHTTP: true}
 	alice := f.owners["alice"]
-	const legacy, owner = "Bearer legacy-synthetic", "Bearer SYNTHETIC_OWNER_TOKEN"
+	const owner = "Bearer SYNTHETIC_OWNER_TOKEN"
 
-	// Without a vault credential the connector stays on legacy custody.
+	// Before any credential exists the connector is locked: cached tools are
+	// listed, calls need a window, refresh is refused and nothing dials.
 	g := f.guardedGateway()
-	awaitRuntime(t, func() bool { e, ok := g.rs.get(alice).proxy.Registry.Lookup("remote__search"); return ok && e.Healthy })
+	awaitRuntime(t, func() bool { _, ok := g.rs.get(alice).proxy.Registry.Lookup("remote__search"); return ok })
 	agent := g.client(t, f.keys["agent"])
-	if text, failed := callText(t, agent, "remote__search"); failed || text != "upstream search" || upstream.requests(legacy) == 0 {
-		t.Fatalf("legacy call failed: %q", text)
-	}
-
-	// Storing a vault credential converts the connector at once.
-	_, record := f.provision("none")
-	legacyRequests, calls := upstream.requests(legacy), upstream.calls.Load()
 	states := g.rs.get(alice).manager.States()
 	if len(states) != 1 || states[0].Custody != "vault" || states[0].Healthy {
-		t.Fatalf("connector not moved to vault custody: %+v", states)
+		t.Fatalf("connector not in vault custody from creation: %+v", states)
 	}
 	if !listed(t, agent)["remote__search"] {
 		t.Fatal("locked connector's cached tools left tools/list")
 	}
 	if text, failed := callText(t, agent, "remote__search"); !failed || !strings.HasPrefix(text, "MCPWARDEN_LEASE_REQUIRED") {
-		t.Fatalf("locked call: %q", text)
+		t.Fatalf("call without a credential: %q", text)
 	}
 	refresh := httptest.NewRequest(http.MethodPost, "/api/discovery/remote/refresh", nil)
 	refresh.Header.Set("Authorization", "Bearer "+f.keys["agent"])
 	w := httptest.NewRecorder()
 	g.server.Config.Handler.ServeHTTP(w, refresh)
 	if w.Code != http.StatusConflict {
-		t.Fatalf("legacy refresh of a vault connector: %d", w.Code)
+		t.Fatalf("refresh of a vault connector: %d", w.Code)
 	}
+
+	// A credentialed connector added through the API is locked from creation
+	// too, and its view names the header and the vault.
+	add := httptest.NewRequest(http.MethodPost, "/api/connections", strings.NewReader(`{"name":"second","url":"`+f.entry.URL+`","auth_type":"api_key","header_names":["X-API-Key"]}`))
+	add = add.WithContext(context.WithValue(add.Context(), accountContextKey{}, accountIdentity{Owner: alice}))
+	w = httptest.NewRecorder()
+	g.rs.connections(w, add)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("add api_key connector: %d %s", w.Code, w.Body.String())
+	}
+	list := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
+	list = list.WithContext(context.WithValue(list.Context(), accountContextKey{}, accountIdentity{Owner: alice}))
+	w = httptest.NewRecorder()
+	g.rs.connections(w, list)
+	if body := w.Body.String(); !strings.Contains(body, `"name":"second"`) || !strings.Contains(body, `"header_names":["X-API-Key"]`) || strings.Count(body, `"custody":"vault"`) != 2 {
+		t.Fatalf("connections view: %s", body)
+	}
+	for _, st := range g.rs.get(alice).manager.States() {
+		if st.Custody != "vault" || st.Healthy {
+			t.Fatalf("connector not locked: %+v", st)
+		}
+	}
+	if err := g.rs.remove(alice, "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Storing the credential opens no window.
+	_, record := f.provision("none")
+	if text, failed := callText(t, agent, "remote__search"); !failed || !strings.HasPrefix(text, "MCPWARDEN_LEASE_REQUIRED") {
+		t.Fatalf("locked call: %q", text)
+	}
+	if upstream.total() != 0 {
+		t.Fatal("a locked connector reached the upstream")
+	}
+	calls := upstream.calls.Load()
 
 	// An owner-activated window runs the call with the vault header only.
 	request := f.requestAccess("agent", record.CredentialID)
@@ -240,7 +281,7 @@ func TestGuardedHeaderExecution(t *testing.T) {
 	g = f.guardedGateway()
 	agent = g.client(t, f.keys["agent"])
 	if states := g.rs.get(alice).manager.States(); len(states) != 1 || states[0].Custody != "vault" {
-		t.Fatalf("restart put the connector back on legacy custody: %+v", states)
+		t.Fatalf("restart moved the connector out of vault custody: %+v", states)
 	}
 	if !listed(t, agent)["remote__search"] {
 		t.Fatal("restart dropped cached tools")
@@ -254,14 +295,76 @@ func TestGuardedHeaderExecution(t *testing.T) {
 	if text, failed := callText(t, agent, "remote__search"); !failed || !strings.HasPrefix(text, "MCPWARDEN_LEASE_REQUIRED") {
 		t.Fatalf("call after deletion: %q", text)
 	}
-	if upstream.requests(legacy) != legacyRequests {
-		t.Fatal("the server-held header reached the upstream after conversion")
+	if upstream.total() != upstream.requests(owner) {
+		t.Fatal("a request without the vault credential reached the upstream")
 	}
 }
 
-// Stdio mode never opens the owner security executor, so it must refuse a
-// mode whose converted connectors would otherwise run on legacy custody.
-func TestStdioRefusesClientRelease(t *testing.T) {
+// Only a local account can hold credentialed connectors: owner routes need its
+// browser session. The shared operator workspace gets no-auth connectors only,
+// and its status reports no vault. The admin MCP tool passes header names
+// through for an account.
+func TestCredentialedConnectorsNeedAccountOwner(t *testing.T) {
+	upstream := newHeaderUpstream(t)
+	f := newOwnerFixture(t, upstream.server.URL+"/mcp")
+	g := f.guardedGateway()
+	alice := f.owners["alice"]
+	as := func(r *http.Request, owner string) *http.Request {
+		if owner == "" {
+			return r
+		}
+		return r.WithContext(context.WithValue(r.Context(), accountContextKey{}, accountIdentity{Owner: owner}))
+	}
+	for owner, want := range map[string]bool{"": false, "local": false, alice: true} {
+		add := as(httptest.NewRequest(http.MethodPost, "/api/connections", strings.NewReader(`{"name":"shared","url":"https://example.test/mcp","auth_type":"bearer","header_names":["Authorization"]}`)), owner)
+		w := httptest.NewRecorder()
+		g.rs.connections(w, add)
+		if (w.Code == http.StatusCreated) != want || !want && !strings.Contains(w.Body.String(), "local account") {
+			t.Fatalf("owner %q: bearer connector %d %s", owner, w.Code, w.Body.String())
+		}
+		w = httptest.NewRecorder()
+		g.rs.status(w, as(httptest.NewRequest(http.MethodGet, "/api/status", nil), owner))
+		var status struct {
+			Session struct {
+				Vault bool `json:"vault"`
+			} `json:"session"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil || status.Session.Vault != want {
+			t.Fatalf("owner %q: status %s", owner, w.Body.String())
+		}
+	}
+	if len(f.store.List("local")) != 0 {
+		t.Fatal("the shared workspace stored a credentialed connector")
+	}
+	if err := g.rs.remove(alice, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	admin := g.client(t, f.keys["admin-agent"])
+	res, err := admin.CallTool(t.Context(), &mcp.CallToolParams{Name: "warden_add_provider", Arguments: map[string]any{"name": "keyed", "url": "https://example.test/mcp", "auth_type": "api_key", "header_names": []string{"X-API-Key"}}})
+	if err != nil || res.IsError {
+		t.Fatalf("admin tool add: %v %+v", err, res)
+	}
+	found := false
+	for _, e := range f.store.List(alice) {
+		found = found || e.Name == "keyed" && e.AuthType == "api_key" && slices.Equal(e.HeaderNames, []string{"X-API-Key"})
+	}
+	if !found {
+		t.Fatal("admin tool did not pass header names through")
+	}
+	res, err = admin.CallTool(t.Context(), &mcp.CallToolParams{Name: "warden_add_provider", Arguments: map[string]any{"name": "valued", "url": "https://example.test/mcp", "auth_type": "api_key", "headers": map[string]string{"X-API-Key": "synthetic-value"}}})
+	if err == nil && !res.IsError {
+		t.Fatal("admin tool accepted header values")
+	}
+	for _, e := range f.store.List(alice) {
+		if e.Name == "valued" {
+			t.Fatal("a connector with header values was stored")
+		}
+	}
+}
+
+// The custody switch is gone; a config that still sets it is refused rather
+// than silently ignored.
+func TestCustodyModeRefused(t *testing.T) {
 	t.Setenv("TEST_GUARDED_KEY", "synthetic-key")
 	t.Setenv("TEST_GUARDED_DSN", "postgres://runtime@127.0.0.1/unused")
 	dir := t.TempDir()
@@ -271,7 +374,7 @@ func TestStdioRefusesClientRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := run(path, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err == nil || !strings.Contains(err.Error(), "--stdio") {
-		t.Fatalf("stdio accepted client_release: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "custody_mode") {
+		t.Fatalf("config with custody_mode accepted: %v", err)
 	}
 }

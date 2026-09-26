@@ -1,12 +1,12 @@
-# Encrypted credential execution — development adapter
+# Encrypted credential execution
 
-`internal/secret`, the lease material capability, and the opt-in proxy execution
+`internal/secret`, the lease material capability, and the guarded proxy execution
 adapter form a tested path from a released CEK to a real MCP upstream with
-PostgreSQL admission. Startup installs the adapter only with
-`owner_security.custody_mode: client_release`, and then only for HTTP header
-connectors that have a vault credential (see [startup integration](#startup-integration)).
-The live deployment runs neither `owner_security` nor that mode; its credentials
-remain in the existing server-managed encrypted file.
+PostgreSQL admission. Startup installs the adapter whenever `owner_security`
+runs, for every personal connector with credentials (see
+[startup integration](#startup-integration)). Such connectors store header names
+only; their credentials exist only as vault ciphertext. The live deployment does
+not run `owner_security` yet.
 
 ## Ciphertext and activation
 
@@ -43,11 +43,11 @@ tests is explicitly test-only; deterministic nonces stay in public fixtures.
 ## Dispatch boundary
 
 `Proxy.Security` routes explicitly bound providers through `PrepareLeased`.
-Bindings are trusted owner-scoped custody metadata; locked/deleted client-release
-records must keep a required binding, including tombstones, and never fall back
-to legacy manager execution. An incomplete installed adapter fails closed.
-Unbound legacy providers retain their existing behavior. The application excludes
-converted providers from the legacy startup/reconnect manager.
+Bindings are trusted owner-scoped custody metadata, fixed from connector creation;
+locked and tombstoned records keep a required binding and never fall back to
+manager execution. An incomplete installed adapter fails closed. Unbound
+providers (config upstreams and no-auth personal connectors) keep the manager
+path. The manager never connects a bound provider.
 
 1. Check owner, tool policy and visibility. Cached visible tool definitions remain
    listed while a bound credential is locked; listing performs no provider I/O.
@@ -79,7 +79,7 @@ subscription, OAuth handler or credential-bearing teardown after authority ends.
 The SDK's legacy DELETE teardown is rejected locally once maintenance ends; local
 session resources still close. This is conservative and not load-qualified. A
 future session pool needs explicit lifetime and maintenance capabilities, and
-legacy upstreams may need their own session expiry/cleanup limits.
+manager-path upstreams may need their own session expiry/cleanup limits.
 
 The per-call `approval.Approver` is bypassed for this path; owner activation and
 optional confirmation happen when opening the window. Maintenance during a tool
@@ -112,53 +112,49 @@ stdio isolation are outside this header-only adapter.
 
 ## Startup integration
 
-`custody_mode` is `legacy_managed` (default) or `client_release`. In
-`client_release`:
+Guarded execution is installed whenever `owner_security` runs; the former
+`custody_mode` setting is gone, and a config that still sets it fails to load.
 
 - The owner security executor starts (new boot, earlier leases suspended) and
   loads the committed custody index and ciphertext cache before the first
   per-owner runtime exists, on both catalog backends. A load failure stops
-  startup. `--stdio` refuses this mode.
-- A connector is bound when its owner has a vault credential head for it, live
-  or removed, whichever mode wrote it. So the first `client_release` start also
-  converts every connector whose credential was saved or removed under
-  `legacy_managed`. The vault console converts a connector by saving its
-  credential; conversion takes effect when the index publishes after commit, and
-  the legacy session then closes (also when the commit reports an error after
-  publishing). A tombstone keeps the connector bound with no credential, so its
-  calls report `MCPWARDEN_LEASE_REQUIRED` and never reach legacy execution. The
-  connector stays locked until it is deleted and added again, which gives it
-  new connector and tool IDs and default visibility.
-- The legacy manager keeps a state entry for a bound connector (`custody:
-  "vault"`) but never connects it, drops its server-held headers and OAuth
-  handler from its copy, and refuses refresh and calls (`upstream.ErrGuarded`).
-  The catalog still holds the sealed headers; the gateway does not read them for
-  that connector. Switching back to `legacy_managed` restores legacy execution
-  for every converted connector, including tombstoned ones whose vault
-  credential the owner removed on purpose: they go back to their old
-  server-held headers.
-- Cached tool definitions from the last legacy discovery stay in `tools/list`
-  while the connector is enabled; each call verifies the selected definition
-  against the upstream inside its window. Discovery for converted or new
-  connectors needs the owner setup flow (step 5).
+  startup.
+- A personal connector with auth type `bearer`, `api_key` or `headers` is
+  bound from creation, whether or not its owner has saved a credential yet.
+  Before the first save, and after the credential is removed (a tombstone),
+  calls report `MCPWARDEN_LEASE_REQUIRED`. A tombstoned connector stays locked
+  until it is deleted and added again, which gives it new connector and tool IDs
+  and default visibility. The binding never changes after creation.
+- The manager keeps a state entry for a bound connector (`custody: "vault"`) but
+  never connects it, and refuses refresh (409) and calls (`upstream.ErrGuarded`).
+  The catalog holds header names only, so there is no server-side credential to
+  fall back to.
+- Without `owner_security` (and in `--stdio`, which has no owner routes) the
+  guarded adapter is not installed. The API then accepts only `none` connectors,
+  and any stored credentialed connector stays locked and never dials. With
+  `owner_security`, credentialed connectors are still limited to local-account
+  workspaces, since only an account owner can unlock a vault, and to endpoints
+  the vault destination accepts.
+- Cached tool definitions stay in `tools/list` while the connector is enabled;
+  each call verifies the selected definition against the upstream inside its
+  window. Discovery for new credentialed connectors needs the owner setup flow
+  (step 5); until then they have no tools. Browser flow tests build the gateway
+  with `-tags flowtest`, which adds `PUT /api/test/discovery/<name>` to seed
+  cached discovery for a vault connector without dialing; step 5 removes it.
 - Each call uses the connector's configured call timeout, clamped to 5 minutes
-  (30 seconds when unset). Unlike a legacy call, whose timeout starts after its
+  (30 seconds when unset). Unlike a manager call, whose timeout starts after its
   admission write and covers only the upstream, a guarded call's timeout covers
   session setup, the definition check, admission and the upstream call.
   Admission and completion are durable in the lease store. After dispatch, a
   best-effort copy of both goes to the owner's call history with credential,
   lease and approval attribution; a slow or failed copy never delays dispatch.
-- A legacy call that passed the routing check before conversion published is
-  re-checked after its durable admission and denied with
-  `MCPWARDEN_LEASE_REQUIRED` without reaching the upstream. Conversion then
-  replaces the legacy connection, so a later `Manager.Call` gets
-  `upstream.ErrGuarded` and is denied the same way.
 
 `TestGuardedHeaderExecution` (file and PostgreSQL catalogs) drives one
-connector through legacy calls, conversion, a locked call, an owner-activated
-window, a scope miss, disabling, restart and credential deletion against a real
-SDK upstream, and checks that the server-held header never reaches it after
-conversion. `TestGuardedConnectorNeverUsesLegacyHeaders` covers the manager.
+connector from creation through locked calls and refused refresh, credential
+save, an owner-activated window, a scope miss, disabling, restart and credential
+deletion against a real SDK upstream. `TestCredentialSaveDuringCallsNeverDials`
+shows that saving a credential concurrently with calls never reaches the upstream
+without a lease, and `TestGuardedConnectorNeverDials` covers the manager.
 
 ## Validation and release gates
 
@@ -182,4 +178,4 @@ definition changes, revocation, and a real deferred admission commit rejection.
 Before live rollout: the live catalog migration; setup/discovery
 authorization; OAuth refresh; session/resource limits; restart/restore drills;
 and load qualification. Deployment history is recorded in
-[progress](../progress.md); rebuilding the gateway does not enable this mode.
+[progress](../progress.md); the live deployment does not set `owner_security`.

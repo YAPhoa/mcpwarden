@@ -19,9 +19,9 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/upstream"
 )
 
-// conversionDenialCall runs one legacy call against an unreachable upstream
+// guardedDenialCall runs one call against an unreachable upstream
 // and returns its result and the JSONL audit records it wrote.
-func conversionDenialCall(t *testing.T, u config.Upstream, security *LeasedExecution) (*mcp.CallToolResult, []audit.Record) {
+func guardedDenialCall(t *testing.T, u config.Upstream, security *LeasedExecution) (*mcp.CallToolResult, []audit.Record) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pol, err := policy.New(config.Policy{Default: "allow"})
@@ -43,7 +43,9 @@ func conversionDenialCall(t *testing.T, u config.Upstream, security *LeasedExecu
 	defer cancel()
 	m.Start(ctx)
 	defer m.Close()
-	// A healthy cached entry, as left by discovery before conversion.
+	// A healthy entry, so the call passes routing and reaches the manager.
+	// Production never publishes a guarded connector as healthy; this checks
+	// the backstop after admission.
 	p.Changed(u.Name, []*mcp.Tool{{Name: "search", InputSchema: map[string]any{"type": "object"}}}, true)
 	name := u.Name + "__search"
 	res, err := p.call(ctx, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: name, Arguments: []byte(`{}`)}}, name)
@@ -65,7 +67,7 @@ func conversionDenialCall(t *testing.T, u config.Upstream, security *LeasedExecu
 	return res, records
 }
 
-func assertConversionDenial(t *testing.T, res *mcp.CallToolResult, records []audit.Record) {
+func assertGuardedDenial(t *testing.T, res *mcp.CallToolResult, records []audit.Record) {
 	t.Helper()
 	if !res.IsError || !strings.HasPrefix(res.Content[0].(*mcp.TextContent).Text, "MCPWARDEN_LEASE_REQUIRED") {
 		t.Fatalf("result = %+v", res.Content[0])
@@ -82,18 +84,10 @@ func assertConversionDenial(t *testing.T, res *mcp.CallToolResult, records []aud
 	}
 }
 
-// The binding publishes between the routing check and the post-admission
-// re-check.
-func TestRecheckAfterAdmissionRecordsDenial(t *testing.T) {
-	checks := 0
-	security := &LeasedExecution{Credential: func(string, string) (string, bool) { checks++; return "", checks > 1 }}
-	res, records := conversionDenialCall(t, config.Upstream{Name: "g", Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second}, security)
-	assertConversionDenial(t, res, records)
-}
-
-// Conversion replaced the legacy connection after the re-check: the manager
-// returns ErrGuarded and nothing is forwarded.
+// Backstop: a guarded connector that reached dispatch without a lease adapter
+// gets ErrGuarded from the manager, and nothing is forwarded. Without the
+// vault a real call stops earlier, as unavailable, before admission.
 func TestGuardedManagerRecordsDenial(t *testing.T) {
-	res, records := conversionDenialCall(t, config.Upstream{Name: "g", Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second, Guarded: true}, nil)
-	assertConversionDenial(t, res, records)
+	res, records := guardedDenialCall(t, config.Upstream{Name: "g", Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second, Guarded: true}, nil)
+	assertGuardedDenial(t, res, records)
 }

@@ -4,7 +4,7 @@
 // a window. Locking, sign-out, account changes, leaving the page and idle time
 // terminate the worker and discard results that arrive afterwards.
 import {VaultClient} from './vault-client.mjs';
-import {OwnerClient, OwnerError, b64url, callsLabel, credentialSaveEffect, custodyCopy, destinationDigest, destinationFor, durationLabel, errorMessage, formatRecoveryKey,
+import {OwnerClient, OwnerError, b64url, callsLabel, credentialSaveEffect, destinationDigest, destinationFor, durationLabel, errorMessage, formatRecoveryKey,
   headerBundle, headerValueProblem, parseRecoveryKey, passphraseProblem, publicHandle, remainingLabel, requestPhase, reviewedScope, windowPhase} from './owner-core.mjs';
 
 const $ = id => document.getElementById(id);
@@ -62,10 +62,6 @@ function pageError(message, refresh = false) { $('vault-error').textContent = me
 function unlocked() { return state.unlocked && vault.active; }
 function ownerCaller(id) { return state.accessItems.find(item => item.id === id); }
 function handleFor(publicID) { return publicHandle(publicID, state.accessItems.map(item => item.public_id).filter(Boolean)); }
-function custodyMode() { return state.vaultState?.custody_mode || 'legacy_managed'; }
-function applyCustodyCopy() {
-  for (const [id, text] of Object.entries(custodyCopy(custodyMode()))) $(id).textContent = text;
-}
 function connectorName(credential) { return credential?.connector_name || 'Unknown connector'; }
 function providerHealthy(name) { const p = state.providers.find(p => p.name === name); return !p || p.enabled !== false && (p.healthy || p.custody === 'vault'); }
 function currentCredential(id) { return state.wrappers?.credentials.find(c => c.credential_id === id && !c.deleted); }
@@ -199,7 +195,6 @@ async function load() {
     Object.assign(state, {vaultState, bootID: vaultState.gateway_boot_id, wrappers: wrappers.data, requests: requests.data || [], windows: leases.data || [],
       connections: connections || [], providers: providers || [], tools: tools || [], accessItems: access?.items || [], phase: 'ready', loaded: true});
     if (!vaultState.configured && state.unlocked) lockBrowser();
-    applyCustodyCopy();
     if (refreshError) pageError('');
   } catch (error) {
     if (error.code === 'discarded') return;
@@ -219,7 +214,7 @@ function render() {
   const status = {
     idle: 'Sign in with a local account to use the vault.',
     loading: 'Checking the vault…',
-    disabled: 'Owner security is not enabled on this gateway. Tool calls continue to use gateway-managed credentials.',
+    disabled: 'Owner security is not enabled on this gateway. Only connections without authentication can be used.',
     insecure: 'The vault needs HTTPS through a trusted proxy, or direct local development access. This connection is not trusted, so nothing was sent.',
     unavailable: 'Security storage is unavailable, so execution is locked. Try again later.',
     unsupported: 'The vault is available only for local accounts, not shared operator or OAuth workspaces.',
@@ -707,7 +702,7 @@ $('vault-credentials').addEventListener('click', event => {
     const bearer = connection.auth_type === 'bearer' && name.toLowerCase() === 'authorization';
     return el('label', {for: `vault-header-${i}`, text: bearer ? 'Bearer token' : `${name} header value`}, el('input', {id: `vault-header-${i}`, type: 'password', autocomplete: 'off', spellcheck: 'false', 'data-header': name, 'aria-describedby': 'vault-credential-error'}));
   }));
-  $('vault-credential-effect').textContent = credentialSaveEffect(custodyMode(), Boolean(stored));
+  $('vault-credential-effect').textContent = credentialSaveEffect(Boolean(stored));
   setError('vault-credential-error', '');
   $('vault-credential-dialog').showModal(); $('vault-header-0')?.focus();
 });
