@@ -222,6 +222,14 @@ func TestHistorySessionFailure(t *testing.T) {
 	if pids := historyPIDs(t, f); !reflect.DeepEqual(pids, second) {
 		t.Fatal("a failed page closed a healthy session:", second, pids)
 	}
+	// pg_stat_activity can still list a session the client just closed, so
+	// check the backend a page actually runs on.
+	var pid int32
+	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db catalogdb.DB) error {
+		return db.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
+	}); err != nil || pid != second[0] {
+		t.Fatal("a failed page replaced a healthy session:", second, pid, err)
+	}
 
 	// The replacement open fails: the page fails, and the next page does not
 	// connect again until a second has passed.
