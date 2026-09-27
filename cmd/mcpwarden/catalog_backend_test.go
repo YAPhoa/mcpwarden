@@ -40,8 +40,50 @@ func TestOwnerFlowsOnPostgresCatalog(t *testing.T) {
 		{"provider-changes", testPostgresProviderChangesEndAuthority},
 		{"loss-and-rollback", testPostgresCatalogLossAndRollback},
 		{"guarded-execution", TestGuardedHeaderExecution},
+		{"stale-sessions", testPostgresStaleSessionsEnd},
 	} {
 		t.Run(test.name, test.run)
+	}
+}
+
+// MCP sessions left open by a gateway that stopped are ended when the next
+// gateway starts, before it serves anything; new sessions stay open.
+func testPostgresStaleSessionsEnd(t *testing.T) {
+	f := newOwnerFixture(t)
+	alice := f.owners["alice"]
+	var stale []string
+	for i := range 3 {
+		a := catalog.AccessRecord{ID: identity.New(), Owner: alice, Name: "session", Kind: "mcp", Role: "client", ParentID: f.keyIDs["agent"], SecretHash: tokenHash(randomToken()), ExpiresAt: time.Now().Add(time.Hour)}
+		if i == 2 {
+			a.Owner, a.ParentID = f.owners["bob"], f.keyIDs["bob-agent"]
+		}
+		if err := f.store.AddAccess(a); err != nil {
+			t.Fatal(err)
+		}
+		stale = append(stale, a.Owner+"/"+a.ID)
+	}
+	f.restart()
+	for _, key := range stale {
+		owner, id, _ := strings.Cut(key, "/")
+		if a, ok := f.store.AccessByID(owner, id); !ok || a.EndedAt.IsZero() {
+			t.Fatal("MCP session still open after restart:", key, ok)
+		}
+	}
+	next := catalog.AccessRecord{ID: identity.New(), Owner: alice, Name: "session", Kind: "mcp", Role: "client", ParentID: f.keyIDs["agent"], SecretHash: tokenHash(randomToken()), ExpiresAt: time.Now().Add(time.Hour)}
+	if err := f.store.AddAccess(next); err != nil {
+		t.Fatal(err)
+	}
+	if a, ok := f.store.AccessByID(alice, next.ID); !ok || !a.EndedAt.IsZero() {
+		t.Fatal("new MCP session not open:", ok)
+	}
+	for _, name := range []string{"agent", "bob-agent"} {
+		owner := alice
+		if name == "bob-agent" {
+			owner = f.owners["bob"]
+		}
+		if a, ok := f.store.AccessByID(owner, f.keyIDs[name]); !ok || !a.EndedAt.IsZero() {
+			t.Fatal("API key ended at startup:", name)
+		}
 	}
 }
 

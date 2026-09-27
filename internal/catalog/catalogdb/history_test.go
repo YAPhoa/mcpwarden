@@ -132,7 +132,7 @@ func TestHistoryPlansUseFilterIndexes(t *testing.T) {
 		"gateway":  {catalogdb.HistoryQuery{Upstream: "__gateway__"}, "history_owner_upstream"},
 		"status":   {catalogdb.HistoryQuery{Status: "timeout"}, "history_owner_status"},
 		"actor":    {catalogdb.HistoryQuery{ActorAccessID: "actor-1"}, "history_owner_actor"},
-		"unknown":  {catalogdb.HistoryQuery{Status: "unknown"}, "history_open_recent"},
+		"unknown":  {catalogdb.HistoryQuery{Status: "unknown"}, "history_owner_status"},
 	} {
 		c.q.Owner = "alice"
 		sql, args := catalogdb.Window(c.q)
@@ -173,7 +173,8 @@ func TestHistoryPlansUseFilterIndexes(t *testing.T) {
 			t.Fatal(name, err)
 		}
 		text := strings.Join(plan, "\n")
-		if !strings.Contains(text, c.index) || strings.Contains(text, "Seq Scan on history_events") {
+		// Every page also merges open calls from history_open.
+		if !strings.Contains(text, c.index) || !strings.Contains(text, "history_open_recent") || strings.Contains(text, "Seq Scan on history_events") {
 			t.Errorf("%s does not use %s:\n%s", name, c.index, text)
 		}
 	}

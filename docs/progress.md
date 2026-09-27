@@ -1498,3 +1498,11 @@ a page took 4 ms. `gofmt`, tidy, `integrity.py`, build, vet (plain, `flowtest`,
 `historyscale`), the `CGO_ENABLED=0` build, `go test -race -count=1 ./...` with
 PostgreSQL 16, `npm test` (70) and the Chromium owner flows passed. The R3-T1
 wording nit from PR 1 is fixed above.
+
+Review round 1: history pages now wait for the session with their own 15 s
+bound and get their full 5 s once they run; a page closes the session only when
+pgx has closed it, and a session that died while idle is replaced once within
+the page (R1-N1). New tests cover queued pages, an expired or waiting page
+leaving the session open, the one-time reopen and a clock-fixed reopen limit,
+and ending stale MCP sessions at gateway startup (R1-T2). `lease-storage.md`
+describes both sessions (R1-T3). The same validation passed again.

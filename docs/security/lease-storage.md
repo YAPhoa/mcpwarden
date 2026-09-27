@@ -42,16 +42,34 @@ database transaction; the current file catalog is not connected to this hook.
 The added `ChangeAtomic` implements that shared transaction for ciphertext
 records, with post-commit cache publication. See [vault storage](vault-storage.md).
 
-The first PostgreSQL adapter uses one dedicated session for short transactions
-and its session advisory lock. It never uses a reconnecting pool for ownership.
-Losing the connection, a failed health check, SQL storage failure or uncertain
-commit closes its lost signal; the lease service stops admissions and cancels
-live work. A new Store/boot is required for recovery. Startup atomically marks old
-pending/approved requests stale and active leases suspended. Durable rows alone
-never recreate memory authority. A one-second health probe bounds idle detection;
-each database operation also fails closed. The transaction path has a five-second
-deadline and shorter statement/row-lock timeouts. There is no transaction callback
-retry. This initial single-session adapter has not been load-qualified.
+The PostgreSQL adapter uses one dedicated executor session for short
+transactions and its session advisory lock. It never uses a reconnecting pool
+for ownership. Losing the connection, a failed health check, SQL storage failure
+or uncertain commit closes its lost signal; the lease service stops admissions
+and cancels live work. A new Store/boot is required for recovery. Startup
+atomically marks old pending/approved requests stale and active leases
+suspended. Durable rows alone never recreate memory authority.
+
+The health probe runs every second, only while the executor session is idle. A
+busy session is bounded by its own deadline, so waiting behind a slow holder is
+never read as session loss; an idle ping that fails within two seconds is.
+Transactions run on a statement context detached from the caller, with a
+five-second deadline (thirty seconds for the startup load) and shorter
+statement/row-lock timeouts. A caller that goes away mid-transaction gets its
+context error before COMMIT and nothing is committed; the session is untouched,
+since pgx would close a session whose statement context ended. Reaching the
+store deadline is a real stall and fails the store. There is no transaction
+callback retry.
+
+History pages run on a second, read-only session (`mcpwarden-history`,
+`default_transaction_read_only=on`, five-second statement timeout), one
+REPEATABLE READ transaction per page, so a slow page never holds the executor.
+Pages take turns on that session: waiting has its own fifteen-second bound and
+each page gets its full five seconds once it runs. A page that gives up waiting
+never runs, and a failed page closes the session only when pgx has closed it.
+A session that died while idle is replaced once within the page; otherwise a
+failed open is not retried within a second. A history failure fails only that
+page, never the store. The adapter has not been load-qualified.
 
 Owner reads always include owner identity. Transactions lock the owner row before
 sampling `clock_timestamp()`; transaction-start `now()` is unsuitable after a wait.

@@ -541,8 +541,11 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   from the request, so a closed tab never loses them.
 - The heartbeat pings only when the executor gate is idle. A busy gate is
   bounded by the holder's store deadline, so contention is never read as loss.
-- History pages run on a second, read-only session with its own mutex, one
-  REPEATABLE READ transaction per page; after an error it reopens at most once a
+- History pages run on a second, read-only session, one REPEATABLE READ
+  transaction per page. Pages take turns: the wait has its own 15 s bound and
+  each page's 5 s deadline starts once it runs, so queued pages do not share a
+  budget. Only a session pgx has closed is dropped; one that died while idle is
+  replaced once within the page, and a failed open is not retried within a
   second. A failed page never stops the executor.
 - Each page reads at most the newest 25,000 matching events (the page limit),
   reports `total_capped`, and refuses pages beyond the window. Time ranges use

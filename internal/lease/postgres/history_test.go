@@ -122,14 +122,53 @@ func page(s *Store) error {
 	})
 }
 
-// A failed history session fails only that page. The executor stays up and
-// the next page, a second later, reopens the session; pages may overlap.
-func TestHistorySessionFailureAndConcurrency(t *testing.T) {
+func historyPIDs(t *testing.T, f *databaseFixture) []int32 {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var pids []int32
+		rows, err := f.admin.Query(t.Context(), "SELECT pid FROM pg_stat_activity WHERE application_name='mcpwarden-history' AND datname=current_database() ORDER BY pid")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var pid int32
+			if err := rows.Scan(&pid); err != nil {
+				t.Fatal(err)
+			}
+			pids = append(pids, pid)
+		}
+		rows.Close()
+		// A terminated backend can linger briefly; wait for one session.
+		if len(pids) <= 1 || time.Now().After(deadline) {
+			return pids
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func sleepPage(s *Store, d time.Duration, ran *bool) error {
+	return s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
+		if ran != nil {
+			*ran = true
+		}
+		_, err := db.Exec(ctx, "SELECT pg_sleep($1)", d.Seconds())
+		return err
+	})
+}
+
+// A history session that died while idle is replaced once within the page.
+// A page that never ran leaves a healthy session open. A failed page fails
+// only itself, and a failed open is not retried within a second. The clock is
+// fixed, so the reopen limit does not depend on test speed.
+func TestHistorySessionFailure(t *testing.T) {
 	f := testDatabase(t)
 	s := f.store(t)
 	if err := s.Start(t.Context(), identity.New()); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now()
+	s.reader.now = func() time.Time { return now }
 	if err := page(s); err != nil {
 		t.Fatal(err)
 	}
@@ -139,25 +178,130 @@ func TestHistorySessionFailureAndConcurrency(t *testing.T) {
 	}); err != nil || readOnly != "on" {
 		t.Fatal("history session is not read-only:", readOnly, err)
 	}
-	if _, err := f.admin.Exec(t.Context(), "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-history' AND datname=current_database()"); err != nil {
-		t.Fatal(err)
+	first := historyPIDs(t, f)
+	if len(first) != 1 {
+		t.Fatal("history sessions:", first)
 	}
-	if err := page(s); err == nil {
-		t.Fatal("a page on a terminated session succeeded")
+	terminate := func() {
+		t.Helper()
+		if _, err := f.admin.Exec(t.Context(), "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-history' AND datname=current_database()"); err != nil {
+			t.Fatal(err)
+		}
+		if pids := historyPIDs(t, f); len(pids) != 0 {
+			t.Fatal("history session survived termination:", pids)
+		}
 	}
+
+	// Died while idle: the page reopens the session once and succeeds, even
+	// within a second of the last open.
+	terminate()
+	if err := page(s); err != nil {
+		t.Fatal("page on a session that died while idle:", err)
+	}
+	second := historyPIDs(t, f)
+	if len(second) != 1 || second[0] == first[0] {
+		t.Fatal("history session not replaced:", first, second)
+	}
+
+	// An expired page never runs and leaves the session open.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
+	defer cancel()
+	ran := false
+	if err := s.ReadHistory(expired, func(context.Context, catalogdb.DB) error { ran = true; return nil }); err == nil || ran {
+		t.Fatal("expired page ran:", err, ran)
+	}
+	// A page that fails on a healthy session, here by the statement
+	// timeout, also leaves it open.
+	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db catalogdb.DB) error {
+		_, err := db.Exec(ctx, "SET LOCAL statement_timeout = 50; SELECT pg_sleep(1)")
+		return err
+	}); err == nil {
+		t.Fatal("statement timeout did not fail the page")
+	}
+	if pids := historyPIDs(t, f); !reflect.DeepEqual(pids, second) {
+		t.Fatal("a failed page closed a healthy session:", second, pids)
+	}
+
+	// The replacement open fails: the page fails, and the next page does not
+	// connect again until a second has passed.
+	good := s.reader.config
+	bad := good.Copy()
+	bad.Database = "mcpwarden_no_such_database"
+	s.reader.config = bad
+	terminate()
 	if err := page(s); err == nil {
-		t.Fatal("the session reopened within a second")
+		t.Fatal("a page succeeded without a session")
+	}
+	s.reader.config = good
+	if err := page(s); err == nil {
+		t.Fatal("the session reopened within a second of a failed open")
+	}
+	if pids := historyPIDs(t, f); len(pids) != 0 {
+		t.Fatal("history session opened within the reopen limit:", pids)
 	}
 	stillOpen(t, s)
 	if err := s.WithOwner(t.Context(), "alice", func(lease.Tx) error { return nil }); err != nil {
 		t.Fatal("executor affected by a history failure:", err)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	now = now.Add(time.Second)
 	if err := page(s); err != nil {
 		t.Fatal("the history session did not reopen:", err)
 	}
+}
+
+// Each page's deadline starts when it gets the session, so queued pages that
+// each use most of it all succeed. A page that gives up waiting never runs and
+// leaves the session open.
+func TestHistoryPagesQueue(t *testing.T) {
+	f := testDatabase(t)
+	s := f.store(t)
+	if err := s.Start(t.Context(), identity.New()); err != nil {
+		t.Fatal(err)
+	}
+	s.reader.limit = time.Second
+	if err := page(s); err != nil {
+		t.Fatal(err)
+	}
+	session := historyPIDs(t, f)
+
 	var wg sync.WaitGroup
-	errs := make(chan error, 8)
+	errs := make(chan error, 3)
+	for range 3 {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- sleepPage(s, 800*time.Millisecond, nil) }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal("queued page:", err)
+		}
+	}
+
+	s.reader.wait = 200 * time.Millisecond
+	held := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		held <- s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
+			close(started)
+			_, err := db.Exec(ctx, "SELECT pg_sleep(0.6)")
+			return err
+		})
+	}()
+	<-started
+	ran := false
+	if err := sleepPage(s, 0, &ran); err == nil || ran {
+		t.Fatal("a page that gave up waiting ran:", err, ran)
+	}
+	if err := <-held; err != nil {
+		t.Fatal("the page holding the session failed:", err)
+	}
+	if pids := historyPIDs(t, f); !reflect.DeepEqual(pids, session) {
+		t.Fatal("history session changed:", session, pids)
+	}
+
+	s.reader.wait = historyWait
+	errs = make(chan error, 8)
 	for range 8 {
 		wg.Add(1)
 		go func() { defer wg.Done(); errs <- page(s) }()
@@ -169,4 +313,5 @@ func TestHistorySessionFailureAndConcurrency(t *testing.T) {
 			t.Fatal("concurrent page:", err)
 		}
 	}
+	stillOpen(t, s)
 }
