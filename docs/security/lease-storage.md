@@ -52,7 +52,7 @@ suspended. Durable rows alone never recreate memory authority.
 
 The health probe runs every second, only while the executor session is idle. A
 busy session is bounded by its own deadline, so waiting behind a slow holder is
-never read as session loss; an idle ping that fails within two seconds is.
+never read as session loss; an idle ping that fails, or takes longer than two seconds, is.
 Transactions run on a statement context detached from the caller, with a
 five-second deadline (thirty seconds for the startup load) and shorter
 statement/row-lock timeouts. A caller that goes away mid-transaction gets its
@@ -62,14 +62,17 @@ store deadline is a real stall and fails the store. There is no transaction
 callback retry.
 
 History pages run on a second, read-only session (`mcpwarden-history`,
-`default_transaction_read_only=on`, five-second statement timeout), one
+`default_transaction_read_only=on`, 4.5-second statement timeout, so the
+server ends a long statement before the page deadline would close the session), one
 REPEATABLE READ transaction per page, so a slow page never holds the executor.
 Pages take turns on that session: waiting has its own fifteen-second bound and
 each page gets its full five seconds once it runs. A page that gives up waiting
 never runs, and a failed page closes the session only when pgx has closed it.
 A session that died while idle is replaced once within the page; otherwise a
 failed open is not retried within a second. A history failure fails only that
-page, never the store. The adapter has not been load-qualified.
+page, never the store. Closing the store ends the running page and turns
+waiting pages away, so shutdown never queues behind history. The adapter has
+not been load-qualified.
 
 Owner reads always include owner identity. Transactions lock the owner row before
 sampling `clock_timestamp()`; transaction-start `now()` is unsuitable after a wait.

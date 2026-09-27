@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -184,7 +185,7 @@ func TestHistorySessionFailure(t *testing.T) {
 	}
 	terminate := func() {
 		t.Helper()
-		if _, err := f.admin.Exec(t.Context(), "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-history' AND datname=current_database()"); err != nil {
+		if _, err := f.admin.Exec(t.Context(), "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name='mcpwarden-history' AND datname=current_database()"); err != nil {
 			t.Fatal(err)
 		}
 		if pids := historyPIDs(t, f); len(pids) != 0 {
@@ -314,4 +315,56 @@ func TestHistoryPagesQueue(t *testing.T) {
 		}
 	}
 	stillOpen(t, s)
+}
+
+// Close does not queue behind pages: it ends the running page, turns waiting
+// pages away and closes the executor session within its context.
+func TestHistoryCloseEndsPages(t *testing.T) {
+	f := testDatabase(t)
+	s, err := Open(t.Context(), f.runtimeDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(t.Context(), identity.New()); err != nil {
+		t.Fatal(err)
+	}
+	if err := page(s); err != nil {
+		t.Fatal(err)
+	}
+	running := make(chan struct{})
+	errs := make(chan error, 4)
+	go func() {
+		errs <- s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
+			close(running)
+			_, err := db.Exec(ctx, "SELECT pg_sleep(3)")
+			return err
+		})
+	}()
+	<-running
+	for range 3 {
+		go func() { errs <- sleepPage(s, 3*time.Second, nil) }()
+	}
+	time.Sleep(100 * time.Millisecond) // let the pages queue
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	began := time.Now()
+	if err := s.Close(ctx); err != nil {
+		t.Fatal("close:", err)
+	}
+	if took := time.Since(began); took > 2*time.Second {
+		t.Fatal("close waited behind pages:", took)
+	}
+	for range 4 {
+		if err := <-errs; err == nil {
+			t.Fatal("a page succeeded across close")
+		}
+	}
+	if err := page(s); !errors.Is(err, lease.ErrLocked) {
+		t.Fatal("page after close:", err)
+	}
+	// The executor session is gone, so a new store can take ownership.
+	next := f.store(t)
+	if err := next.Start(t.Context(), identity.New()); err != nil {
+		t.Fatal("start after close:", err)
+	}
 }

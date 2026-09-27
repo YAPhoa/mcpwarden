@@ -123,11 +123,11 @@ from stored bucket counts, sums and maxima. Their means are sum/count, which can
 differ from the reader's streaming mean in the last floating-point digits.
 `TestImportPreservesCatalogAndHistory` compares both readers on the same data.
 
-Pages run on a separate read-only session (`mcpwarden-history`, 5 s statement
+Pages run on a separate read-only session (`mcpwarden-history`, 4.5 s statement
 timeout), one REPEATABLE READ transaction per page, so a slow page never holds
 the executor and a failed page never stops the gateway. Pages take turns on
-that session; each gets its full 5 s once it runs, after waiting at most 15 s. Each page reads at most
-the newest 25,000 matching events, which is the page limit (1,000 pages of 25);
+that session; each gets its full 5 s once it runs, after waiting at most 15 s.
+Each page reads at most the newest 25,000 matching events, which is the page limit (1,000 pages of 25);
 a page ending beyond that is refused. The total and the timing summaries cover
 the same window, and the API adds `total_capped: true` when more calls match.
 Older calls stay reachable through the time range. Each filter that is set adds

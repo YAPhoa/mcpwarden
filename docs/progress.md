@@ -1506,3 +1506,10 @@ the page (R1-N1). New tests cover queued pages, an expired or waiting page
 leaving the session open, the one-time reopen and a clock-fixed reopen limit,
 and ending stale MCP sessions at gateway startup (R1-T2). `lease-storage.md`
 describes both sessions (R1-T3). The same validation passed again.
+
+Review round 2: the session-failure test waits for terminated backends to exit
+(R2-B1, flaky in CI-like runs). Closing the store now cancels the running
+history page and turns waiting pages away, so shutdown never queues behind
+history (R2-N1, `TestHistoryCloseEndsPages`). A free session is taken without a
+select, the history statement timeout is 4.5 s, and `lease-storage.md` wording
+is fixed (R2-T1 to T3). The same validation passed again.

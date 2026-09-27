@@ -546,7 +546,9 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   each page's 5 s deadline starts once it runs, so queued pages do not share a
   budget. Only a session pgx has closed is dropped; one that died while idle is
   replaced once within the page, and a failed open is not retried within a
-  second. A failed page never stops the executor.
+  second. A failed page never stops the executor. The statement timeout
+  (4.5 s) sits under the page deadline, so the server ends a long statement and
+  the session stays. Close cancels the running page and never queues.
 - Each page reads at most the newest 25,000 matching events (the page limit),
   reports `total_capped`, and refuses pages beyond the window. Time ranges use
   history time in both readers.
