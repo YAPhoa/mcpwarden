@@ -12,7 +12,7 @@ import (
 
 // Owner transactions write catalog rows in the same transaction as lease
 // changes and security events.
-func (x *ownerTx) CatalogOwner() string        { return x.owner }
+func (x *ownerTx) CatalogOwner() string      { return x.owner }
 func (x *ownerTx) CatalogRows() catalogdb.Tx { return catalogRows{x.t} }
 
 var (
