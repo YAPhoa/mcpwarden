@@ -1,6 +1,9 @@
 package identity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestUUIDs(t *testing.T) {
 	a, b := New(), New()
@@ -12,5 +15,8 @@ func TestUUIDs(t *testing.T) {
 	}
 	if Valid("not-a-uuid") {
 		t.Fatal("accepted invalid UUID")
+	}
+	if Valid(strings.ToUpper(a)) || Valid("21F7F8DE-8051-5b89-8680-0195ef798b6a") {
+		t.Fatal("accepted a non-canonical uppercase UUID")
 	}
 }
