@@ -13,7 +13,7 @@ import (
 
 // historyDeadline bounds one history page, from waiting for a read
 // connection to the last row.
-const historyDeadline = 5 * time.Second
+var historyDeadline = 5 * time.Second
 
 // InsertHistory stores one event in its own IMMEDIATE transaction on the
 // executor, so a successful admission is durable before dispatch. In the same
