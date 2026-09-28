@@ -469,3 +469,38 @@ CREATE TABLE history_open (
     PRIMARY KEY (owner_id, invocation_id)
 ) STRICT;
 CREATE INDEX history_open_recent ON history_open(owner_id, history_ns DESC, event_id DESC);
+
+-- ---- Rows the store never deletes ----
+
+-- The PostgreSQL runtime role has no DELETE privilege on these tables; here a
+-- trigger stands in, so a store bug cannot remove them.
+CREATE TRIGGER schema_migrations_no_delete BEFORE DELETE ON schema_migrations
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER owners_no_delete BEFORE DELETE ON owners
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER requests_no_delete BEFORE DELETE ON requests
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER leases_no_delete BEFORE DELETE ON leases
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER vault_roots_no_delete BEFORE DELETE ON vault_roots
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER vault_wrapper_sets_no_delete BEFORE DELETE ON vault_wrapper_sets
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER credential_heads_no_delete BEFORE DELETE ON credential_heads
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER credential_epochs_no_delete BEFORE DELETE ON credential_epochs
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER credential_versions_no_delete BEFORE DELETE ON credential_versions
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER approval_policies_no_delete BEFORE DELETE ON approval_policies
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER catalog_accounts_no_delete BEFORE DELETE ON catalog_accounts
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER catalog_access_no_delete BEFORE DELETE ON catalog_access
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER catalog_connectors_no_delete BEFORE DELETE ON catalog_connectors
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER history_tools_no_delete BEFORE DELETE ON history_tools
+BEGIN SELECT RAISE(ABORT, 'rows are never deleted'); END;
+CREATE TRIGGER schema_migrations_append_only BEFORE UPDATE ON schema_migrations
+BEGIN SELECT RAISE(ABORT, 'append-only migration ledger'); END;

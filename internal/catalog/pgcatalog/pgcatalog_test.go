@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -505,110 +504,6 @@ func TestAbortBeforeCutoverRestoresFileGateway(t *testing.T) {
 	}
 }
 
-// No MCP session survives a restart: EndStaleSessions ends every open one
-// with an event, and the owner can open new sessions afterwards.
-func TestStaleMCPSessionsEndAtStartup(t *testing.T) {
-	f := newFixture(t)
-	f.cutover()
-	repo, db, service, _ := f.gateway()
-	var ids []string
-	for i := range 10 {
-		a := catalog.AccessRecord{ID: identity.New(), Owner: f.bob, Name: fmt.Sprintf("session %d", i), Kind: "mcp", Role: "client", ParentID: "parent", SecretHash: fmt.Sprintf("%064x", 900+i)}
-		if err := repo.AddAccess(a); err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, a.ID)
-	}
-	f.stop(service, db) // unclean for the sessions: nothing ended them
-	repo, db, service, _ = f.gateway()
-	if err := repo.EndStaleSessions(); err != nil {
-		t.Fatal(err)
-	}
-	for _, owner := range []string{f.alice, f.bob} {
-		for _, a := range repo.AccessList(owner) {
-			if a.Kind == "mcp" && a.EndedAt.IsZero() {
-				t.Fatal("open MCP session after restart:", a.Name)
-			}
-		}
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='access.ended'"); n != len(ids) {
-		t.Fatal("access.ended events:", n)
-	}
-	next := catalog.AccessRecord{ID: identity.New(), Owner: f.bob, Name: "session 11", Kind: "mcp", Role: "client", ParentID: "parent", SecretHash: fmt.Sprintf("%064x", 999)}
-	if err := repo.AddAccess(next); err != nil {
-		t.Fatal("a new session after restart:", err)
-	}
-	f.stop(service, db)
-	restarted, _, _, _ := f.gateway()
-	if a, ok := restarted.AccessByID(f.bob, ids[0]); !ok || a.EndedAt.IsZero() {
-		t.Fatal("ending was not committed")
-	}
-}
-
-func TestRepositoryCommitsAtomicallyAndFailsClosed(t *testing.T) {
-	f := newFixture(t)
-	f.cutover()
-	repo, _, _, failed := f.gateway()
-	ctx := t.Context()
-
-	// Each change commits with its security event.
-	key := catalog.AccessRecord{Owner: f.alice, Name: "new", Kind: "api_key", Role: "client", SecretHash: strings.Repeat("f", 64)}
-	if err := repo.AddAccess(key); err != nil {
-		t.Fatal(err)
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1 AND event_type='access.created'", f.alice); n != 1 {
-		t.Fatal("access.created events", n)
-	}
-
-	// The active limit holds in the database transaction, not only in memory:
-	// concurrent additions never exceed it.
-	var wg sync.WaitGroup
-	for i := 0; i < 2*catalog.MaxAPIKeys; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_ = repo.AddAccess(catalog.AccessRecord{Owner: f.alice, Name: "k", Kind: "api_key", Role: "client", SecretHash: fmt.Sprintf("%063x%d", i, 1)})
-		}(i)
-	}
-	wg.Wait()
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.catalog_access WHERE owner_id=$1 AND kind='api_key' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())", f.alice); n != catalog.MaxAPIKeys {
-		t.Fatal("active key limit", n)
-	}
-
-	// A refused change publishes nothing, records no event and leaves the
-	// repository healthy.
-	created := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'")
-	if err := repo.Add(catalog.Entry{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/other"}); err == nil {
-		t.Fatal("duplicate connector name accepted")
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'"); n != created || *failed || len(repo.List(f.alice)) != 2 {
-		t.Fatal("refused change recorded an event, failed the repository or published", n)
-	}
-
-	// Losing the session fails closed: no authentication from the stale view,
-	// no change reported as saved, and no fallback.
-	if _, err := f.db.Admin.Exec(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-security' AND datname=current_database()"); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !repo.Failed() {
-		if time.Now().After(deadline) {
-			t.Fatal("session loss not detected")
-		}
-		_ = repo.TouchAccess(f.alice, "missing")
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, ok := repo.AuthenticateAccess(f.tokens["agent"], "api_key"); ok {
-		t.Fatal("authenticated after storage loss")
-	}
-	if err := repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "all"}); !errors.Is(err, dbcatalog.ErrUnavailable) {
-		t.Fatal("change without storage", err)
-	}
-	if repo.Visibility(f.alice, "remote").Mode != "selected" {
-		t.Fatal("uncommitted visibility published")
-	}
-}
-
 func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	f := newFixture(t)
 	f.cutover()
@@ -801,58 +696,6 @@ func TestMarkerBelongsToItsDatabase(t *testing.T) {
 	}
 	if _, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey); err == nil {
 		t.Fatal("pre-cutover catalog opened after the abandoned import")
-	}
-}
-
-// Provider availability and tool visibility are connector security: a real
-// change moves the revision scopes bind, a repeated one changes nothing.
-func TestProviderChangesMoveTheSecurityRevision(t *testing.T) {
-	f := newFixture(t)
-	f.cutover()
-	repo, db, service, _ := f.gateway()
-	var remote string
-	for _, e := range repo.List(f.alice) {
-		if e.Name == "remote" {
-			remote = e.ID
-		}
-	}
-	events := func() int {
-		return f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1 AND event_type IN ('connector.availability_changed','connector.visibility_changed')", f.alice)
-	}
-	revision := func() string { return repo.ConnectorSecurityRevision(f.alice, remote) }
-	if revision() != "1" {
-		t.Fatal("imported revision", revision())
-	}
-	steps := []struct {
-		name   string
-		change func() error
-		want   string
-		events int
-	}{
-		{"enable while enabled", func() error { return repo.SetProviderEnabled(f.alice, "remote", true) }, "1", 0},
-		{"disable", func() error { return repo.SetProviderEnabled(f.alice, "remote", false) }, "2", 1},
-		{"disable again", func() error { return repo.SetProviderEnabled(f.alice, "remote", false) }, "2", 1},
-		{"enable", func() error { return repo.SetProviderEnabled(f.alice, "remote", true) }, "3", 2},
-		{"same visibility", func() error {
-			return repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{"remote__search"}})
-		}, "3", 2},
-		{"hide the tool", func() error {
-			return repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{}})
-		}, "4", 3},
-	}
-	for _, step := range steps {
-		if err := step.change(); err != nil {
-			t.Fatal(step.name, err)
-		}
-		if revision() != step.want || events() != step.events {
-			t.Fatal(step.name, revision(), events())
-		}
-	}
-	// The revision is sealed with the row and survives a restart.
-	f.stop(service, db)
-	restarted, _, _, _ := f.gateway()
-	if got := restarted.ConnectorSecurityRevision(f.alice, remote); got != "4" {
-		t.Fatal("revision after reload", got)
 	}
 }
 

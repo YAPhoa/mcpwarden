@@ -372,6 +372,11 @@ func (s *Store) transaction(caller context.Context, deadline time.Duration, fn f
 		return fmt.Errorf("%w: %w", lease.ErrRolledBack, err)
 	}
 	if err := sqlTx.Commit(); err != nil {
+		// A COMMIT refused by a deferred constraint leaves SQLite's
+		// transaction open, holding the write lock until Close. End it now.
+		end, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, _ = s.conn.ExecContext(end, "ROLLBACK")
+		cancel()
 		s.fail()
 		return lease.ErrStorage
 	}

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -96,6 +97,10 @@ func (r *reader) read(ctx context.Context, fn func(context.Context, DB) error) e
 		})
 		if err == nil {
 			return nil
+		}
+		// A page beyond the window is the caller's error, not a failure.
+		if errors.Is(err, catalogdb.ErrHistoryWindow) {
+			return err
 		}
 		// Close only a session that is actually gone; a page that failed on a
 		// healthy session leaves it for the next page. pgx closes a session
