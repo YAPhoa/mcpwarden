@@ -43,7 +43,7 @@ imported. See
   byte offset and hash state). A rerun after an interruption continues from the
   last checkpoint. A rerun after success only re-verifies and never adds rows.
   Event and invocation IDs are unique per owner, so a duplicate fails the batch.
-- **No fallback.** With `backend: postgres` the gateway never reads the catalog
+- **No fallback.** With `storage.driver: postgres` the gateway never reads the catalog
   file. It refuses to start unless PostgreSQL is the active catalog. If a
   commit outcome is unknown or the database session is lost, it fails closed:
   authentication stops, changes fail, and the process exits with `PostgreSQL
@@ -121,14 +121,15 @@ Tool-call history rows commit before the call is dispatched, as before.
 5. **Cut over:** `mcpwarden-catalog -config /config/config.yaml cutover`. This
    re-verifies everything against the snapshot, marks PostgreSQL active, then
    writes the `active` marker.
-6. **Switch the config** to `managed_upstreams.backend: postgres` and start the
-   gateway. Startup takes the executor lock, makes old requests stale, suspends
+6. **Switch the config** to a [`storage`](storage.md) section with
+   `driver: postgres` and the runtime role's URL, remove `managed_upstreams`
+   and `audit.path`, and start the gateway. Startup takes the executor lock, makes old requests stale, suspends
    old windows, then loads and checks the catalog.
 7. **Check:** sign in, list access keys, open call history, list connectors and
    make one tool call. `mcpwarden-catalog status` should show `active`.
 
 **Failure before cutover.** Before step 5 the file is still authoritative and
-unchanged. Run `mcpwarden-catalog abort`, keep `backend: file` and start the
+unchanged. Run `mcpwarden-catalog abort`, keep the file configuration and start the
 gateway. Abort deletes the imported rows and marks the state `aborting` in one
 commit, then removes its marker or restores the `rolled_back` marker the import
 replaced, and only then deletes the state. If it stops partway, the file

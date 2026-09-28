@@ -1530,3 +1530,39 @@ rollback contract for the SQLite store in PR 3.
 Round 5 nits: a change that gave up in the queue also reads "change not
 saved; try again" (new `queued` case), and the `WithOwner`, `Catalog` and
 `ErrRolledBack` comments state the contract exactly.
+
+## 2026-09-28 — SQLite store and the storage section (removal plan PR 3)
+
+The catalog database layer is split: `catalogdb` holds backend-neutral rows and
+interfaces, `dbcatalog` the repository and history taken from `pgcatalog`, and
+the SQL lives in each store. `internal/lease/sqlite` is a new store with the same
+tables, guards, poisoning, error mapping, cancellation, heartbeat and bounded
+history as the PostgreSQL store, plus a lock file, pragma and identity checks,
+an embedded migration ledger, filesystem checks and no-delete triggers.
+`identity.Valid` accepts only lowercase canonical IDs. The new `storage` section
+(`docs/storage.md`) selects SQLite or PostgreSQL for the catalog, history and
+executor in every HTTP mode; `managed_upstreams.backend` and
+`owner_security.database_url_env` are refused, and `owner_security` requires
+`storage`. Without `storage` nothing changes.
+
+Tests: `internal/lease/storetest` (34 cases) runs on both stores and replaced the
+PostgreSQL-only copies. SQLite-only tests cover open settings and identity, the
+lock wait, unsafe paths, ledger refusals, a busy database, a replaced lock file,
+a killed process keeping its commits, forbidden conflict clauses, history index
+plans and a slow page that does not stop the store. The gateway owner flows run
+on SQLite by default and on PostgreSQL under `TestOwnerFlowsOnPostgres`; new
+`TestStorageLossStopsGateway`, `TestStorageRefusesStdio` and
+`TestStorageOperatorMode`. CI adds a `CGO_ENABLED=0` SQLite test run and a
+Windows and macOS vet, and the history scale step now points at
+`internal/lease/postgres`, where the test moved. The UI owner flows run on
+`storage: postgres`.
+
+Validation: `gofmt`, `go mod tidy -diff`, `go mod verify`, `integrity.py`,
+build, vet (plain, `flowtest`, `historyscale`, and Windows and macOS for the
+SQLite store and gateway), the `CGO_ENABLED=0` build and SQLite tests,
+`npm test` (70) and the Chromium owner flows on `storage: postgres` passed.
+`go test -race -count=1 ./...` with PostgreSQL 16 first failed twice in the
+SQLite package: the race detector slows the pure Go engine enough that a
+25,000-event history page passed the 5 s deadline. Under the race detector the
+tests now give pages a minute and skip the timing-only slow-page test, which
+runs in the CGO-disabled step. The full race run then passed.

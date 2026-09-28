@@ -107,6 +107,18 @@ not yet the full catalog repository, account migration or OAuth refresh writer.
 Owner-route authentication, CSRF, mutation-specific audit, security revisions,
 startup cache loading and coordinated authority publication remain required.
 
+## SQLite contract
+
+The SQLite store keeps the same vault tables, CAS rules, write caps and
+tombstones, and `storetest` runs the same vault cases on both databases. A nonce
+is stored as its 16-character base64url text (12 bytes encode exactly, so text
+uniqueness equals byte uniqueness), with checks binding it to the envelope. The
+counters are triggers that refuse the write past the cap. Only ciphertext and
+public metadata are stored, as on PostgreSQL. The difference is who can change
+the rows: the gateway process owns the SQLite file, so the no-delete and
+immutability triggers protect against bugs, not against a compromised gateway.
+See the threat model in [storage](../storage.md#threat-model-sqlite-and-postgresql).
+
 ## Checks and remaining gates
 
 Tests cover stale/concurrent writes, root wrapper CAS, nonce reuse, ciphertext

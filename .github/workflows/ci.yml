@@ -75,14 +75,21 @@ jobs:
       - name: History scale (1M calls, 500 ms per page, no race detector)
         run: |
           test -n "${MCPWARDEN_TEST_DATABASE_URL:?PostgreSQL tests must not skip}"
-          go vet -tags historyscale ./internal/catalog/catalogdb
-          go test -tags historyscale -count=1 -timeout=15m -run '^TestHistoryScale$' -v ./internal/catalog/catalogdb
+          go vet -tags historyscale ./internal/lease/postgres
+          go test -tags historyscale -count=1 -timeout=15m -run '^TestHistoryScale$' -v ./internal/lease/postgres
       - name: Production CGO-disabled build and JSON/storage checks
         env:
           CGO_ENABLED: '0'
         run: |
           go build -o "${RUNNER_TEMP}/mcpwarden" ./cmd/mcpwarden
           go test ./internal/jsoncodec ./internal/catalog
+          go test -count=1 ./internal/lease/sqlite
+      - name: Cross-platform vet of the SQLite store
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          GOOS=windows GOARCH=amd64 go vet ./internal/lease/sqlite ./cmd/mcpwarden
+          GOOS=darwin GOARCH=arm64 go vet ./internal/lease/sqlite ./cmd/mcpwarden
       - name: Bounded parser fuzz checks
         run: |
           go test ./internal/lease -run='^$' -fuzz='^FuzzParseScope$' -fuzztime=10s -parallel=2

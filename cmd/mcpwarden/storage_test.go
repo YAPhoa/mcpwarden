@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
+	"github.com/yaphoa/mcpwarden/internal/policy"
 )
 
 // The owner flows run on SQLite by default. This runs the same tests on
@@ -240,5 +243,40 @@ func TestStorageRefusesStdio(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "mcpwarden.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("database created for a refused stdio start", err)
+	}
+}
+
+// Operator mode runs on the database too: the executor coordinates the
+// catalog without accounts or owner routes, and the catalog and history
+// survive a restart.
+func TestStorageOperatorMode(t *testing.T) {
+	cfg := config.Config{Storage: &config.Storage{Driver: "sqlite", Path: filepath.Join(t.TempDir(), "mcpwarden.db"), Key: base64.StdEncoding.EncodeToString(randBytes(32))}}
+	pol, _ := policy.New(config.Policy{Default: "allow"})
+	open := func() *storageBackend {
+		t.Helper()
+		b, err := openStorage(t.Context(), cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), func(error) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	b := open()
+	if b.accounts != nil {
+		t.Fatal("accounts started in operator mode")
+	}
+	if err := b.repo.Add(catalog.Entry{Owner: "local", Name: "open", URL: "https://example.com/mcp", AuthType: "none"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.history.Write(audit.Record{Owner: "local", Tool: "open__search", Upstream: "open", Decision: "allow", Status: "ok", TS: time.Now().UTC(), ArgsSHA256: strings.Repeat("a", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	b.close()
+	b = open()
+	defer b.close()
+	if entries := b.repo.List("local"); len(entries) != 1 || entries[0].Name != "open" {
+		t.Fatal("connector lost across restart", entries)
+	}
+	if rows, _, _, _, err := b.history.QueryHistoryPerformance(audit.HistoryFilter{Owner: "local", Page: 1, Size: 10}); err != nil || len(rows) != 1 {
+		t.Fatal("history lost across restart", len(rows), err)
 	}
 }

@@ -567,3 +567,42 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   writes.
 - Open MCP session records are ended at startup, one owner transaction per
   owner with `access.ended` events, as the file store does when it opens.
+
+## 2026-09-28 — SQLite store and the storage section (removal plan PR 3)
+
+- Driver: `modernc.org/sqlite` v1.59.0, pure Go. The gateway image and CI
+  build with `CGO_ENABLED=0` onto distroless static, which rules out cgo
+  drivers. The stripped gateway grows from 18.6 MB to 22.7 MB. The store uses
+  `database/sql`, so the driver can be swapped later. `ncruces/go-sqlite3`
+  (WASM) was the alternative; the plan's decision D8 chose modernc.
+- One contract suite (`internal/lease/storetest`) runs on both stores. It
+  replaced the PostgreSQL-only copies of the lease, vault, cancellation,
+  catalog, history and repository tests; PostgreSQL keeps only its privilege,
+  advisory-lock and schema-drift tests. Running it found that the PostgreSQL
+  history reader mapped `catalogdb.ErrHistoryWindow` to a storage error; it now
+  returns it as the caller's error.
+- SQLite cannot enforce PostgreSQL's grants, so `BEFORE DELETE` triggers refuse
+  deletes on every table the runtime role cannot delete from, and the migration
+  ledger also refuses updates. They catch bugs; the gateway owns the file, so
+  they are not a boundary against a compromised gateway.
+- A deferred foreign key that fails at COMMIT leaves a SQLite transaction open.
+  The store rolls back on the connection after any failed COMMIT, then fails.
+- The executor's single session is an exclusive lock file held for the process
+  lifetime, with a 30 s wait at open and an inode check in the heartbeat.
+  Network and FUSE filesystems are refused.
+- The `storage` section replaces `managed_upstreams.backend: postgres` and
+  `owner_security.database_url_env`, both refused with a pointer to
+  `docs/storage.md`. With it, the executor runs in every HTTP mode, history is
+  in the database and `audit.path` must be unset. `owner_security` now requires
+  `storage`: the file catalog beside a PostgreSQL owner vault is gone, since
+  there are no live users of it. `--stdio` with `storage` is refused until the
+  stdio client arrives in PR 4.
+- Under `storage.driver: postgres`, a database with no catalog state loads as a
+  fresh catalog and any state other than `active` is refused (plan N9), so a
+  database mid-import never serves.
+- `custody.MaxEventPage` and `custody.MaxEndedLeases` moved to `custody`, so
+  both stores and the owner API share one bound.
+- The gateway's owner flows run on SQLite by default and on PostgreSQL under
+  `TestOwnerFlowsOnPostgres`. The SQLite hold for the session-wait test is an
+  owner transaction of the store itself: SQLite locks the whole database, so
+  an external write lock would block the session lookup too.

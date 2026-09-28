@@ -35,7 +35,7 @@ per-case coverage of the 68 acceptance tests is in the
    layouts at 390, 720 (200% zoom on a 1440 px screen) and 1280 px. A
    screen-reader review by a person is still open.
 3. **Full PostgreSQL catalog and authority coordination.** Implemented behind
-   `managed_upstreams.backend: postgres` (requires `owner_security`); see
+   the [`storage`](storage.md) section (PostgreSQL or SQLite); see
    [catalog storage](catalog-storage.md) and [history storage](history-storage.md).
    Accounts, password verifiers, keys, sessions, connectors, tombstones,
    discovery, visibility and indexed call history live in PostgreSQL. Account

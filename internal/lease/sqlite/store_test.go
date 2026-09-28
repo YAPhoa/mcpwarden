@@ -427,6 +427,9 @@ func TestHistoryPlansUseFilterIndexes(t *testing.T) {
 // A page that runs past its deadline fails alone: the store keeps running
 // and the next page is served.
 func TestSlowHistoryPageDoesNotStopStore(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing test; runs without the race detector")
+	}
 	path := tempPath(t)
 	s := openStore(t, path)
 	if err := s.Start(t.Context(), identity.New()); err != nil {

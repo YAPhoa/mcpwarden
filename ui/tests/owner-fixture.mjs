@@ -122,10 +122,9 @@ export async function startFixture() {
     `allowed_origins: ["${ui.origin}"]`,
     'upstreams: []',
     'policy:', '  default: allow',
-    'audit:', `  path: ${join(dir, 'audit.jsonl')}`,
-    'managed_upstreams:', `  path: ${join(dir, 'catalog.enc')}`, '  key_env: MCPWARDEN_TEST_CATALOG_KEY',
+    'storage:', '  driver: postgres', '  database_url_env: MCPWARDEN_SECURITY_DATABASE_URL', '  key_env: MCPWARDEN_TEST_CATALOG_KEY',
     'accounts:', '  allow_registration: true',
-    'owner_security:', '  database_url_env: MCPWARDEN_SECURITY_DATABASE_URL', '  allow_insecure_loopback: true', ''].join('\n'));
+    'owner_security:', '  allow_insecure_loopback: true', ''].join('\n'));
   const env = {PATH: process.env.PATH, HOME: dir, MCPWARDEN_SECURITY_DATABASE_URL: runtime.toString(), MCPWARDEN_TEST_CATALOG_KEY: randomBytes(32).toString('base64')};
   let child = null, logs = '';
   const gateway = `http://127.0.0.1:${gatewayPort.value}`;
