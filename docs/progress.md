@@ -1591,3 +1591,21 @@ Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
 `historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
 `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
 Chromium owner flows passed.
+
+Review round 2 fixes. `SchemaRules` adds the four guard rules no test named:
+an immutable binding on a pending request, a nonzero initial write count, and
+a stale or out-of-context credential version inserted directly. Removing any
+of them fails a test on both stores. The typing case is now
+`JSONIdentityTyping`, covering all six integer columns also stored in JSON on
+both stores, and catches all eight of the reviewer's mutations. The SQLite type
+check for the envelope revision is still not caught. It only matters at
+revision 1 (`true` compares as the text '1'), and revision 1 exists only
+inside the transaction that creates a credential or epoch. The PostgreSQL text
+compare and the Go string fields cover it. PostgreSQL constraint names are
+matched whole, and `Open` also refuses a runtime role that may delete from
+`owners`, `requests` or `leases`.
+
+Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
+`historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
+`go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
+Chromium owner flows passed.

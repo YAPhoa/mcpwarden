@@ -614,6 +614,7 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   drove upstream plus tool from the upstream index, 644 ms at 1M calls.
 - The request binding and approved-mode CHECKs are wrapped in `(…) IS TRUE` on
   both stores (PostgreSQL migration 006), because a CHECK that is NULL passes.
-- An envelope epoch or revision written as `1e0` is accepted by PostgreSQL
-  (jsonb normalizes it to 1) and refused by SQLite. Recorded rather than
+- A JSON identity field (envelope epoch and revision, wrapped key epoch and
+  root version, wrapper root versions) written as `1e0` is accepted by
+  PostgreSQL (jsonb normalizes it to 1) and refused by SQLite. Recorded rather than
   refused: jsonb cannot tell the spellings apart, and every writer uses strings.

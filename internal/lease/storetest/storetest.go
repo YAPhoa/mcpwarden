@@ -87,7 +87,7 @@ func Run(t *testing.T, open func(t *testing.T) Database) {
 		{"VaultWriteCap", testVaultWriteCap},
 		{"VaultNonceBindingsAndWrappingKeyCap", testVaultNonceBindingsAndWrappingKeyCap},
 		{"VaultCommitFailureDoesNotPublish", testVaultCommitFailureDoesNotPublish},
-		{"EnvelopeEpochTyping", testEnvelopeEpochTyping},
+		{"JSONIdentityTyping", testJSONIdentityTyping},
 		{"VaultMutationCommit", testVaultMutationCommit},
 		{"VaultMutationRollback", testVaultMutationRollback},
 		{"VaultMutationPublishFailure", testVaultMutationPublishFailure},

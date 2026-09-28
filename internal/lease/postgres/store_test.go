@@ -395,6 +395,17 @@ func TestPostgresSchemaDrift(t *testing.T) {
 			t.Fatal("runtime accepted SET ROLE escalation")
 		}
 	})
+	for _, table := range []string{"owners", "requests", "leases"} {
+		t.Run("delete on "+table, func(t *testing.T) {
+			f := testDatabase(t)
+			if _, err := f.admin.Exec(t.Context(), "GRANT DELETE ON mcpwarden_security."+table+" TO "+pgx.Identifier{f.role}.Sanitize()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(t.Context(), f.runtimeDSN); err != lease.ErrStorage {
+				t.Fatal("runtime accepted DELETE on", table)
+			}
+		})
+	}
 	t.Run("checksum", func(t *testing.T) {
 		f := testDatabase(t)
 		if _, err := f.admin.Exec(t.Context(), "UPDATE mcpwarden_security.schema_migrations SET sha256='changed'"); err != nil {

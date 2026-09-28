@@ -121,9 +121,11 @@ history to both stores and compares every query. SQLite-only tests cover the
 lock file, unsafe paths, the settings, the migration ledger, a killed process,
 busy and replaced files, fatal codes, forbidden conflict clauses and the
 history index plans; `TestHistoryScale` (tag `historyscale`) holds pages to
-500 ms at 1,000,000 calls on each store.
+500 ms at 1,000,000 calls on each store. The gateway's owner flows run on
+SQLite by default and on PostgreSQL under `TestOwnerFlowsOnPostgres`.
 
-One difference is accepted: a vault envelope that spells its epoch or revision
-as an exponent (`1e0`) is accepted by PostgreSQL, whose jsonb stores the number
-1, and refused by SQLite. The gateway and browser write both as strings. The gateway's owner flows run on SQLite by default and on
-PostgreSQL under `TestOwnerFlowsOnPostgres`.
+One difference is accepted. Six integer columns are also stored inside JSON:
+the envelope's epoch and revision, the wrapped key's epoch and root version,
+and the root version of both root wrappers. A value spelled as an exponent
+(`1e0`) is accepted by PostgreSQL, whose jsonb stores the number 1, and refused
+by SQLite. The gateway and browser write all six as strings.

@@ -141,13 +141,27 @@ func testSchemaRules(t *testing.T, db Database) {
 	insert("catalog_access", "access_id", "access-1", "owner_id", "alice", "secret_digest", bytes.Repeat([]byte{1}, 32), "kind", "api_key", "role", "admin", "sealed", sealed("a"))
 	insert("catalog_connectors", "connector_id", identity.New(), "owner_id", "alice", "name", "files", "auth_type", "none", "sealed", sealed("c"))
 
-	check := func(postgres, sqlite string) string { return pick(db, postgres, "CHECK constraint failed: "+sqlite) }
+	// A PostgreSQL constraint name is matched whole: Rule puts a space after it.
+	check := func(postgres, sqlite string) string {
+		return pick(db, postgres+" ", "CHECK constraint failed: "+sqlite)
+	}
 	historyColumns := "owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded," +
 		"handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record" + pick(db, ",source", "")
 	historyRest := "tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded," +
 		"handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record" + pick(db, ",source", "")
 	copyHistory := func(values string) string {
 		return "INSERT INTO history_events (" + historyColumns + ") SELECT " + values + "," + historyRest + " FROM history_events WHERE event_id='h1'"
+	}
+
+	epochColumns := "owner_id,credential_id,connector_id,epoch,root_id,root_version,destination_digest,destination,wrapped_key,wrap_nonce,write_count"
+	// copyVersion copies credential version 2 with another revision and
+	// envelope expression.
+	copyVersion := func(revision, envelope string) string {
+		return "INSERT INTO credential_versions (owner_id,credential_id,epoch,revision,nonce,envelope" + pick(db, "", ",created_at") +
+			") SELECT owner_id,credential_id,epoch," + revision + ",nonce," + envelope + pick(db, "", ",created_at") + " FROM credential_versions WHERE revision=2"
+	}
+	setEnvelope := func(field, value string) string {
+		return pick(db, "jsonb_set(envelope,'{"+field+"}',to_jsonb('"+value+"'::text))", "json_set(envelope,'$."+field+"','"+value+"')")
 	}
 
 	for _, c := range []struct {
@@ -201,6 +215,11 @@ func testSchemaRules(t *testing.T, db Database) {
 			sql, args := insertSQL("requests", request(id, "pending")...)
 			// PostgreSQL stores the ID as a uuid, which refuses the text.
 			rule(t, db, check("22P02", "length(request_id) = 36 AND request_id NOT GLOB"), sql, args...)
+		}},
+		{"request binding immutable", func(t *testing.T) {
+			// A pending request, so the terminal rule cannot refuse it.
+			rule(t, db, "immutable request binding", "UPDATE requests SET expires_at=$1 WHERE request_id=$2", at(3*time.Minute), reqFree)
+			rule(t, db, "immutable request binding", "UPDATE requests SET binding=$1 WHERE request_id=$2", binding(reqFree, "none", ""), reqFree)
 		}},
 		// Guards and constraints on leases.
 		{"lease binding/max_calls from NULL", func(t *testing.T) {
@@ -262,6 +281,19 @@ func testSchemaRules(t *testing.T, db Database) {
 		}},
 		{"credential epoch/destination to NULL", func(t *testing.T) {
 			rule(t, db, "immutable credential epoch or invalid write count", "UPDATE credential_epochs SET destination=NULL,write_count=write_count+1")
+		}},
+		{"credential epoch initial write count", func(t *testing.T) {
+			rule(t, db, "invalid initial write count", "INSERT INTO credential_epochs ("+epochColumns+") SELECT owner_id,credential_id,connector_id,epoch+1,root_id,root_version,"+
+				"destination_digest,destination,wrapped_key,wrap_nonce,1 FROM credential_epochs WHERE owner_id='alice'")
+		}},
+		// Direct inserts of credential versions, which the Go vault layer
+		// would refuse before they reach the database.
+		{"credential version stale", func(t *testing.T) {
+			rule(t, db, "stale credential version", copyVersion("revision", "envelope"))
+		}},
+		{"credential version context", func(t *testing.T) {
+			rule(t, db, "invalid credential context", copyVersion("revision+1", setEnvelope("connector_id", identity.New())))
+			rule(t, db, "invalid credential context", copyVersion("revision+1", setEnvelope("destination_profile_sha256", strings.Repeat("b", 43))))
 		}},
 		{"wrap count bound", func(t *testing.T) {
 			// At the cap the update guard allows one more wrap; only the
