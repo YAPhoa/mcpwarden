@@ -1527,3 +1527,6 @@ Round 5 prep: `TestUncertainCommitStopsCatalog` pins the fail-closed path (it
 fails with `r.fail()` removed), a rolled-back change reads "change not saved;
 try again", and `lease.Store.WithOwner` and `Coordinator.Catalog` state the
 rollback contract for the SQLite store in PR 3.
+Round 5 nits: a change that gave up in the queue also reads "change not
+saved; try again" (new `queued` case), and the `WithOwner`, `Catalog` and
+`ErrRolledBack` comments state the contract exactly.

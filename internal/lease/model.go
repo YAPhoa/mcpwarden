@@ -21,7 +21,8 @@ var (
 	ErrLimit    = errors.New("access request limit reached")
 	ErrKey      = errors.New("credential activation failed")
 	// ErrRolledBack wraps the caller's context error when a transaction was
-	// abandoned before COMMIT: nothing was committed and the session is fine.
+	// abandoned before COMMIT: nothing was committed. A failed ROLLBACK still
+	// fails the store, which Lost reports.
 	ErrRolledBack = errors.New("transaction rolled back before commit")
 )
 
@@ -124,8 +125,9 @@ type Event struct {
 type Store interface {
 	Start(context.Context, string) error
 	// WithOwner runs fn in one owner transaction. When the caller's context
-	// ends before COMMIT, it returns that error wrapped in ErrRolledBack and
-	// nothing is committed; the catalog relies on this to stay up.
+	// ends before fn runs, it returns the bare context error and nothing ran;
+	// when it ends after fn but before COMMIT, it returns that error wrapped
+	// in ErrRolledBack and nothing is committed. The catalog relies on both.
 	WithOwner(context.Context, string, func(Tx) error) error
 	Lost() <-chan struct{}
 }

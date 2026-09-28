@@ -24,9 +24,10 @@ import (
 // is one owner transaction under it, together with any lease revocation and
 // its security event, and the in-memory view changes only after the commit.
 type Coordinator interface {
-	// Catalog runs mutation in one owner transaction. An error wrapping
-	// lease.ErrRolledBack means nothing was committed; any other error after
-	// the mutation ran leaves the outcome unknown.
+	// Catalog runs mutation in one owner transaction. A context error
+	// returned before the mutation ran, or one wrapped in lease.ErrRolledBack
+	// after it, means nothing was committed; any other error after the
+	// mutation ran leaves the outcome unknown.
 	Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error
 	BootID() string
 }
@@ -211,6 +212,7 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 		// transaction the store abandoned before COMMIT committed nothing, so
 		// the view is still right and the catalog stays up.
 		r.fail()
+		return ErrUnavailable
 	}
 	return mapError(err)
 }
@@ -219,7 +221,8 @@ func mapError(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, lease.ErrRolledBack):
+	case errors.Is(err, lease.ErrRolledBack), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Rolled back before COMMIT, or gave up before running.
 		return ErrNotSaved
 	case errors.Is(err, catalogdb.ErrConflict):
 		return fmt.Errorf("catalog change conflicted with stored data")

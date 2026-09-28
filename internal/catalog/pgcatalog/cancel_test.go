@@ -53,12 +53,24 @@ func (c deadlineBeforeCommit) Catalog(ctx context.Context, owner string, mutatio
 	})
 }
 
-// A change the store rolled back before COMMIT committed nothing: it fails,
+// expiredInQueue ends the repository's context before the transaction starts,
+// as a long queue can.
+type expiredInQueue struct{ Coordinator }
+
+func (c expiredInQueue) Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	return c.Coordinator.Catalog(ctx, owner, mutation)
+}
+
+// A change the store rolled back before COMMIT, or one that gave up in the
+// queue, committed nothing: it fails,
 // publishes nothing, and leaves the catalog and the gateway running.
 func TestRolledBackChangeKeepsCatalogUp(t *testing.T) {
 	for name, wrap := range map[string]func(Coordinator) Coordinator{
 		"cancelled": func(c Coordinator) Coordinator { return cancelBeforeCommit{c} },
 		"deadline":  func(c Coordinator) Coordinator { return deadlineBeforeCommit{c, time.Second} },
+		"queued":    func(c Coordinator) Coordinator { return expiredInQueue{c} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
