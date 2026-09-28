@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/custody"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func openStore(t *testing.T, path string) *Store {
@@ -254,6 +257,89 @@ func TestReplacedLockFileStopsStore(t *testing.T) {
 	}
 }
 
+// A busy executor hands the gate from one owner transaction to the next, so
+// the file checks cannot wait for an idle gate: a replaced database or a
+// removed lock file stops the store while writers commit back to back.
+func TestReplacedFilesStopBusyStore(t *testing.T) {
+	for _, replace := range []struct {
+		name string
+		do   func(path string) error
+	}{
+		{"database", func(path string) error { return os.Rename(path, path+".moved") }},
+		{"lock", func(path string) error { return os.Remove(path + ".lock") }},
+	} {
+		t.Run(replace.name, func(t *testing.T) {
+			path := tempPath(t)
+			s := openStore(t, path)
+			if err := s.Start(t.Context(), identity.New()); err != nil {
+				t.Fatal(err)
+			}
+			stop := make(chan struct{})
+			var wg sync.WaitGroup
+			var commits atomic.Int64
+			for range 4 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						if s.WithOwner(context.Background(), "alice", func(lease.Tx) error { return nil }) == nil {
+							commits.Add(1)
+						}
+					}
+				}()
+			}
+			defer func() { close(stop); wg.Wait() }()
+			for commits.Load() < 100 {
+				time.Sleep(time.Millisecond)
+			}
+			if err := replace.do(path); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-s.Lost():
+			case <-time.After(3 * time.Second):
+				t.Fatalf("store kept running under load after its %s file was replaced (%d commits)", replace.name, commits.Load())
+			}
+		})
+	}
+}
+
+// A fatal SQLite code stops the store even when the transaction is still
+// open and the statement's own family would only fail the change. A
+// read-only refusal (query_only standing in for a file that turned
+// read-only) leaves the transaction open, so only the fatal list stops the
+// store; SQLITE_FULL would not show it, since SQLite rolls that back itself
+// and the failed ROLLBACK stops the store anyway.
+func TestFatalCodeStopsStore(t *testing.T) {
+	s := openStore(t, tempPath(t))
+	if err := s.Start(t.Context(), identity.New()); err != nil {
+		t.Fatal(err)
+	}
+	var rc int
+	err := s.WithOwner(t.Context(), "alice", func(ltx lease.Tx) error {
+		x := ltx.(*ownerTx)
+		if _, err := x.t.exec("PRAGMA query_only=1"); err != nil {
+			return err
+		}
+		err := x.CatalogRows().PutDiscovery(catalogdb.Discovery{OwnerID: "alice", Provider: "files", Sealed: []byte("x")})
+		rc, _ = code(x.t.err)
+		return err
+	})
+	if err == nil || rc&0xff != sqlite3.SQLITE_READONLY {
+		t.Fatal("read-only refusal:", err, rc)
+	}
+	select {
+	case <-s.Lost():
+	default:
+		t.Fatal("a fatal SQLite code left the store running")
+	}
+}
+
 // A process killed after COMMIT returned keeps the commit, and its lock ends
 // with it.
 func TestKilledProcessKeepsCommits(t *testing.T) {
@@ -383,6 +469,10 @@ func TestHistoryPlansUseFilterIndexes(t *testing.T) {
 		"gateway":  {catalogdb.HistoryQuery{Upstream: "__gateway__"}, "history_owner_upstream"},
 		"status":   {catalogdb.HistoryQuery{Status: "timeout"}, "history_owner_status"},
 		"actor":    {catalogdb.HistoryQuery{ActorAccessID: "actor-1"}, "history_owner_actor"},
+		// With a tool filter the other terms never pick the index.
+		"upstream and tool": {catalogdb.HistoryQuery{Upstream: "up-1", ToolID: "tool-1"}, "history_owner_tool"},
+		"status and tool":   {catalogdb.HistoryQuery{Status: "timeout", ToolID: "tool-1"}, "history_owner_tool"},
+		"actor and tool":    {catalogdb.HistoryQuery{ActorAccessID: "actor-1", ToolID: "tool-1"}, "history_owner_tool"},
 	} {
 		c.q.Owner = "alice"
 		with, args := window(c.q)
@@ -477,5 +567,39 @@ func TestSlowHistoryPageDoesNotStopStore(t *testing.T) {
 	}
 	if err := s.InsertHistory(t.Context(), catalogdb.HistoryRow{OwnerID: "alice", EventID: "after", SchemaVersion: 1, ToolID: "t", Tool: "x", Upstream: "u", Status: "ok", Record: "{}"}); err != nil {
 		t.Fatal("write after a slow page:", err)
+	}
+}
+
+// Each durability and safety setting is checked: a connection that differs in
+// any one of them is refused.
+func TestSettingsRefused(t *testing.T) {
+	good := map[string]string{"busy_timeout": "busy_timeout(" + fmt.Sprint(busyTimeout) + ")", "foreign_keys": "foreign_keys(1)",
+		"journal_mode": "journal_mode(WAL)", "synchronous": "synchronous(FULL)", "trusted_schema": "trusted_schema(0)"}
+	for name, bad := range map[string]string{"": "", "journal_mode": "journal_mode(DELETE)", "synchronous": "synchronous(NORMAL)",
+		"foreign_keys": "foreign_keys(0)", "trusted_schema": "trusted_schema(1)", "busy_timeout": "busy_timeout(10000)"} {
+		var pragmas []string
+		for key, p := range good {
+			if key == name {
+				p = bad
+			}
+			pragmas = append(pragmas, p)
+		}
+		db, err := sql.Open("sqlite", dsn(filepath.Join(t.TempDir(), "settings.db"), pragmas...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := db.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = checkPragmas(t.Context(), c, busyTimeout, false)
+		if name == "" && err != nil {
+			t.Error("required settings refused:", err)
+		}
+		if name != "" && err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+		c.Close()
+		db.Close()
 	}
 }

@@ -53,6 +53,15 @@ type Database interface {
 	// Lose ends the open store's database session, as a server restart or
 	// a replaced file would; the store must notice on its own.
 	Lose(t *testing.T)
+	// Rule names what refused a statement from Exec, for asserting which
+	// rule fired: SQLite's extended result code and message, or
+	// PostgreSQL's SQLSTATE, constraint name and message.
+	Rule(err error) string
+	// SlowWrites slows every later insert into table so that three of them
+	// run past the store's transaction deadline. On PostgreSQL each stays
+	// under the session's statement timeout, so the deadline, not the
+	// server, ends the transaction.
+	SlowWrites(t *testing.T, table string)
 	// BulkHistory inserts n settled events for owner directly: event i
 	// ("e" and six digits) at history time i, over four tools, three
 	// upstreams, two statuses and seven actors.
@@ -78,6 +87,7 @@ func Run(t *testing.T, open func(t *testing.T) Database) {
 		{"VaultWriteCap", testVaultWriteCap},
 		{"VaultNonceBindingsAndWrappingKeyCap", testVaultNonceBindingsAndWrappingKeyCap},
 		{"VaultCommitFailureDoesNotPublish", testVaultCommitFailureDoesNotPublish},
+		{"EnvelopeEpochTyping", testEnvelopeEpochTyping},
 		{"VaultMutationCommit", testVaultMutationCommit},
 		{"VaultMutationRollback", testVaultMutationRollback},
 		{"VaultMutationPublishFailure", testVaultMutationPublishFailure},
@@ -87,10 +97,13 @@ func Run(t *testing.T, open func(t *testing.T) Database) {
 		{"CatalogRows", testCatalogRows},
 		{"ErrorMapping", testErrorMapping},
 		{"PoisonedTransaction", testPoisonedTransaction},
+		{"SchemaRules", testSchemaRules},
+		{"CatalogStatementPastDeadline", testCatalogStatementPastDeadline},
 		{"HistoryWindow", testHistoryWindow},
 		{"HistoryRangesUseHistoryTime", testHistoryRangesUseHistoryTime},
 		{"HistoryToolListForwardOnly", testHistoryToolListForwardOnly},
 		{"HistoryOpenCalls", testHistoryOpenCalls},
+		{"HistoryFiltersOpenCalls", testHistoryFiltersOpenCalls},
 		{"RepositoryCommitsAtomically", testRepositoryCommitsAtomically},
 		{"RepositoryFailsClosed", testRepositoryFailsClosed},
 		{"RolledBackCancelled", testRolledBackCancelled},

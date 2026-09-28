@@ -221,3 +221,13 @@ func vaultWithCredential(t *testing.T, s Store) (vault.Root, vault.Record) {
 	}
 	return root, r
 }
+
+// ActiveWindow starts a lease service on s and opens one access window for
+// owner "alice", for tests outside the contract. It returns the lease ID.
+func ActiveWindow(t *testing.T, s Store) string {
+	t.Helper()
+	f := newService(t, s, nil, "none")
+	f.activate(t)
+	f.service.Close()
+	return f.active.ID
+}

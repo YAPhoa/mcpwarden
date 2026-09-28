@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,6 +67,30 @@ func (d *contractDB) Refused(err error) bool { return d.Constraint(err) }
 func (d *contractDB) Constraint(err error) bool {
 	var e *driver.Error
 	return errors.As(err, &e) && e.Code()&0xff == sqlite3.SQLITE_CONSTRAINT
+}
+
+func (d *contractDB) Rule(err error) string {
+	var e *driver.Error
+	if !errors.As(err, &e) {
+		return fmt.Sprint(err)
+	}
+	return fmt.Sprintf("%d %s", e.Code(), e.Error())
+}
+
+// SlowWrites adds a trigger that counts a three-way cross join of 3,000 rows
+// before each insert. SQLite refuses a WITH clause inside a trigger, so the
+// rows live in their own table.
+func (d *contractDB) SlowWrites(t *testing.T, table string) {
+	t.Helper()
+	for _, statement := range []string{
+		"CREATE TABLE IF NOT EXISTS slow_rows (x INTEGER)",
+		"INSERT INTO slow_rows WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 3000) SELECT x FROM c",
+		"CREATE TRIGGER slow_" + table + " BEFORE INSERT ON " + table + " BEGIN SELECT count(*) FROM slow_rows a, slow_rows b, slow_rows c; END",
+	} {
+		if err := d.Exec(t, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func (d *contractDB) Int(t *testing.T, sql string, args ...any) int64 {

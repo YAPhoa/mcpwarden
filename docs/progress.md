@@ -1566,3 +1566,28 @@ SQLite package: the race detector slows the pure Go engine enough that a
 25,000-event history page passed the 5 s deadline. Under the race detector the
 tests now give pages a minute and skip the timing-only slow-page test, which
 runs in the CGO-disabled step. The full race run then passed.
+
+Review round 1 fixes. The SQLite heartbeat now checks the database and lock
+inodes on every tick, so a replaced file stops a busy store
+(`TestReplacedFilesStopBusyStore`). The request binding and approved-mode
+CHECKs are wrapped in `IS TRUE` (SQLite baseline, PostgreSQL migration 006,
+schema v6). With a tool filter, SQLite history terms use a unary `+`, and
+`TestHistoryPlansUseFilterIndexes` covers the combinations. New tests:
+- contract `SchemaRules` (45 subtests naming the rule that refused each
+  statement); `CatalogStatementPastDeadline`, `HistoryFiltersOpenCalls` and
+  `EnvelopeEpochTyping`;
+- `TestFatalCodeStopsStore`, `TestSettingsRefused`, SQLite `TestHistoryScale`
+  (all cases 17 to 316 ms at 1M calls without statistics; now in CI) and
+  `TestHistoryBackendEquivalence`;
+- `TestRollbackResumesAndRefusesReplacedFiles` again checks that a rollback
+  suspends an open window under its ID and that a rolled-back database refuses
+  to load.
+Removing any of the 59 SQLite schema rules fails a test; so did 7 spot-checked
+PostgreSQL guard edits. Removing the PostgreSQL store deadline check fails
+nothing: when the deadline cuts a statement, pgx closes the connection and the
+failed rollback stops the store anyway.
+
+Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
+`historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
+`go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
+Chromium owner flows passed.

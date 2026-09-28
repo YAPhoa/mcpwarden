@@ -162,3 +162,39 @@ func testHistoryOpenCalls(t *testing.T, db Database) {
 		t.Fatal("history_open:", open)
 	}
 }
+
+// Every filter applies to open calls too: a page filtered by tool, upstream,
+// actor, status or time lists only the open calls that match it.
+func testHistoryFiltersOpenCalls(t *testing.T, db Database) {
+	s := started(t, db)
+	open := func(id, toolID, upstream, actor string, ns int64) catalogdb.HistoryRow {
+		r := event("alice", id, "tool.dispatch.admitted", "inv-"+id, toolID, "tool "+toolID, upstream, "unknown", ns)
+		r.ActorAccessID = actor
+		return r
+	}
+	settled := event("alice", "done", "tool.dispatch.completed", "inv-done", "tool-1", "tool tool-1", "up-1", "ok", 50)
+	settled.ActorAccessID = "actor-1"
+	insert(t, s, open("o1", "tool-1", "up-1", "actor-1", 100), open("o2", "tool-2", "up-2", "actor-2", 200), settled)
+	for _, c := range []struct {
+		name string
+		q    catalogdb.HistoryQuery
+		want string
+	}{
+		{"none", catalogdb.HistoryQuery{}, "o2,o1,done"},
+		{"tool", catalogdb.HistoryQuery{ToolID: "tool-2"}, "o2"},
+		{"other tool", catalogdb.HistoryQuery{ToolID: "tool-3"}, ""},
+		{"upstream", catalogdb.HistoryQuery{Upstream: "up-1"}, "o1,done"},
+		{"actor", catalogdb.HistoryQuery{ActorAccessID: "actor-2"}, "o2"},
+		{"settled status", catalogdb.HistoryQuery{Status: "ok"}, "done"},
+		{"unknown status", catalogdb.HistoryQuery{Status: "unknown"}, "o2,o1"},
+		{"from", catalogdb.HistoryQuery{FromNano: 150, HasFrom: true}, "o2"},
+		{"to", catalogdb.HistoryQuery{ToNano: 150, HasTo: true}, "o1,done"},
+		{"tool and upstream", catalogdb.HistoryQuery{ToolID: "tool-1", Upstream: "up-2"}, ""},
+	} {
+		c.q.Owner = "alice"
+		got := query(t, s, c.q)
+		if ids(got.Records) != c.want || got.Total != len(got.Records) {
+			t.Errorf("%s: got %q (total %d), want %q", c.name, ids(got.Records), got.Total, c.want)
+		}
+	}
+}

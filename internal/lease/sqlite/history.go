@@ -76,19 +76,26 @@ func window(q catalogdb.HistoryQuery) (string, []any) {
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
 	}
+	// With a tool filter, the other equality terms get a unary + so SQLite
+	// cannot drive the scan from their indexes: without statistics it picks
+	// history_owner_upstream for upstream plus tool, which is far wider.
 	var filters []string
+	plus := ""
+	if q.ToolID != "" {
+		plus = "+"
+	}
 	if q.Status != "" {
-		filters = append(filters, "h.status="+arg(q.Status))
+		filters = append(filters, plus+"h.status="+arg(q.Status))
 	}
 	if q.ActorAccessID != "" {
-		filters = append(filters, "h.actor_access_id="+arg(q.ActorAccessID))
+		filters = append(filters, plus+"h.actor_access_id="+arg(q.ActorAccessID))
 	}
 	switch q.Upstream {
 	case "":
 	case "__gateway__":
-		filters = append(filters, "h.upstream=''")
+		filters = append(filters, plus+"h.upstream=''")
 	default:
-		filters = append(filters, "h.upstream="+arg(q.Upstream))
+		filters = append(filters, plus+"h.upstream="+arg(q.Upstream))
 	}
 	if q.ToolID != "" {
 		filters = append(filters, "h.tool_id="+arg(q.ToolID))

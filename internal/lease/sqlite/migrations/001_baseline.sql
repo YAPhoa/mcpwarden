@@ -26,10 +26,10 @@ CREATE TABLE requests (
     boot_id TEXT NOT NULL CHECK (length(boot_id) = 36 AND boot_id NOT GLOB '*[^0-9a-f-]*'),
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL CHECK (expires_at > created_at AND expires_at <= created_at + 300000000),
-    binding TEXT NOT NULL CHECK (json_valid(binding) AND json_type(binding) = 'object'
+    binding TEXT NOT NULL CONSTRAINT requests_binding_identity CHECK ((json_valid(binding) AND json_type(binding) = 'object'
         AND json_extract(binding, '$.id') = request_id
         AND json_extract(binding, '$.boot_id') = boot_id
-        AND json_extract(binding, '$.scope.owner_id') = owner_id),
+        AND json_extract(binding, '$.scope.owner_id') = owner_id) IS TRUE),
     state TEXT NOT NULL CHECK (state IN ('pending','approved','activated','denied','expired','stale')),
     decided_at INTEGER,
     activation_deadline INTEGER,
@@ -40,7 +40,8 @@ CREATE TABLE requests (
     FOREIGN KEY (owner_id, lease_id, request_id) REFERENCES leases(owner_id, lease_id, request_id) DEFERRABLE INITIALLY DEFERRED,
     CHECK (state <> 'pending' OR (decided_at IS NULL AND activation_deadline IS NULL AND approver_id IS NULL AND authorization_source IS NULL AND lease_id IS NULL)),
     CHECK (state NOT IN ('approved','activated') OR (decided_at IS NOT NULL AND activation_deadline IS NOT NULL AND approver_id IS NOT NULL AND authorization_source IS NOT NULL)),
-    CHECK (state <> 'approved' OR (json_extract(binding, '$.mode') = 'confirm' AND authorization_source = 'owner_confirmation' AND lease_id IS NULL)),
+    CONSTRAINT requests_approved_mode CHECK ((state <> 'approved'
+        OR (json_extract(binding, '$.mode') = 'confirm' AND authorization_source = 'owner_confirmation' AND lease_id IS NULL)) IS TRUE),
     CHECK (state <> 'activated' OR lease_id IS NOT NULL),
     CHECK (activation_deadline IS NULL OR activation_deadline <= expires_at)
 ) STRICT;

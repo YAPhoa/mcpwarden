@@ -25,6 +25,7 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres/pgtest"
+	"github.com/yaphoa/mcpwarden/internal/lease/storetest"
 )
 
 // fixture is a realistic file catalog and history on a scratch database. All
@@ -523,12 +524,26 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 		t.Fatal("rollback ran beside a PostgreSQL gateway", err)
 	}
 	f.stop(service, db)
+	// An access window still open when the rollback starts.
+	window, err := postgres.Open(t.Context(), f.db.RuntimeDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseID := storetest.ActiveWindow(t, window)
+	f.closeStore(window)
 
 	// Interrupted after the database left the active state.
 	st, _, _ := Status(t.Context(), f.db.Admin)
-	st, err := beginRollback(t.Context(), f.db.Admin, st)
+	st, err = beginRollback(t.Context(), f.db.Admin, st)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The rollback ends the window, with its event under the rollback ID.
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.leases WHERE lease_id=$1 AND state='suspended'", leaseID); n != 1 {
+		t.Fatal("rollback left the window open")
+	}
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='lease.suspended' AND lease_id=$1 AND boot_id=$2", leaseID, st.RollbackID); n != 1 {
+		t.Fatal("window suspension not audited under the rollback", n)
 	}
 	if _, err := f.gatewayErr(); !errors.Is(err, catalogdb.ErrNotActive) {
 		t.Fatal("PostgreSQL gateway loaded while rolling back", err)
@@ -547,7 +562,7 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.RollbackID != st.RollbackID || m.LegacyHistory != int64(f.lines) || m.LiveHistory != 1 || m.EndedMCP != 0 {
+	if m.RollbackID != st.RollbackID || m.SuspendedLeases != 1 || m.LegacyHistory != int64(f.lines) || m.LiveHistory != 1 || m.EndedMCP != 0 {
 		t.Fatalf("manifest: %+v", m)
 	}
 	again, err := Rollback(t.Context(), f.db.Admin, f.src)
@@ -574,6 +589,9 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	}
 	if st, _, _ := Status(t.Context(), f.db.Admin); st.State != "rolled_back" {
 		t.Fatal(st.State)
+	}
+	if _, err := f.gatewayErr(); !errors.Is(err, catalogdb.ErrNotActive) {
+		t.Fatal("PostgreSQL gateway loaded after rollback", err)
 	}
 	if marker, ok, err := catalog.ReadMarker(f.src.CatalogPath); err != nil || !ok || marker.State != "rolled_back" || marker.RollbackID != m.RollbackID {
 		t.Fatal("marker", marker, err)

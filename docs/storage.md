@@ -44,7 +44,8 @@ is no separate migration role.
 **One process.** `Open` takes `<path>.lock` exclusively and holds it until the
 process exits. It retries for 30 seconds, then refuses with "database in use by
 another mcpwarden process". The kernel releases the lock when a process dies, so
-a crash never leaves a stale lock. Supported platforms are Linux and other Unix
+a crash never leaves a stale lock. Leave the lock file in place: removing or
+replacing it, or the database file, stops the gateway. Supported platforms are Linux and other Unix
 systems (`flock`) and Windows (`LockFileEx`); others refuse to start.
 
 **Files.** The parent directory is created 0700 and a new database 0600. A
@@ -65,8 +66,9 @@ catalog load and quiesce, serialized by the same gate as the PostgreSQL store.
 An owner transaction is `BEGIN IMMEDIATE`; its clock is sampled after the write
 lock is held. After a statement error the transaction is poisoned: later
 statements fail without running and COMMIT is refused, as on PostgreSQL. A
-heartbeat checks the session every second when the gate is idle and that the
-database and lock paths still name the files that were opened. History pages use
+heartbeat checks every second that the database and lock paths still name the
+files that were opened, even under load, and pings the session when the gate
+is idle. History pages use
 a separate read-only pool of two connections, each page in one read transaction
 with a 5 second deadline; a slow page fails alone and never stops the store.
 
@@ -113,8 +115,15 @@ audit integrity or an off-host database.
 
 `internal/lease/storetest` is one contract suite that both stores run: leases,
 vault CAS and write caps, cancellation, catalog rows, error mapping, poisoning,
-history windows and filters, and the repository's atomic change and fail-closed
-rules. SQLite-only tests cover the lock file, unsafe paths, the migration ledger,
-a killed process, busy and replaced files, forbidden conflict clauses and the
-history index plans. The gateway's owner flows run on SQLite by default and on
+history windows and filters, each schema rule, and the repository's atomic
+change and fail-closed rules. `TestHistoryBackendEquivalence` writes the same
+history to both stores and compares every query. SQLite-only tests cover the
+lock file, unsafe paths, the settings, the migration ledger, a killed process,
+busy and replaced files, fatal codes, forbidden conflict clauses and the
+history index plans; `TestHistoryScale` (tag `historyscale`) holds pages to
+500 ms at 1,000,000 calls on each store.
+
+One difference is accepted: a vault envelope that spells its epoch or revision
+as an exponent (`1e0`) is accepted by PostgreSQL, whose jsonb stores the number
+1, and refused by SQLite. The gateway and browser write both as strings. The gateway's owner flows run on SQLite by default and on
 PostgreSQL under `TestOwnerFlowsOnPostgres`.

@@ -282,3 +282,30 @@ func testPoisonedTransaction(t *testing.T, db Database) {
 		t.Fatal("a poisoned transaction committed a row")
 	}
 }
+
+// Catalog statements that run past the store deadline stop the store. A
+// catalog error alone does not stop it, so only the deadline rule does: a
+// stalled transaction is treated as session loss, and nothing is committed.
+func testCatalogStatementPastDeadline(t *testing.T, db Database) {
+	s := started(t, db)
+	db.SlowWrites(t, "catalog_discovery")
+	began := time.Now()
+	err := withRows(t, s, "alice", func(rows catalogdb.Tx, now time.Time) error {
+		for _, provider := range []string{"a", "b", "c"} {
+			if err := rows.PutDiscovery(catalogdb.Discovery{OwnerID: "alice", Provider: provider, UpdatedAt: now, Sealed: sealed("d")}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("a statement past the deadline succeeded")
+	}
+	if took := time.Since(began); took > 20*time.Second {
+		t.Fatal("the deadline did not end the statement:", took)
+	}
+	stopped(t, s)
+	if n := db.Int(t, "SELECT count(*) FROM catalog_discovery"); n != 0 {
+		t.Fatal("rows committed:", n)
+	}
+}

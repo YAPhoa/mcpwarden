@@ -606,3 +606,14 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   `TestOwnerFlowsOnPostgres`. The SQLite hold for the session-wait test is an
   owner transaction of the store itself: SQLite locks the whole database, so
   an external write lock would block the session lookup too.
+- Review round 1 of PR 3: the heartbeat checks the database and lock inodes on
+  every tick before it tries the gate, so a replaced file stops a busy store
+  too; only the session ping waits for an idle gate. Under a tool filter the
+  SQLite history query writes the other equality terms with a unary `+`: the
+  planner has no statistics (the gateway never runs ANALYZE) and otherwise
+  drove upstream plus tool from the upstream index, 644 ms at 1M calls.
+- The request binding and approved-mode CHECKs are wrapped in `(…) IS TRUE` on
+  both stores (PostgreSQL migration 006), because a CHECK that is NULL passes.
+- An envelope epoch or revision written as `1e0` is accepted by PostgreSQL
+  (jsonb normalizes it to 1) and refused by SQLite. Recorded rather than
+  refused: jsonb cannot tell the spellings apart, and every writer uses strings.

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -72,6 +73,26 @@ func (d *contractDB) Refused(err error) bool {
 }
 
 func (d *contractDB) Constraint(err error) bool { return strings.HasPrefix(code(err), "23") }
+
+func (d *contractDB) Rule(err error) string {
+	var pg *pgconn.PgError
+	if !errors.As(err, &pg) {
+		return fmt.Sprint(err)
+	}
+	return pg.Code + " " + pg.ConstraintName + " " + pg.Message
+}
+
+// SlowWrites makes each insert sleep 2.5 s, under the executor's 3 s
+// statement timeout.
+func (d *contractDB) SlowWrites(t *testing.T, table string) {
+	t.Helper()
+	name := "slow_" + table
+	_, err := d.admin.Exec(t.Context(), `CREATE FUNCTION `+name+`() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(2.5); RETURN NEW; END $$;
+        CREATE TRIGGER `+name+` BEFORE INSERT ON `+pgx.Identifier{table}.Sanitize()+` FOR EACH ROW EXECUTE FUNCTION `+name+`();`, pgx.QueryExecModeSimpleProtocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func (d *contractDB) Int(t *testing.T, sql string, args ...any) int64 {
 	t.Helper()

@@ -416,9 +416,12 @@ func (s *Store) run(ctx context.Context, deadline time.Duration, fn func(*tx) er
 	return s.transaction(ctx, deadline, fn)
 }
 
-// heartbeat pings the idle executor every second and checks that the
-// database and lock paths still name the files that were opened. A busy gate
-// skips the tick: its holder is bounded by its own store deadline.
+// heartbeat checks every second that the database and lock paths still name
+// the files that were opened, whatever the gate is doing: a busy executor
+// hands the gate from one waiter to the next and could otherwise keep
+// serving beside a second process. It then pings the session if the gate is
+// idle; a busy gate skips the ping, since its holder is bounded by its own
+// store deadline.
 func (s *Store) heartbeat() {
 	defer close(s.done)
 	timer := time.NewTicker(time.Second)
@@ -428,6 +431,10 @@ func (s *Store) heartbeat() {
 		case <-s.ctx.Done():
 			return
 		case <-timer.C:
+			if !s.sameFiles() {
+				s.fail()
+				continue
+			}
 			select {
 			case <-s.gate:
 			default:
@@ -441,8 +448,13 @@ func (s *Store) heartbeat() {
 	}
 }
 
+func (s *Store) sameFiles() bool {
+	return sameFile(s.path, s.file) && sameFile(s.lockPath, s.lockInfo)
+}
+
+// alive pings the session; the caller holds the gate.
 func (s *Store) alive() bool {
-	if !sameFile(s.path, s.file) || !sameFile(s.lockPath, s.lockInfo) {
+	if !s.sameFiles() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
