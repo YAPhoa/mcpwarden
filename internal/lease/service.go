@@ -716,6 +716,7 @@ func (s *Service) endMatching(tx Tx, owner, state, actor, connector string) ([]s
 }
 
 func (s *Service) Revoke(ctx context.Context, id string) error {
+	ctx = context.WithoutCancel(ctx) // reducing access is never lost to a closed tab
 	a, ok := identity.ActorFrom(ctx)
 	if !ok {
 		return ErrDenied
@@ -754,6 +755,7 @@ func (s *Service) Revoke(ctx context.Context, id string) error {
 }
 
 func (s *Service) Deny(ctx context.Context, id string) error {
+	ctx = context.WithoutCancel(ctx) // reducing access is never lost to a closed tab
 	a, ok := identity.ActorFrom(ctx)
 	if !ok {
 		return ErrDenied
@@ -782,6 +784,7 @@ func (s *Service) Deny(ctx context.Context, id string) error {
 }
 
 func (s *Service) LockExecution(ctx context.Context) error {
+	ctx = context.WithoutCancel(ctx) // reducing access is never lost to a closed tab
 	a, ok := identity.ActorFrom(ctx)
 	if !ok {
 		return ErrDenied

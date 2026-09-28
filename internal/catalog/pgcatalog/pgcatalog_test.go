@@ -419,7 +419,9 @@ func TestImportRefusesUnsafeOrChangedSources(t *testing.T) {
 
 func TestVerificationDetectsTampering(t *testing.T) {
 	for name, sql := range map[string]string{
-		"sealed byte":      "UPDATE mcpwarden_security.catalog_access SET sealed = overlay(sealed placing '\\x00'::bytea from 30 for 1) WHERE access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access)",
+		// Flip every bit of one byte: writing a fixed value left the row unchanged
+		// whenever the random ciphertext already held it (1 run in 256).
+		"sealed byte":      "UPDATE mcpwarden_security.catalog_access SET sealed = set_byte(sealed, 29, get_byte(sealed, 29) # 255) WHERE access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access)",
 		"swapped payloads": "UPDATE mcpwarden_security.catalog_access a SET sealed = b.sealed FROM mcpwarden_security.catalog_access b WHERE a.access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access) AND b.access_id = (SELECT max(access_id) FROM mcpwarden_security.catalog_access)",
 		"plain role":       "UPDATE mcpwarden_security.catalog_access SET role = CASE role WHEN 'admin' THEN 'client' ELSE 'admin' END WHERE kind = 'api_key' AND access_id = (SELECT min(access_id) FROM mcpwarden_security.catalog_access WHERE kind = 'api_key')",
 		"expiry":           "UPDATE mcpwarden_security.catalog_access SET expires_at = expires_at + interval '1 day' WHERE expires_at IS NOT NULL",
@@ -459,7 +461,8 @@ func TestAbortBeforeCutoverRestoresFileGateway(t *testing.T) {
 	if err := Abort(t.Context(), f.db.Admin, f.src); err != nil {
 		t.Fatal(err)
 	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.history_events") + f.count("SELECT count(*) FROM mcpwarden_security.catalog_state"); n != 0 {
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.history_events") + f.count("SELECT count(*) FROM mcpwarden_security.catalog_state") +
+		f.count("SELECT count(*) FROM mcpwarden_security.history_tools") + f.count("SELECT count(*) FROM mcpwarden_security.history_open"); n != 0 {
 		t.Fatal("rows left after abort", n)
 	}
 	if after, _, _ := fileHash(f.src.CatalogPath); after != before {
@@ -473,9 +476,70 @@ func TestAbortBeforeCutoverRestoresFileGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Close()
+	// The import is repeated after the abort; its open admission and tool
+	// names are rebuilt from the history, not left over.
 	f.cutover()
 	if err := Abort(t.Context(), f.db.Admin, f.src); !errors.Is(err, ErrState) {
 		t.Fatal("abort after cutover", err)
+	}
+	_, db, _, _ := f.gateway()
+	indexed := NewHistory(db)
+	unknown, total, tools, _, err := indexed.QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Status: "unknown", Page: 1, Size: 25})
+	if err != nil || total != 1 || len(unknown) != 1 || unknown[0].EventType != audit.DispatchAdmitted || len(tools) != 1 || tools[0].Name != "remote__search" {
+		t.Fatal("history after a repeated import:", total, tools, err)
+	}
+	all, _, _, _, err := indexed.QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := 0
+	for _, r := range all {
+		if r.Status == "unknown" {
+			open++
+		}
+	}
+	if open != 1 {
+		t.Fatal("unknown filter differs from the visible history:", open)
+	}
+}
+
+// No MCP session survives a restart: EndStaleSessions ends every open one
+// with an event, and the owner can open new sessions afterwards.
+func TestStaleMCPSessionsEndAtStartup(t *testing.T) {
+	f := newFixture(t)
+	f.cutover()
+	repo, db, service, _ := f.gateway()
+	var ids []string
+	for i := range 10 {
+		a := catalog.AccessRecord{ID: identity.New(), Owner: f.bob, Name: fmt.Sprintf("session %d", i), Kind: "mcp", Role: "client", ParentID: "parent", SecretHash: fmt.Sprintf("%064x", 900+i)}
+		if err := repo.AddAccess(a); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, a.ID)
+	}
+	f.stop(service, db) // unclean for the sessions: nothing ended them
+	repo, db, service, _ = f.gateway()
+	if err := repo.EndStaleSessions(); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []string{f.alice, f.bob} {
+		for _, a := range repo.AccessList(owner) {
+			if a.Kind == "mcp" && a.EndedAt.IsZero() {
+				t.Fatal("open MCP session after restart:", a.Name)
+			}
+		}
+	}
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='access.ended'"); n != len(ids) {
+		t.Fatal("access.ended events:", n)
+	}
+	next := catalog.AccessRecord{ID: identity.New(), Owner: f.bob, Name: "session 11", Kind: "mcp", Role: "client", ParentID: "parent", SecretHash: fmt.Sprintf("%064x", 999)}
+	if err := repo.AddAccess(next); err != nil {
+		t.Fatal("a new session after restart:", err)
+	}
+	f.stop(service, db)
+	restarted, _, _, _ := f.gateway()
+	if a, ok := restarted.AccessByID(f.bob, ids[0]); !ok || a.EndedAt.IsZero() {
+		t.Fatal("ending was not committed")
 	}
 }
 
@@ -626,6 +690,13 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 func (f *fixture) stop(service *lease.Service, db *postgres.Store) {
 	f.t.Helper()
 	service.Close()
+	f.closeStore(db)
+}
+
+// closeStore closes a store and waits until the server has released its
+// session lock: the backend exits after the client closes, not before.
+func (f *fixture) closeStore(db *postgres.Store) {
+	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = db.Close(ctx)
@@ -650,11 +721,7 @@ func (f *fixture) gatewayErr() (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = db.Close(ctx)
-	}()
+	defer f.closeStore(db)
 	if err := db.Start(f.t.Context(), identity.New()); err != nil {
 		return nil, err
 	}
@@ -955,5 +1022,50 @@ func TestOldFormatRefusedOnLoad(t *testing.T) {
 				t.Fatalf("%s: got %v", name, err)
 			}
 		})
+	}
+}
+
+// Above 25,000 matches the readers differ on purpose: PostgreSQL counts the
+// newest 25,000 and reports the rest as capped, while the JSONL reader, which
+// PR 4 removes, still counts everything. Below the window they agree (see
+// TestImportPreservesCatalogAndHistory).
+func TestCappedHistoryDiffersFromJSONL(t *testing.T) {
+	f := newFixture(t)
+	file, err := os.OpenFile(f.src.HistoryPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines strings.Builder
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 25010 {
+		fmt.Fprintf(&lines, `{"ts":%q,"owner":%q,"session":"s","tool":"remote__search","upstream":"remote","args_sha256":"%064x","decision":"allow","status":"ok","duration_ms":1,"response_items":1,"structured":false}`+"\n",
+			base.Add(time.Duration(i)*time.Second).Format(time.RFC3339Nano), f.alice, i)
+	}
+	if _, err := file.WriteString(lines.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	jsonl, err := audit.Open(f.src.HistoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fileTotal, _, _, err := jsonl.QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
+	jsonl.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.cutover()
+	_, db, _, _ := f.gateway()
+	_, total, _, stats, err := NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileTotal <= 25000 || total != 25000 || !stats.Capped {
+		t.Fatal("capped difference:", fileTotal, total, stats.Capped)
+	}
+	if _, _, _, _, err := NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1001, Size: 25}); err == nil {
+		t.Fatal("a page beyond the window was served")
 	}
 }

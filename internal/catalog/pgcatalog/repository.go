@@ -24,19 +24,27 @@ import (
 // is one owner transaction under it, together with any lease revocation and
 // its security event, and the in-memory view changes only after the commit.
 type Coordinator interface {
+	// Catalog runs mutation in one owner transaction. A context error
+	// returned before the mutation ran, or one wrapped in lease.ErrRolledBack
+	// after it, means nothing was committed; any other error after the
+	// mutation ran leaves the outcome unknown.
 	Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error
 	BootID() string
 }
 
-// Loader reads committed rows on the executor session.
+// Loader reads committed rows on the executor session, under the startup
+// deadline.
 type Loader interface {
-	Run(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
+	Load(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
 }
 
 var (
 	// ErrUnavailable means the catalog cannot accept changes: it is not ready,
 	// or an earlier commit had an unknown outcome and the process must restart.
 	ErrUnavailable = errors.New("catalog storage unavailable")
+	// ErrNotSaved means the change was rolled back before commit; the
+	// catalog is unchanged and the change can be tried again.
+	ErrNotSaved = errors.New("change not saved; try again")
 	// ErrNotActive means PostgreSQL is not the authoritative catalog.
 	ErrNotActive = errors.New("the PostgreSQL catalog is not active: it was never cut over or has been rolled back")
 )
@@ -83,7 +91,7 @@ func New(encodedKey string, loader Loader, onFail func()) (*Repository, error) {
 // catalog state to be active (cut over and not rolled back).
 func (r *Repository) Load(ctx context.Context) error {
 	var st *state
-	err := r.loader.Run(ctx, func(ctx context.Context, db catalogdb.DB) error {
+	err := r.loader.Load(ctx, func(ctx context.Context, db catalogdb.DB) error {
 		cs, ok, err := catalogdb.ReadState(ctx, db, false)
 		if err != nil {
 			return err
@@ -199,9 +207,12 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 			r.mu.Unlock()
 		}, lease.Ending{All: endLeases, Connector: c.end}, nil
 	})
-	if err != nil && wrote {
-		// The writes ran; the commit may or may not have happened.
+	if err != nil && wrote && !errors.Is(err, lease.ErrRolledBack) {
+		// The writes ran; the commit may or may not have happened. A
+		// transaction the store abandoned before COMMIT committed nothing, so
+		// the view is still right and the catalog stays up.
 		r.fail()
+		return ErrUnavailable
 	}
 	return mapError(err)
 }
@@ -210,6 +221,9 @@ func mapError(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, lease.ErrRolledBack), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Rolled back before COMMIT, or gave up before running.
+		return ErrNotSaved
 	case errors.Is(err, catalogdb.ErrConflict):
 		return fmt.Errorf("catalog change conflicted with stored data")
 	case errors.Is(err, ErrUnavailable), errors.Is(err, lease.ErrLocked), errors.Is(err, lease.ErrStorage), errors.Is(err, catalogdb.ErrStorage):
@@ -931,6 +945,54 @@ func (r *Repository) UpdateAccess(owner, id, name string, end bool) error {
 		a.UpdatedAt = c.now
 		return r.putAccess(c, st, a, event)
 	})
+}
+
+// EndStaleSessions ends every open MCP session record, one owner transaction
+// per affected owner with an access.ended event each. No MCP session survives
+// a restart, so it runs after Load and Attach and before the listener opens,
+// as the file store does when it opens.
+func (r *Repository) EndStaleSessions() error {
+	st, done := r.view()
+	open := map[string][]string{}
+	for id, a := range st.access {
+		if a.Kind == "mcp" && a.EndedAt.IsZero() {
+			open[a.Owner] = append(open[a.Owner], id)
+		}
+	}
+	done()
+	owners := make([]string, 0, len(open))
+	for owner := range open {
+		owners = append(owners, owner)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		ids := open[owner]
+		sort.Strings(ids)
+		err := r.apply(owner, false, func(c *change, st *state) (func(), error) {
+			var publish []func()
+			for _, id := range ids {
+				a, ok := st.access[id]
+				if !ok || a.Owner != owner || !a.EndedAt.IsZero() {
+					continue
+				}
+				a.EndedAt, a.UpdatedAt = c.now, c.now
+				p, err := r.putAccess(c, st, a, "access.ended")
+				if err != nil {
+					return nil, err
+				}
+				publish = append(publish, p)
+			}
+			return func() {
+				for _, p := range publish {
+					p()
+				}
+			}, nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Repository) TouchAccess(owner, id string) error {

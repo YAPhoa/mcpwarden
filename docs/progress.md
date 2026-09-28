@@ -1462,8 +1462,8 @@ endpoint as typed against the vault destination rule (`vaultEndpoint` in
 `ui/static/app.js`) and shows the gateway's wording instead of a bare HTTP
 400; the most likely case was an endpoint without a path. A differential run
 over 46,080 generated endpoints found no endpoint the gateway accepts and the
-panel refuses; the panel lets only HTTPS IPv6 loopback literals through to the
-gateway's refusal. The note shown when credentials are unavailable now fits
+panel refuses; the panel leaves every HTTPS IPv6 literal to the gateway, which
+refuses non-public ones (loopback, ULA, link-local and so on). The note shown when credentials are unavailable now fits
 both the operator workspace and gateways without the vault. Stale workspace
 wording is fixed in the API guide, encrypted runtime and roadmap. A full race
 run once hit `ErrLocked` in `TestImportAfterRollbackRequiresTheExport`:
@@ -1473,3 +1473,60 @@ lock to clear after stopping a gateway (8 repeated runs clean). `gofmt`, tidy,
 `integrity.py`, build, vet (with and without `flowtest`), the `CGO_ENABLED=0`
 build, `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (69) and
 the Chromium owner flows passed.
+
+## 2026-09-26 — Store hardening (removal plan PR 2)
+
+The PostgreSQL executor no longer treats a caller's cancellation or gate
+contention as session loss. Statements run on a detached store context, the
+caller is checked before COMMIT, and revoke, deny and lock execution detach from
+the request. The heartbeat pings only an idle gate. History pages run on a
+read-only session and read at most the newest 25,000 matches, with per-filter
+predicates, history-time ranges in both readers, `total_capped`, partial
+per-filter indexes and the new `history_tools` and `history_open` tables
+(migration 005). Open MCP session records are ended at startup. The history page
+explains which time a range uses and shows "25,000+" with the window's timings.
+New tests: `TestCancelledCallerCommitsNothing`, `TestCancelledViewAndRevoke`,
+`TestLongHolderIsNotSessionLoss` (both store fixes mutation-checked),
+`TestHistoryWindow`, `TestHistoryPlansUseFilterIndexes` (generic plans, fails on
+a catch-all), `TestHistoryRangesUseHistoryTime`, `TestHistoryToolListForwardOnly`,
+`TestHistoryOpenCalls`, `TestHistoryBackfillMatchesLiveWrites`,
+`TestHistorySessionFailureAndConcurrency`, `TestStaleMCPSessionsEndAtStartup`,
+`TestCappedHistoryDiffersFromJSONL`, the repeated import after an abort, and
+`TestHistoryScale` (build tag `historyscale`, in CI without the race detector):
+at 1,000,000 calls every page took 11 to 181 ms locally, and an admission during
+a page took 4 ms. `gofmt`, tidy, `integrity.py`, build, vet (plain, `flowtest`,
+`historyscale`), the `CGO_ENABLED=0` build, `go test -race -count=1 ./...` with
+PostgreSQL 16, `npm test` (70) and the Chromium owner flows passed. The R3-T1
+wording nit from PR 1 is fixed above.
+
+Review round 1: history pages now wait for the session with their own 15 s
+bound and get their full 5 s once they run; a page closes the session only when
+pgx has closed it, and a session that died while idle is replaced once within
+the page (R1-N1). New tests cover queued pages, an expired or waiting page
+leaving the session open, the one-time reopen and a clock-fixed reopen limit,
+and ending stale MCP sessions at gateway startup (R1-T2). `lease-storage.md`
+describes both sessions (R1-T3). The same validation passed again.
+
+Review round 2: the session-failure test waits for terminated backends to exit
+(R2-B1, flaky in CI-like runs). Closing the store now cancels the running
+history page and turns waiting pages away, so shutdown never queues behind
+history (R2-N1, `TestHistoryCloseEndsPages`). A free session is taken without a
+select, the history statement timeout is 4.5 s, and `lease-storage.md` wording
+is fixed (R2-T1 to T3). The same validation passed again.
+
+Second review: a catalog change whose repository context ended before COMMIT
+was rolled back safely by the store, yet the repository still stopped the
+gateway as if the commit were uncertain. The store now wraps that error in
+`lease.ErrRolledBack` and the repository fails only the change
+(`TestRolledBackChangeKeepsCatalogUp`, which fails without the fix). The
+pgcatalog fixture's `gatewayErr` now waits for the server to release the session
+lock, as `stop` does; `TestRollbackResumesAndRefusesReplacedFiles` failed once
+on that race. The same validation passed again, with three clean full race runs.
+
+Round 5 prep: `TestUncertainCommitStopsCatalog` pins the fail-closed path (it
+fails with `r.fail()` removed), a rolled-back change reads "change not saved;
+try again", and `lease.Store.WithOwner` and `Coordinator.Catalog` state the
+rollback contract for the SQLite store in PR 3.
+Round 5 nits: a change that gave up in the queue also reads "change not
+saved; try again" (new `queued` case), and the `WithOwner`, `Catalog` and
+`ErrRolledBack` comments state the contract exactly.

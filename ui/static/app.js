@@ -898,10 +898,15 @@ function callTiming(r) {
  const ms = us => (Number(us) / 1000).toLocaleString(undefined, {maximumFractionDigits: 3});
  return `${ms(r.timing.handler_us)} ms total · ${r.timing.forwarded ? ms(r.timing.upstream_us)+' ms upstream' : 'Not forwarded'} · ${ms(r.timing.gateway_us)} ms gateway`;
 }
-function performanceSummary(p) {
+// Indexed history counts and times the newest 25,000 matches; older calls are
+// reached with the time range.
+function callCount(result, noun) {
+ return result.total_capped ? `25,000+ ${noun}s` : `${result.total} ${noun}${result.total===1?'':'s'}`;
+}
+function performanceSummary(p, capped) {
  if (!p?.timed_calls) return '';
  const ms = us => (Number(us) / 1000).toLocaleString(undefined, {maximumFractionDigits: 3});
- return ` · ${p.timed_calls} timed · Average: ${ms(p.upstream.mean_us)} ms upstream / ${ms(p.gateway.mean_us)} ms gateway · p95 total ≤ ${ms(p.handler.p95_upper_us)} ms`;
+ return ` · ${p.timed_calls} timed${capped ? ' · timings from the latest 25,000 calls' : ''} · Average: ${ms(p.upstream.mean_us)} ms upstream / ${ms(p.gateway.mean_us)} ms gateway · p95 total ≤ ${ms(p.handler.p95_upper_us)} ms`;
 }
 let historyTool = '', historyPage = 1, historyRequest = 0;
 function showToolTab(history) {
@@ -916,7 +921,7 @@ async function loadToolHistory() {
  try {
   const result=await api(`/api/history?tool_id=${encodeURIComponent(historyTool)}&page=${historyPage}`);
   if(request!==historyRequest||epoch!==identityEpoch)return;
-  $('tool-history-status').textContent=`${result.total} calls recorded${performanceSummary(result.performance)}`;
+  $('tool-history-status').textContent=`${callCount(result,'call')} recorded${performanceSummary(result.performance,result.total_capped)}`;
   $('tool-history-rows').innerHTML=result.items.length?result.items.map(r=>`<article class="history-row"><div><strong>${escapeHTML(callStatus(r))}</strong><time>${escapeHTML(date(r.ts))}</time></div><p>${escapeHTML(callTiming(r))} · ${escapeHTML(callResponse(r))}</p>${callActor(r)}</article>`).join(''):'<p class="empty">No calls recorded for this tool yet.</p>';
   $('history-page').textContent=`Page ${historyPage} of ${Math.max(1,Math.ceil(result.total/25))}`;
   $('history-previous').disabled=historyPage<=1;$('history-next').disabled=historyPage*25>=result.total||historyPage>=1000;
@@ -1044,7 +1049,7 @@ async function loadCalls() {
   const services=[...new Set(result.tools.map(t=>t.upstream||'__gateway__'))].sort();
   $('calls-upstream').innerHTML='<option value="">All upstreams</option>'+services.map(name=>`<option value="${escapeHTML(name)}">${escapeHTML(name==='__gateway__'?'Gateway management':name)}</option>`).join('');$('calls-upstream').value=upstream;
   renderCallsToolOptions();
-  $('calls-summary').textContent=`${result.total} matching call${result.total===1?'':'s'}${performanceSummary(result.performance)}`;
+  $('calls-summary').textContent=`${callCount(result,'matching call')}${performanceSummary(result.performance,result.total_capped)}`;
   $('calls-rows').innerHTML=result.items.length?`<table class="history-table"><caption class="sr-only">Tool call history. Times use ${escapeHTML(window.MCPWardenTime.zone())}.</caption><thead><tr><th scope="col">Time <small class="history-zone">${escapeHTML(window.MCPWardenTime.zone())}</small></th><th scope="col">Tool</th><th scope="col">Upstream provider</th><th scope="col">Status</th><th scope="col">Total time</th><th scope="col">Upstream time</th><th scope="col">Gateway time</th></tr></thead><tbody>${result.items.map(historyCallRow).join('')}</tbody></table>`:'<p class="empty">No calls match these filters.</p>';
   $('calls-pagination').textContent=`Page ${callsPage} of ${Math.max(1,Math.ceil(result.total/25))}`;
   $('calls-previous').disabled=callsPage<=1;$('calls-next').disabled=callsPage*25>=result.total||callsPage>=1000;

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ type Store struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan struct{}
+	reader  *reader
 }
 
 // Open rejects powerful runtime roles and incompatible schemas. dsn is secret
@@ -45,6 +47,7 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
 	config.RuntimeParams["synchronous_commit"] = "on"
 	config.RuntimeParams["search_path"] = "pg_catalog"
 	config.RuntimeParams["timezone"] = "UTC"
+	history := newReader(config)
 	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, lease.ErrStorage
@@ -77,6 +80,8 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_access','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_connectors','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.history_events','UPDATE,DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.history_tools','DELETE,TRUNCATE')
+        AND NOT has_table_privilege(current_user,'mcpwarden_security.history_open','UPDATE,TRUNCATE')
         FROM pg_roles r,pg_namespace n WHERE r.rolname=current_user AND n.nspname='mcpwarden_security'`).Scan(&safe)
 	if err != nil || !safe {
 		return nil, lease.ErrStorage
@@ -85,7 +90,7 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
 	if err != nil || count != SchemaVersion {
 		return nil, lease.ErrStorage
 	}
-	s := &Store{conn: conn, gate: make(chan struct{}, 1), lost: make(chan struct{}), done: make(chan struct{})}
+	s := &Store{conn: conn, gate: make(chan struct{}, 1), lost: make(chan struct{}), done: make(chan struct{}), reader: history}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.gate <- struct{}{}
 	ok = true
@@ -99,6 +104,11 @@ func (s *Store) acquire(ctx context.Context) error {
 	case <-s.lost:
 		return lease.ErrLocked
 	default:
+	}
+	// A caller that has already gone gets its context error and no side
+	// effect, even when the gate happens to be free.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	select {
 	case <-ctx.Done():
@@ -114,6 +124,7 @@ func (s *Store) release() { s.gate <- struct{}{} }
 func (s *Store) Close(ctx context.Context) error {
 	s.fail()
 	<-s.done
+	s.reader.close()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -137,17 +148,17 @@ func (s *Store) Start(ctx context.Context, boot string) error {
 	if s.started {
 		return lease.ErrLocked
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ownerDeadline)
 	defer cancel()
 	var locked bool
-	if err := s.conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", executorLock).Scan(&locked); err != nil {
+	if err := s.conn.QueryRow(lockCtx, "SELECT pg_try_advisory_lock($1)", executorLock).Scan(&locked); err != nil {
 		s.fail()
 		return lease.ErrStorage
 	}
 	if !locked {
 		return lease.ErrLocked
 	}
-	err := s.transaction(ctx, func(tx pgx.Tx) error {
+	err := s.transaction(ctx, ownerDeadline, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := Quiesce(ctx, tx, boot)
 		return err
 	})
@@ -214,7 +225,22 @@ func Quiesce(ctx context.Context, tx pgx.Tx, boot string) (stale, suspended int,
 	return stale, suspended, nil
 }
 
-func (s *Store) transaction(ctx context.Context, fn func(pgx.Tx) error) error {
+// Store deadlines. A statement that reaches one is a real stall: pgx closes
+// the session, so the store fails.
+const (
+	ownerDeadline = 5 * time.Second
+	loadDeadline  = 30 * time.Second
+)
+
+// transaction runs fn on the executor session. Statements use a store context
+// detached from the caller, so a client that disconnects never interrupts a
+// statement (pgx would close the session). The caller's context is checked
+// before COMMIT instead: a caller that has gone gets its context error,
+// wrapped in lease.ErrRolledBack, and nothing is committed. fail() is kept for
+// real session loss.
+func (s *Store) transaction(caller context.Context, deadline time.Duration, fn func(context.Context, pgx.Tx) error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(caller), deadline)
+	defer cancel()
 	tx, err := s.conn.Begin(ctx)
 	if err != nil {
 		s.fail()
@@ -227,11 +253,19 @@ func (s *Store) transaction(ctx context.Context, fn func(pgx.Tx) error) error {
 			s.fail()
 		}
 	}()
-	if err = fn(tx); err != nil {
-		if errors.Is(err, lease.ErrStorage) {
+	if err = fn(ctx, tx); err != nil {
+		if ctx.Err() != nil || errors.Is(err, lease.ErrStorage) {
 			s.fail()
+			return lease.ErrStorage
 		}
 		return err
+	}
+	if ctx.Err() != nil {
+		s.fail()
+		return lease.ErrStorage
+	}
+	if err := caller.Err(); err != nil {
+		return fmt.Errorf("%w: %w", lease.ErrRolledBack, err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		s.fail()
@@ -251,9 +285,7 @@ func (s *Store) WithOwner(ctx context.Context, owner string, fn func(lease.Tx) e
 	if !s.started {
 		return lease.ErrLocked
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return s.transaction(ctx, func(tx pgx.Tx) error {
+	return s.transaction(ctx, ownerDeadline, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "INSERT INTO mcpwarden_security.owners(owner_id) VALUES ($1) ON CONFLICT DO NOTHING", owner); err != nil {
 			return lease.ErrStorage
 		}
@@ -279,16 +311,19 @@ func (s *Store) heartbeat() {
 		case <-s.ctx.Done():
 			return
 		case <-timer.C:
+			// Ping only when the gate is idle. A busy holder is bounded by
+			// its own store deadline, so contention is never session loss.
+			select {
+			case <-s.gate:
+			default:
+				continue
+			}
 			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-			if err := s.acquire(ctx); err == nil {
-				if s.started && s.conn.Ping(ctx) != nil {
-					s.fail()
-				}
-				s.release()
-			} else if errors.Is(err, context.DeadlineExceeded) {
+			if s.started && s.conn.Ping(ctx) != nil && s.ctx.Err() == nil {
 				s.fail()
 			}
 			cancel()
+			s.release()
 		}
 	}
 }

@@ -84,5 +84,5 @@ func (rs *runtimes) history(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	jsonResponse(w, 200, map[string]any{"items": out, "total": total, "page": page, "page_size": 25, "tools": toolOptions, "performance": performance})
+	jsonResponse(w, 200, map[string]any{"items": out, "total": total, "total_capped": performance.Capped, "page": page, "page_size": 25, "tools": toolOptions, "performance": performance})
 }

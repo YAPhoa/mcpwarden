@@ -42,16 +42,41 @@ database transaction; the current file catalog is not connected to this hook.
 The added `ChangeAtomic` implements that shared transaction for ciphertext
 records, with post-commit cache publication. See [vault storage](vault-storage.md).
 
-The first PostgreSQL adapter uses one dedicated session for short transactions
-and its session advisory lock. It never uses a reconnecting pool for ownership.
-Losing the connection, a failed health check, SQL storage failure or uncertain
-commit closes its lost signal; the lease service stops admissions and cancels
-live work. A new Store/boot is required for recovery. Startup atomically marks old
-pending/approved requests stale and active leases suspended. Durable rows alone
-never recreate memory authority. A one-second health probe bounds idle detection;
-each database operation also fails closed. The transaction path has a five-second
-deadline and shorter statement/row-lock timeouts. There is no transaction callback
-retry. This initial single-session adapter has not been load-qualified.
+The PostgreSQL adapter uses one dedicated executor session for short
+transactions and its session advisory lock. It never uses a reconnecting pool
+for ownership. Losing the connection, a failed health check, SQL storage failure
+or uncertain commit closes its lost signal; the lease service stops admissions
+and cancels live work. A new Store/boot is required for recovery. Startup
+atomically marks old pending/approved requests stale and active leases
+suspended. Durable rows alone never recreate memory authority.
+
+The health probe runs every second, only while the executor session is idle. A
+busy session is bounded by its own deadline, so waiting behind a slow holder is
+never read as session loss; an idle ping that fails, or takes longer than two seconds, is.
+Transactions run on a statement context detached from the caller, with a
+five-second deadline (thirty seconds for the startup load) and shorter
+statement/row-lock timeouts. A caller that goes away mid-transaction gets its
+context error, wrapped in `lease.ErrRolledBack`, before COMMIT and nothing is
+committed; the session is untouched, since pgx would close a session whose
+statement context ended. The catalog repository treats that error as a known
+rollback: the change fails with "change not saved; try again" and is not
+published, but the catalog stays up. Any
+other error after its writes is an uncertain commit and still stops it. Reaching the
+store deadline is a real stall and fails the store. There is no transaction
+callback retry.
+
+History pages run on a second, read-only session (`mcpwarden-history`,
+`default_transaction_read_only=on`, 4.5-second statement timeout, so the
+server ends a long statement before the page deadline would close the session), one
+REPEATABLE READ transaction per page, so a slow page never holds the executor.
+Pages take turns on that session: waiting has its own fifteen-second bound and
+each page gets its full five seconds once it runs. A page that gives up waiting
+never runs, and a failed page closes the session only when pgx has closed it.
+A session that died while idle is replaced once within the page; otherwise a
+failed open is not retried within a second. A history failure fails only that
+page, never the store. Closing the store ends the running page and turns
+waiting pages away, so shutdown never queues behind history. The adapter has
+not been load-qualified.
 
 Owner reads always include owner identity. Transactions lock the owner row before
 sampling `clock_timestamp()`; transaction-start `now()` is unsuitable after a wait.
@@ -76,14 +101,18 @@ client-release catalog schema.
 The reviewed first migration is
 [`001_leases.sql`](../../internal/lease/postgres/migrations/001_leases.sql).
 `cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql` and
-`003_owner_api.sql` and `004_catalog.sql`, verifying every SHA-256 hash in an
+`003_owner_api.sql`, `004_catalog.sql` and `005_history_index.sql`, verifying every SHA-256 hash in an
 ordered ledger. Earlier migrations are unchanged. Migration 003 adds per-owner
 approval policies (revision CAS enforced by a trigger; the runtime role may
 insert and update, not delete) and the owner-route audit event types. Migration
 004 adds the catalog, catalog state and history tables and the catalog event
 types. The runtime role may insert and update catalog rows, replace discovery and
 visibility rows, and insert history. It cannot delete catalog rows, change
-catalog state, or update or delete history; startup checks this.
+catalog state, or update or delete history; startup checks this. Migration 005
+adds the history filter indexes, `history_tools` (the latest name of each tool)
+and `history_open` (admissions without a stored completion), backfilled from
+history. The runtime role may insert and update `history_tools` and insert and
+delete `history_open`, never truncate either; `history_events` stays insert-only.
 There is no destructive down migration. Rerunning the same version is supported;
 checksum drift or a newer/unexpected ledger fails closed.
 

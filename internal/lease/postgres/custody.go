@@ -157,10 +157,8 @@ func (s *Store) LoadCustody(ctx context.Context) (custody.Snapshot, error) {
 	if !s.started {
 		return custody.Snapshot{}, lease.ErrLocked
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	var out custody.Snapshot
-	err := s.transaction(ctx, func(tx pgx.Tx) error {
+	err := s.transaction(ctx, loadDeadline, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"); err != nil {
 			return lease.ErrStorage
 		}

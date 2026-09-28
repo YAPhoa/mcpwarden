@@ -66,6 +66,9 @@ type Performance struct {
 	Handler     Latency `json:"handler"`
 	Upstream    Latency `json:"upstream"`
 	Gateway     Latency `json:"gateway"`
+	// Capped reports that more calls match than an indexed store reads; the
+	// total and these timings then cover the newest ones only.
+	Capped bool `json:"-"`
 }
 
 func (s *Performance) observe(r Record) {
