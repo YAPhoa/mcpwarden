@@ -1522,3 +1522,8 @@ gateway as if the commit were uncertain. The store now wraps that error in
 pgcatalog fixture's `gatewayErr` now waits for the server to release the session
 lock, as `stop` does; `TestRollbackResumesAndRefusesReplacedFiles` failed once
 on that race. The same validation passed again, with three clean full race runs.
+
+Round 5 prep: `TestUncertainCommitStopsCatalog` pins the fail-closed path (it
+fails with `r.fail()` removed), a rolled-back change reads "change not saved;
+try again", and `lease.Store.WithOwner` and `Coordinator.Catalog` state the
+rollback contract for the SQLite store in PR 3.

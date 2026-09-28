@@ -123,6 +123,9 @@ type Event struct {
 // exclusive executor ownership and suspends prior boots before admitting work.
 type Store interface {
 	Start(context.Context, string) error
+	// WithOwner runs fn in one owner transaction. When the caller's context
+	// ends before COMMIT, it returns that error wrapped in ErrRolledBack and
+	// nothing is committed; the catalog relies on this to stay up.
 	WithOwner(context.Context, string, func(Tx) error) error
 	Lost() <-chan struct{}
 }

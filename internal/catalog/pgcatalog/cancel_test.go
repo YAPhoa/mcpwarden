@@ -66,7 +66,7 @@ func TestRolledBackChangeKeepsCatalogUp(t *testing.T) {
 			repo, db, service, failed := f.gateway()
 			repo.Attach(wrap(service))
 			err := repo.Add(catalog.Entry{Owner: f.alice, Name: "rolled-back", URL: "https://example.test/mcp"})
-			if !errors.Is(err, lease.ErrRolledBack) {
+			if !errors.Is(err, ErrNotSaved) {
 				t.Fatal("rolled-back change:", err)
 			}
 			if n := f.count("SELECT count(*) FROM mcpwarden_security.catalog_connectors WHERE name='rolled-back'"); n != 0 {
@@ -90,5 +90,35 @@ func TestRolledBackChangeKeepsCatalogUp(t *testing.T) {
 				t.Fatal("next change:", err)
 			}
 		})
+	}
+}
+
+// commitThenFail lets the real transaction commit and then reports storage
+// loss, as a lost COMMIT acknowledgement would.
+type commitThenFail struct{ Coordinator }
+
+func (c commitThenFail) Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error {
+	if err := c.Coordinator.Catalog(ctx, owner, mutation); err != nil {
+		return err
+	}
+	return lease.ErrStorage
+}
+
+// Any other error after the writes leaves the outcome unknown, so the catalog
+// stops and refuses further changes.
+func TestUncertainCommitStopsCatalog(t *testing.T) {
+	f := newFixture(t)
+	f.cutover()
+	repo, _, service, failed := f.gateway()
+	repo.Attach(commitThenFail{service})
+	if err := repo.Add(catalog.Entry{Owner: f.alice, Name: "uncertain", URL: "https://example.test/mcp"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("uncertain commit:", err)
+	}
+	if !*failed || !repo.Failed() {
+		t.Fatal("an uncertain commit left the catalog up:", *failed, repo.Failed())
+	}
+	repo.Attach(service)
+	if err := repo.Add(catalog.Entry{Owner: f.alice, Name: "after", URL: "https://example.test/mcp"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("change after an uncertain commit:", err)
 	}
 }

@@ -59,7 +59,8 @@ statement/row-lock timeouts. A caller that goes away mid-transaction gets its
 context error, wrapped in `lease.ErrRolledBack`, before COMMIT and nothing is
 committed; the session is untouched, since pgx would close a session whose
 statement context ended. The catalog repository treats that error as a known
-rollback: the change fails and is not published, but the catalog stays up. Any
+rollback: the change fails with "change not saved; try again" and is not
+published, but the catalog stays up. Any
 other error after its writes is an uncertain commit and still stops it. Reaching the
 store deadline is a real stall and fails the store. There is no transaction
 callback retry.

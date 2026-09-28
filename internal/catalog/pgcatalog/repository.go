@@ -24,6 +24,9 @@ import (
 // is one owner transaction under it, together with any lease revocation and
 // its security event, and the in-memory view changes only after the commit.
 type Coordinator interface {
+	// Catalog runs mutation in one owner transaction. An error wrapping
+	// lease.ErrRolledBack means nothing was committed; any other error after
+	// the mutation ran leaves the outcome unknown.
 	Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error
 	BootID() string
 }
@@ -38,6 +41,9 @@ var (
 	// ErrUnavailable means the catalog cannot accept changes: it is not ready,
 	// or an earlier commit had an unknown outcome and the process must restart.
 	ErrUnavailable = errors.New("catalog storage unavailable")
+	// ErrNotSaved means the change was rolled back before commit; the
+	// catalog is unchanged and the change can be tried again.
+	ErrNotSaved = errors.New("change not saved; try again")
 	// ErrNotActive means PostgreSQL is not the authoritative catalog.
 	ErrNotActive = errors.New("the PostgreSQL catalog is not active: it was never cut over or has been rolled back")
 )
@@ -213,6 +219,8 @@ func mapError(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, lease.ErrRolledBack):
+		return ErrNotSaved
 	case errors.Is(err, catalogdb.ErrConflict):
 		return fmt.Errorf("catalog change conflicted with stored data")
 	case errors.Is(err, ErrUnavailable), errors.Is(err, lease.ErrLocked), errors.Is(err, lease.ErrStorage), errors.Is(err, catalogdb.ErrStorage):
