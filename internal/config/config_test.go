@@ -52,25 +52,23 @@ func TestAccountsRequireEncryptedStorageAndExcludeOAuth(t *testing.T) {
 	}
 }
 
-func TestOwnerSecurityRequiresAccountsAndDatabaseEnv(t *testing.T) {
+func TestOwnerSecurityRequiresAccountsAndStorage(t *testing.T) {
+	t.Setenv("TEST_STORAGE_KEY", "key")
 	t.Setenv("TEST_MANAGED_KEY", "key")
-	t.Setenv("TEST_SECURITY_DSN", "postgres://runtime@127.0.0.1/db")
-	managed := &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}
+	storage := func() *Storage { return &Storage{Path: "data/mcpwarden.db", KeyEnv: "TEST_STORAGE_KEY"} }
 	for name, tt := range map[string]struct {
 		cfg  Config
 		want string
 	}{
-		"operator mode": {Config{OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, "requires accounts"},
-		"missing env":   {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "MISSING_MCPWARDEN_TEST"}}, "unset"},
-		"accounts":      {Config{Accounts: &Accounts{}, Managed: managed, OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, ""},
+		"operator mode": {Config{Storage: storage(), OwnerSecurity: &OwnerSecurity{}}, "requires accounts"},
+		"file catalog":  {Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}, OwnerSecurity: &OwnerSecurity{}}, "requires the storage section"},
+		"old database":  {Config{Accounts: &Accounts{}, Storage: storage(), OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, "replaced by storage.database_url_env"},
+		"accounts":      {Config{Accounts: &Accounts{}, Storage: storage(), OwnerSecurity: &OwnerSecurity{}}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := tt.cfg.ResolveAndValidate()
 			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Fatalf("got error %v, want containing %q", err, tt.want)
-			}
-			if tt.want == "" && tt.cfg.OwnerSecurity.DatabaseURL != "postgres://runtime@127.0.0.1/db" {
-				t.Fatal("database URL not resolved")
 			}
 		})
 	}
@@ -92,28 +90,53 @@ func TestOwnerSecurityTrustedProxyConfiguration(t *testing.T) {
 	}
 }
 
-func TestManagedBackend(t *testing.T) {
+func TestStorage(t *testing.T) {
+	t.Setenv("TEST_STORAGE_KEY", "key")
+	t.Setenv("TEST_STORAGE_DSN", "postgres://runtime@127.0.0.1/db")
 	t.Setenv("TEST_MANAGED_KEY", "key")
-	t.Setenv("TEST_SECURITY_DSN", "postgres://runtime@127.0.0.1/db")
 	for name, tt := range map[string]struct {
-		backend string
-		owner   bool
-		want    string
+		cfg  Config
+		want string
 	}{
-		"default":           {"", false, ""},
-		"file":              {"file", true, ""},
-		"postgres":          {"postgres", true, ""},
-		"postgres no owner": {"postgres", false, "requires owner_security"},
-		"unknown":           {"sqlite", false, "file or postgres"},
+		"sqlite default":     {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
+		"sqlite accounts":    {Config{Accounts: &Accounts{}, Storage: &Storage{Driver: "sqlite", Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
+		"postgres":           {Config{Storage: &Storage{Driver: "postgres", DatabaseURLEnv: "TEST_STORAGE_DSN", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
+		"sqlite no path":     {Config{Storage: &Storage{KeyEnv: "TEST_STORAGE_KEY"}}, "storage.path is required"},
+		"sqlite with url":    {Config{Storage: &Storage{Path: "x.db", DatabaseURLEnv: "TEST_STORAGE_DSN", KeyEnv: "TEST_STORAGE_KEY"}}, "only for storage.driver postgres"},
+		"postgres no url":    {Config{Storage: &Storage{Driver: "postgres", KeyEnv: "TEST_STORAGE_KEY"}}, "database_url_env is required"},
+		"postgres with path": {Config{Storage: &Storage{Driver: "postgres", Path: "x.db", DatabaseURLEnv: "TEST_STORAGE_DSN", KeyEnv: "TEST_STORAGE_KEY"}}, "only for storage.driver sqlite"},
+		"postgres unset url": {Config{Storage: &Storage{Driver: "postgres", DatabaseURLEnv: "MISSING_MCPWARDEN_TEST", KeyEnv: "TEST_STORAGE_KEY"}}, "unset"},
+		"unknown driver":     {Config{Storage: &Storage{Driver: "mysql", KeyEnv: "TEST_STORAGE_KEY"}}, "sqlite or postgres"},
+		"no key":             {Config{Storage: &Storage{Path: "x.db"}}, "key_env is required"},
+		"unset key":          {Config{Storage: &Storage{Path: "x.db", KeyEnv: "MISSING_MCPWARDEN_TEST"}}, "unset"},
+		"with audit":         {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}, Audit: Audit{Path: "audit.jsonl"}}, "audit.path must be unset"},
+		"with managed":       {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}}, "cannot be combined with storage"},
+		"managed backend":    {Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY", Backend: "postgres"}}, "replaced by the storage section"},
+		"file mode":          {Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY", Backend: tt.backend}}
-			if tt.owner {
-				c.OwnerSecurity = &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}
-			}
+			c := tt.cfg
 			err := c.ResolveAndValidate()
-			if tt.want == "" && (err != nil || c.Managed.Backend == "") || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
-				t.Fatal(err, c.Managed.Backend)
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("got error %v, want containing %q", err, tt.want)
+			}
+			if tt.want != "" {
+				return
+			}
+			if c.Storage == nil {
+				if c.Audit.Path != "./audit.jsonl" {
+					t.Fatal("file mode lost its audit default:", c.Audit.Path)
+				}
+				return
+			}
+			if c.Audit.Path != "" || c.Storage.Key != "key" {
+				t.Fatal("storage resolved:", c.Audit.Path, c.Storage.Key)
+			}
+			if c.Storage.Driver == "postgres" && c.Storage.DatabaseURL != "postgres://runtime@127.0.0.1/db" {
+				t.Fatal("database URL not resolved")
+			}
+			if name == "sqlite default" && c.Storage.Driver != "sqlite" {
+				t.Fatal("default driver:", c.Storage.Driver)
 			}
 		})
 	}

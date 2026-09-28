@@ -86,7 +86,7 @@ func (x *ownerTx) PutApprovalPolicy(p custody.Policy, expected string) error {
 // SecurityEvents returns the newest owner events first. Metadata is decoded
 // strictly; a row that does not match the allowlisted shape fails closed.
 func (x *ownerTx) SecurityEvents(limit int) ([]lease.Event, error) {
-	if limit < 1 || limit > MaxEventPage {
+	if limit < 1 || limit > custody.MaxEventPage {
 		return nil, lease.ErrDenied
 	}
 	out := []lease.Event{}
@@ -105,17 +105,10 @@ func (x *ownerTx) SecurityEvents(limit int) ([]lease.Event, error) {
 	return out, nil
 }
 
-const (
-	MaxEventPage = 200
-	// MaxEndedLeases bounds RecentLeases. Ended windows are display history
-	// only; reading them never reactivates or extends a window.
-	MaxEndedLeases = 50
-)
-
 // RecentLeases returns the owner's windows that ended (expired, revoked or
 // suspended) at or after since, newest first.
 func (x *ownerTx) RecentLeases(since time.Time, limit int) ([]lease.Lease, error) {
-	if limit < 1 || limit > MaxEndedLeases {
+	if limit < 1 || limit > custody.MaxEndedLeases {
 		return nil, lease.ErrDenied
 	}
 	return x.leases("SELECT "+leaseColumns+" FROM leases WHERE owner_id=$1 AND state<>'active' AND ended_at >= $2 ORDER BY ended_at DESC, lease_id LIMIT $3",

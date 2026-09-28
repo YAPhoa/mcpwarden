@@ -7,11 +7,14 @@ import (
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,7 +23,6 @@ import (
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
-	"github.com/yaphoa/mcpwarden/internal/catalog/pgcatalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"
@@ -37,16 +39,16 @@ const (
 )
 
 // ownerFixture runs the real account session, access-key and owner security
-// routes against a scratch PostgreSQL database. All credentials are synthetic.
+// routes on a storage database: SQLite by default, PostgreSQL under
+// TestOwnerFlowsOnPostgres. All credentials are synthetic.
 type ownerFixture struct {
-	t     *testing.T
-	db    *pgtest.Database
-	store catalog.Repository
-	cfg   config.Config
-	// backend is file or postgres; see TestOwnerFlowsOnPostgresCatalog.
-	backend  string
-	imported bool
-	pg       *pgBackend
+	t        *testing.T
+	driver   string
+	pg       *pgtest.Database // postgres only
+	raw      *sql.DB          // sqlite only: a second connection to the file
+	store    catalog.Repository
+	cfg      config.Config
+	backend  *storageBackend
 	stopped  context.Context
 	accounts *accountAuth
 	access   *accessManager
@@ -63,53 +65,71 @@ type ownerFixture struct {
 	destination *secret.Destination
 }
 
+// fixtureDriver runs the owner flows on PostgreSQL when invoked from
+// TestOwnerFlowsOnPostgres.
+func fixtureDriver(t *testing.T) string {
+	if strings.HasPrefix(t.Name(), "TestOwnerFlowsOnPostgres/") {
+		return "postgres"
+	}
+	return "sqlite"
+}
+
 // newOwnerFixture takes an optional connector URL; the default is never dialed.
 func newOwnerFixture(t *testing.T, endpoint ...string) *ownerFixture {
 	t.Helper()
-	db := pgtest.New(t)
-	dir := t.TempDir()
-	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
-	store, err := catalog.Open(dir+"/catalog.enc", key)
-	if err != nil {
-		t.Fatal(err)
+	key := base64.StdEncoding.EncodeToString(randBytes(32))
+	f := &ownerFixture{t: t, driver: fixtureDriver(t), owners: map[string]string{}, cookies: map[string]string{}, keys: map[string]string{}, keyIDs: map[string]string{}}
+	f.cfg = config.Config{Accounts: &config.Accounts{}, Origins: []string{panelOrigin}, OwnerSecurity: &config.OwnerSecurity{},
+		Storage: &config.Storage{Driver: f.driver, Key: key}}
+	if f.driver == "postgres" {
+		f.pg = pgtest.New(t)
+		if _, err := f.pg.Admin.Exec(t.Context(), "SET search_path=mcpwarden_security"); err != nil {
+			t.Fatal(err)
+		}
+		f.cfg.Storage.DatabaseURL = f.pg.RuntimeDSN
+	} else {
+		f.cfg.Storage.Path = filepath.Join(t.TempDir(), "mcpwarden.db")
 	}
-	f := &ownerFixture{t: t, db: db, store: store, backend: fixtureBackend(t), owners: map[string]string{}, cookies: map[string]string{}, keys: map[string]string{}, keyIDs: map[string]string{}}
-	f.cfg = config.Config{Accounts: &config.Accounts{}, Origins: []string{panelOrigin}, OwnerSecurity: &config.OwnerSecurity{DatabaseURL: db.RuntimeDSN},
-		Managed: &config.Managed{Path: dir + "/catalog.enc", Key: key, Backend: f.backend}, Audit: config.Audit{Path: dir + "/audit.jsonl"}}
-	f.accounts = newAccountAuth(store, f.cfg)
-	f.access = newAccessManager(store)
+	f.start()
+	if f.driver == "sqlite" {
+		raw, err := sql.Open("sqlite", f.cfg.Storage.Path+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { raw.Close() })
+		f.raw = raw
+	}
 	for _, username := range []string{"alice", "bob"} {
 		salt := randBytes(16)
 		hash, _ := pbkdf2.Key(sha256.New, testPassword, salt, 1000, 32)
 		account := catalog.Account{ID: "account:" + randomToken(), Username: username, Salt: salt, PasswordHash: hash, Iterations: 1000}
-		if err := store.AddAccount(account); err != nil {
+		if err := f.store.AddAccount(account); err != nil {
 			t.Fatal(err)
 		}
 		f.owners[username] = account.ID
 		f.cookies[username] = f.session(username)
 	}
 	f.entry = catalog.Entry{Owner: f.owners["alice"], Name: "remote", URL: append(endpoint, "https://example.com/mcp")[0], AuthType: "bearer", HeaderNames: []string{"Authorization"}}
-	if err := store.Add(f.entry); err != nil {
+	if err := f.store.Add(f.entry); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range store.List(f.owners["alice"]) {
+	for _, e := range f.store.List(f.owners["alice"]) {
 		f.entry = e
 	}
 	tools := []*mcp.Tool{{Name: "search", Description: "Synthetic search", InputSchema: map[string]any{"type": "object"}}, {Name: "write", Description: "Synthetic write", InputSchema: map[string]any{"type": "object"}}}
-	if err := store.SetDiscovery(f.owners["alice"], "remote", tools); err != nil {
+	if err := f.store.SetDiscovery(f.owners["alice"], "remote", tools); err != nil {
 		t.Fatal(err)
 	}
 	f.toolID = identity.Derive(f.entry.ID, "search")
 	for _, key := range []struct{ name, owner, role string }{{"agent", "alice", "client"}, {"admin-agent", "alice", "admin"}, {"other-agent", "alice", "client"}, {"bob-agent", "bob", "client"}} {
 		token, publicID := identity.NewAccessToken()
 		record := catalog.AccessRecord{ID: identity.New(), PublicID: publicID, Owner: f.owners[key.owner], Name: key.name, Kind: "api_key", Role: key.role, SecretHash: tokenHash(token), ExpiresAt: time.Now().Add(24 * time.Hour)}
-		if err := store.AddAccess(record); err != nil {
+		if err := f.store.AddAccess(record); err != nil {
 			t.Fatal(err)
 		}
 		f.keys[key.name], f.keyIDs[key.name] = token, record.ID
 	}
 	f.cek = randBytes(32)
-	f.start()
 	return f
 }
 
@@ -122,80 +142,140 @@ func (f *ownerFixture) session(username string) string {
 	return token
 }
 
+// start runs the gateway's real storage backend, as run() does. No guards
+// are set: the repository coordinates with the lease service itself.
 func (f *ownerFixture) start() {
 	f.t.Helper()
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	if f.backend == "postgres" {
-		f.startPostgres(pol)
-		return
-	}
-	api, err := openSecurity(f.t.Context(), f.cfg, f.store, pol, f.accounts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, fail := context.WithCancelCause(f.t.Context())
+	b, err := openStorage(ctx, f.cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), fail)
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	f.api = api
+	f.backend, f.stopped, f.api, f.store, f.accounts = b, ctx, b.security, b.repo, b.accounts
+	f.access = newAccessManager(b.repo)
 	f.t.Cleanup(func() {
-		if f.api == api {
-			api.close()
+		if f.api == b.security {
+			b.close()
 		}
 	})
-	f.accounts.guard, f.access.guard = api.guardAccess, api.guardAccess
-	f.accounts.sessionGuard, f.access.sessionGuard = api.service.ChangeSessions, api.service.ChangeSessions
 	f.mux = http.NewServeMux()
-	api.register(f.mux)
+	b.security.register(f.mux)
 	f.mux.Handle("/api/auth/", originOnly(http.HandlerFunc(f.accounts.authHandler), f.cfg.Origins))
 	f.mux.Handle("/api/access/", f.accounts.protect(http.HandlerFunc(f.access.handler), true))
 }
 
 func (f *ownerFixture) restart() {
-	f.api.close()
+	f.backend.close()
 	f.api = nil
 	f.start()
 }
 
-// fixtureBackend runs the owner flows on the PostgreSQL catalog when invoked
-// from TestOwnerFlowsOnPostgresCatalog.
-func fixtureBackend(t *testing.T) string {
-	if strings.HasPrefix(t.Name(), "TestOwnerFlowsOnPostgresCatalog/") {
-		return "postgres"
+// row reads the database directly as its owner. SQL uses bare table names.
+func (f *ownerFixture) row(query string, args ...any) interface{ Scan(...any) error } {
+	if f.pg != nil {
+		return f.pg.Admin.QueryRow(f.t.Context(), query, args...)
 	}
-	return "file"
+	return f.raw.QueryRowContext(f.t.Context(), query, args...)
 }
 
-// startPostgres imports and cuts over the fixture's file catalog once, then
-// starts the gateway's real PostgreSQL catalog backend. No guards are set:
-// the repository coordinates with the lease service itself.
-func (f *ownerFixture) startPostgres(pol *policy.Policy) {
+func (f *ownerFixture) count(query string, args ...any) int {
 	f.t.Helper()
-	if !f.imported {
-		if err := f.store.Close(); err != nil {
-			f.t.Fatal(err)
-		}
-		src := pgcatalog.Sources{CatalogPath: f.cfg.Managed.Path, CatalogKey: f.cfg.Managed.Key, HistoryPath: f.cfg.Audit.Path}
-		if _, err := pgcatalog.Import(f.t.Context(), f.db.Admin, src, pgcatalog.Options{}); err != nil {
-			f.t.Fatal(err)
-		}
-		if _, err := pgcatalog.Cutover(f.t.Context(), f.db.Admin, src); err != nil {
-			f.t.Fatal(err)
-		}
-		f.imported = true
-	}
-	ctx, fail := context.WithCancelCause(f.t.Context())
-	pg, err := openPostgresCatalog(ctx, f.cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), fail)
-	if err != nil {
+	var n int
+	if err := f.row(query, args...).Scan(&n); err != nil {
 		f.t.Fatal(err)
 	}
-	f.pg, f.stopped, f.api, f.store, f.accounts = pg, ctx, pg.security, pg.repo, pg.accounts
-	f.access = newAccessManager(pg.repo)
-	f.t.Cleanup(func() {
-		if f.api == pg.security {
-			pg.close()
+	return n
+}
+
+func (f *ownerFixture) text(query string, args ...any) string {
+	f.t.Helper()
+	var s string
+	if err := f.row(query, args...).Scan(&s); err != nil {
+		f.t.Fatal(err)
+	}
+	return s
+}
+
+// holdOwner holds the owner's durable lock. awaitWaiter returns once a store
+// transaction waits behind it. PostgreSQL holds the row from another session
+// and reports the lock wait. SQLite locks the whole database, so the hold is
+// an owner transaction of the store itself, and awaitWaiter gives the request
+// a moment to reach it.
+func (f *ownerFixture) holdOwner(owner string) (awaitWaiter, release func()) {
+	t := f.t
+	t.Helper()
+	if f.pg != nil {
+		tx, err := f.pg.Admin.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-	f.mux = http.NewServeMux()
-	pg.security.register(f.mux)
-	f.mux.Handle("/api/auth/", originOnly(http.HandlerFunc(f.accounts.authHandler), f.cfg.Origins))
-	f.mux.Handle("/api/access/", f.accounts.protect(http.HandlerFunc(f.access.handler), true))
+		if _, err := tx.Exec(t.Context(), "SELECT owner_id FROM owners WHERE owner_id=$1 FOR UPDATE", owner); err != nil {
+			t.Fatal(err)
+		}
+		awaitWaiter = func() {
+			t.Helper()
+			deadline := time.Now().Add(1500 * time.Millisecond)
+			for {
+				var waiting bool
+				if _, err := tx.Exec(t.Context(), "SELECT pg_stat_clear_snapshot()"); err != nil {
+					t.Fatal(err)
+				}
+				if err := tx.QueryRow(t.Context(), "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND application_name='mcpwarden-security' AND wait_event_type='Lock')").Scan(&waiting); err != nil {
+					t.Fatal(err)
+				}
+				if waiting {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("mutation never waited for the owner lock")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		var once sync.Once
+		return awaitWaiter, func() {
+			once.Do(func() {
+				if err := tx.Commit(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+	}
+	held, done := make(chan struct{}), make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- f.api.store.WithOwner(context.Background(), owner, func(lease.Tx) error {
+			close(held)
+			<-done
+			return nil
+		})
+	}()
+	<-held
+	var once sync.Once
+	return func() { time.Sleep(200 * time.Millisecond) }, func() {
+		once.Do(func() {
+			close(done)
+			if err := <-result; err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// lose ends the store's database session: PostgreSQL terminates it, and the
+// SQLite file is moved away from its path.
+func (f *ownerFixture) lose() {
+	f.t.Helper()
+	if f.pg != nil {
+		if _, err := f.pg.Admin.Exec(f.t.Context(), "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-security' AND datname=current_database()"); err != nil {
+			f.t.Fatal(err)
+		}
+		return
+	}
+	if err := os.Rename(f.cfg.Storage.Path, f.cfg.Storage.Path+".moved"); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 type req struct {
@@ -723,15 +803,13 @@ func TestOwnerConcurrentMutationsAndKeyRevocation(t *testing.T) {
 	if count(codes, 200) != 1 || count(codes, 409) != len(codes)-1 {
 		t.Fatal("concurrent activations", codes)
 	}
-	var windows int
-	if err := f.db.Admin.QueryRow(t.Context(), "SELECT count(*) FROM mcpwarden_security.leases WHERE request_id=$1", request.ID).Scan(&windows); err != nil || windows != 1 {
-		t.Fatal("duplicate durable windows", windows, err)
+	if windows := f.count("SELECT count(*) FROM leases WHERE request_id=$1", request.ID); windows != 1 {
+		t.Fatal("duplicate durable windows", windows)
 	}
 	// Revoking the caller's key ends its window before the catalog write.
 	f.expect(req{method: "DELETE", path: "/api/access/" + f.keyIDs["agent"], user: "alice", skipCSRF: true}, 204, nil)
-	var state string
-	if err := f.db.Admin.QueryRow(t.Context(), "SELECT state FROM mcpwarden_security.leases WHERE request_id=$1", request.ID).Scan(&state); err != nil || state != "revoked" {
-		t.Fatal("key revocation left the window active", state, err)
+	if state := f.text("SELECT state FROM leases WHERE request_id=$1", request.ID); state != "revoked" {
+		t.Fatal("key revocation left the window active", state)
 	}
 	if w := f.do(req{path: "/api/leases", key: "agent"}); w.Code != 401 {
 		t.Fatal("revoked key still authenticates", w.Code)
@@ -746,67 +824,6 @@ func count(codes []int, want int) int {
 		}
 	}
 	return n
-}
-
-func TestOwnerRoutesFailClosedOnDatabaseLoss(t *testing.T) {
-	f := newOwnerFixture(t)
-	_, record := f.provision("none")
-	request := f.requestAccess("agent", record.CredentialID)
-	owner := f.ownerRequest(request.ID)
-	var active leaseView
-	f.expect(req{method: "POST", path: "/api/approvals/" + request.ID + "/activate", user: "alice", idempotency: identity.New(), body: f.activation(owner, f.cek)}, 200, &active)
-	if _, err := f.db.Admin.Exec(t.Context(), "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-security' AND datname=current_database()"); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		w := f.do(req{path: "/api/leases", user: "alice"})
-		if w.Code == 423 || w.Code == 503 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("database loss did not lock owner routes", w.Code)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	// Mutations fail closed and publish nothing.
-	for _, r := range []req{
-		{method: "PUT", path: "/api/security/approval-policy", user: "alice", body: encode(map[string]string{"mode": "confirm", "expected_revision": "2", "current_password": testPassword})},
-		{method: "POST", path: "/api/access-requests", key: "agent", body: encode(map[string]any{"credential_id": record.CredentialID, "duration_seconds": 60, "tools": []map[string]any{{"tool_id": f.toolID}}})},
-		{method: "POST", path: "/api/vault/lock-execution", user: "alice", body: "{}"},
-	} {
-		if w := f.do(r); w.Code != 423 && w.Code != 503 {
-			t.Fatalf("%s %s succeeded without storage: %d", r.method, r.path, w.Code)
-		}
-	}
-	if p := f.api.index.Policy(f.owners["alice"]); p.Mode != "none" || p.Revision != "2" {
-		t.Fatal("uncommitted policy published")
-	}
-	if w := f.do(req{method: "POST", path: "/api/approvals/" + request.ID + "/activate", user: "alice", idempotency: identity.New(), body: f.activation(owner, f.cek)}); w.Code == 200 {
-		t.Fatal("activation succeeded without storage")
-	}
-	// Revoking an access key must still work while execution is locked.
-	f.expect(req{method: "DELETE", path: "/api/access/" + f.keyIDs["agent"], user: "alice", skipCSRF: true}, 204, nil)
-	if _, ok := authenticateAPIKey(f.store, f.keys["agent"]); ok {
-		t.Fatal("key revocation blocked by storage loss")
-	}
-	// Browser logout must also work without PostgreSQL, even though it shares
-	// the owner gate with credential writes.
-	f.expect(req{method: "POST", path: "/api/auth/logout", user: "alice", body: "{}", skipCSRF: true}, 204, nil)
-	if _, ok := f.store.AuthenticateAccess(tokenHash(f.cookies["alice"]), "browser"); ok {
-		t.Fatal("session revocation blocked by storage loss")
-	}
-	f.cookies["alice"] = f.session("alice")
-	// A fresh executor starts locked: the old window is suspended.
-	f.restart()
-	var leases []leaseView
-	f.expect(req{path: "/api/leases", user: "alice"}, 200, &leases)
-	if len(leases) != 0 {
-		t.Fatal("window survived executor loss")
-	}
-	if n := countEvents(f.events("alice"), "lease.suspended", ""); n != 1 {
-		t.Fatal("suspension not audited", n)
-	}
 }
 
 func TestOwnerSecurityRequestLimitsAndBodies(t *testing.T) {

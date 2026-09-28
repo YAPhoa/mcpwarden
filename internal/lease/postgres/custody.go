@@ -13,8 +13,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/vault"
 )
 
-const MaxEventPage = 200
-
 func (x *ownerTx) CredentialRecords() ([]vault.Record, error) {
 	rows, err := x.tx.Query(x.ctx, "SELECT "+credentialColumns+credentialJoin+" WHERE h.owner_id=$1 ORDER BY h.credential_id", x.owner)
 	if err != nil {
@@ -94,7 +92,7 @@ func (x *ownerTx) PutApprovalPolicy(p custody.Policy, expected string) error {
 // SecurityEvents returns the newest owner events first. Metadata is decoded
 // strictly; a row that does not match the allowlisted shape fails closed.
 func (x *ownerTx) SecurityEvents(limit int) ([]lease.Event, error) {
-	if limit < 1 || limit > MaxEventPage {
+	if limit < 1 || limit > custody.MaxEventPage {
 		return nil, lease.ErrDenied
 	}
 	rows, err := x.tx.Query(x.ctx, `SELECT metadata FROM mcpwarden_security.security_events WHERE owner_id=$1 ORDER BY occurred_at DESC, event_id DESC LIMIT $2`, x.owner, limit)
@@ -117,14 +115,10 @@ func (x *ownerTx) SecurityEvents(limit int) ([]lease.Event, error) {
 	return out, nil
 }
 
-// MaxEndedLeases bounds RecentLeases. Ended windows are display history only;
-// reading them never reactivates or extends a window.
-const MaxEndedLeases = 50
-
 // RecentLeases returns the owner's windows that ended (expired, revoked or
 // suspended) at or after since, newest first.
 func (x *ownerTx) RecentLeases(since time.Time, limit int) ([]lease.Lease, error) {
-	if limit < 1 || limit > MaxEndedLeases {
+	if limit < 1 || limit > custody.MaxEndedLeases {
 		return nil, lease.ErrDenied
 	}
 	rows, err := x.tx.Query(x.ctx, "SELECT "+leaseColumns+" FROM mcpwarden_security.leases WHERE owner_id=$1 AND state<>'active' AND ended_at >= $2 ORDER BY ended_at DESC, lease_id LIMIT $3", x.owner, since, limit)

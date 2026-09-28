@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -77,9 +76,8 @@ func TestOwnerMutationsRejectRevokedSession(t *testing.T) {
 			var before, after int
 			count := func(out *int) {
 				t.Helper()
-				if err := f.db.Admin.QueryRow(t.Context(), "SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1", f.owners["alice"]).Scan(out); err != nil {
-					t.Fatal(err)
-				}
+				// Logout commits its own access event; the mutation must commit none.
+				*out = f.count("SELECT count(*) FROM security_events WHERE owner_id=$1 AND event_type NOT LIKE 'access.%'", f.owners["alice"])
 			}
 			count(&before)
 			w := f.pausedMutation(method, path, body, func() {
@@ -134,49 +132,26 @@ func TestOwnerMutationRechecksSessionAfterDatabaseWait(t *testing.T) {
 	root, record := f.provision("none")
 	next := f.credentialRecord(root, record.CredentialID, "2", "1", randBytes(32))
 	body := encode(map[string]any{"expected": pointerInput{Epoch: "1", Revision: "1"}, "record": next})
-	// Hold the durable owner lock. HTTP authentication occurs before this wait;
-	// authorization must be repeated with a current clock after it is released.
-	tx, err := f.db.Admin.Begin(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(context.Background())
-	if _, err := tx.Exec(t.Context(), "SELECT owner_id FROM mcpwarden_security.owners WHERE owner_id=$1 FOR UPDATE", f.owners["alice"]); err != nil {
-		t.Fatal(err)
-	}
 	expires := time.Now().Add(750 * time.Millisecond)
 	token := randomToken()
 	if err := f.store.AddAccess(catalog.AccessRecord{ID: identity.New(), Owner: f.owners["alice"], Name: "short lived browser", Kind: "browser", Role: "admin", SecretHash: tokenHash(token), ExpiresAt: expires}); err != nil {
 		t.Fatal(err)
 	}
 	f.cookies["alice"] = token
+	csrf := f.csrfToken()
+	// Hold the durable owner lock. HTTP authentication occurs before this wait;
+	// authorization must be repeated with a current clock after it is released.
+	awaitWaiter, release := f.holdOwner(f.owners["alice"])
+	defer release()
 	response := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		response <- f.do(req{method: "PUT", path: "/api/vault/credentials/" + record.CredentialID, user: "alice", body: body})
+		response <- f.do(req{method: "PUT", path: "/api/vault/credentials/" + record.CredentialID, user: "alice", body: body, csrf: csrf})
 	}()
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for {
-		var waiting bool
-		if _, err := tx.Exec(t.Context(), "SELECT pg_stat_clear_snapshot()"); err != nil {
-			t.Fatal(err)
-		}
-		if err := tx.QueryRow(t.Context(), "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND application_name='mcpwarden-security' AND wait_event_type='Lock')").Scan(&waiting); err != nil {
-			t.Fatal(err)
-		}
-		if waiting {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("mutation never waited for the owner lock")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	awaitWaiter()
 	if delay := time.Until(expires.Add(10 * time.Millisecond)); delay > 0 {
 		time.Sleep(delay)
 	}
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	release()
 	select {
 	case w := <-response:
 		head, ok := f.api.index.Credential(f.owners["alice"], record.CredentialID)

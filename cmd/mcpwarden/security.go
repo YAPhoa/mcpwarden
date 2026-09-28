@@ -25,7 +25,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"
 	"github.com/yaphoa/mcpwarden/internal/lease"
-	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/policy"
 	"github.com/yaphoa/mcpwarden/internal/secret"
 	"github.com/yaphoa/mcpwarden/internal/vault"
@@ -46,7 +45,7 @@ const (
 // execution for credentialed connectors is a separate startup step.
 type securityAPI struct {
 	service               *lease.Service
-	store                 *postgres.Store
+	store                 storageDB
 	cache                 *vault.Cache
 	index                 *custody.Index
 	authority             *custody.Authority
@@ -60,55 +59,51 @@ type securityAPI struct {
 	allowInsecureLoopback bool
 }
 
-func openSecurity(ctx context.Context, cfg config.Config, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
-	if _, err := cfg.OwnerSecurity.ProxyPrefixes(); err != nil {
-		return nil, err
-	}
-	db, err := postgres.Open(ctx, cfg.OwnerSecurity.DatabaseURL)
-	if err != nil {
-		return nil, errors.New("owner security storage unavailable")
-	}
-	return startSecurity(ctx, cfg, db, store, tools, accounts, logger)
-}
-
 // startSecurity starts the lease executor on an open store. It owns db from
-// here on and closes it on failure.
-func startSecurity(ctx context.Context, cfg config.Config, db *postgres.Store, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
-	trustedProxies, err := cfg.OwnerSecurity.ProxyPrefixes()
-	if err != nil {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = db.Close(closeCtx)
-		return nil, err
+// here on and closes it on failure. The executor coordinates every catalog
+// change in each HTTP mode; its owner routes are registered only with
+// owner_security, whose transport settings it reads here.
+func startSecurity(ctx context.Context, cfg config.Config, db storageDB, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
+	var trustedProxies []netip.Prefix
+	var allowInsecureLoopback bool
+	if cfg.OwnerSecurity != nil {
+		var err error
+		if trustedProxies, err = cfg.OwnerSecurity.ProxyPrefixes(); err != nil {
+			closeStore(db)
+			return nil, err
+		}
+		allowInsecureLoopback = cfg.OwnerSecurity.AllowInsecureLoopback
 	}
 	index, cache := custody.NewIndex(), &vault.Cache{}
 	authority := custody.NewAuthority(store, tools, index)
 	service, err := lease.New(ctx, db, authority, secret.Activator{Records: cache}, lease.DefaultOptions())
 	if err != nil {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = db.Close(closeCtx)
-		return nil, errors.New("owner security executor could not start")
+		closeStore(db)
+		return nil, errors.New("security executor could not start")
 	}
 	api := &securityAPI{service: service, store: db, cache: cache, index: index, authority: authority, catalog: store,
 		accounts: accounts, origins: cfg.Origins, csrfKey: randBytes(32), limits: newRateLimits(), logger: logger,
-		trustedProxies: trustedProxies, allowInsecureLoopback: cfg.OwnerSecurity.AllowInsecureLoopback}
+		trustedProxies: trustedProxies, allowInsecureLoopback: allowInsecureLoopback}
 	snapshot, err := db.LoadCustody(ctx)
 	if err == nil {
 		err = index.Load(snapshot, cache)
 	}
 	if err != nil {
 		api.close()
-		return nil, errors.New("owner security state could not be loaded")
+		return nil, errors.New("security state could not be loaded")
 	}
 	return api, nil
 }
 
-func (api *securityAPI) close() {
-	api.service.Close()
+func closeStore(db storageDB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = api.store.Close(ctx)
+	_ = db.Close(ctx)
+}
+
+func (api *securityAPI) close() {
+	api.service.Close()
+	closeStore(api.store)
 }
 
 func (api *securityAPI) register(mux *http.ServeMux) {
@@ -478,7 +473,7 @@ func (api *securityAPI) events(w http.ResponseWriter, r *http.Request, caller ca
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > postgres.MaxEventPage {
+		if err != nil || n < 1 || n > custody.MaxEventPage {
 			securityError(w, lease.ErrScope)
 			return
 		}
@@ -1154,7 +1149,7 @@ func (api *securityAPI) leases(w http.ResponseWriter, r *http.Request, caller ca
 		var ended []lease.Lease
 		err := api.store.WithOwner(r.Context(), caller.Owner, func(tx lease.Tx) error {
 			var err error
-			ended, err = tx.(custody.Tx).RecentLeases(tx.Now().Add(-endedLeaseWindow), postgres.MaxEndedLeases)
+			ended, err = tx.(custody.Tx).RecentLeases(tx.Now().Add(-endedLeaseWindow), custody.MaxEndedLeases)
 			return err
 		})
 		if err != nil {
