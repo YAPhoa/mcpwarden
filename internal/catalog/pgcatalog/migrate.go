@@ -21,6 +21,7 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 )
@@ -157,11 +158,11 @@ func rollbackExport(snap catalog.Snapshot, previous *catalog.Marker) error {
 	return nil
 }
 
-func prepare(ctx context.Context, conn *pgx.Conn, src Sources) (*sealer, func(), error) {
+func prepare(ctx context.Context, conn *pgx.Conn, src Sources) (*dbcatalog.Codec, func(), error) {
 	if src.CatalogPath == "" {
 		return nil, nil, fmt.Errorf("managed_upstreams.path is required")
 	}
-	seal, err := newSealer(src.CatalogKey)
+	seal, err := dbcatalog.NewCodec(src.CatalogKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -251,7 +252,7 @@ func hashFiles(catalogPath, historyPath string) (sourceHashes, error) {
 	return h, err
 }
 
-func (h sourceHashes) match(st catalogdb.State) bool {
+func (h sourceHashes) match(st postgres.CatalogState) bool {
 	return h.catalog == st.SourceCatalogSHA256 && h.history == st.SourceHistorySHA256 && h.historyBytes == st.SourceHistoryBytes
 }
 
@@ -325,7 +326,7 @@ func syncDir(dir string) error {
 }
 
 // takeSnapshot creates or rechecks the protected snapshot for st.
-func takeSnapshot(src Sources, st catalogdb.State) (Sources, error) {
+func takeSnapshot(src Sources, st postgres.CatalogState) (Sources, error) {
 	snap := snapshotSources(src, st.ImportID)
 	dir := filepath.Dir(snap.CatalogPath)
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
@@ -356,7 +357,7 @@ func takeSnapshot(src Sources, st catalogdb.State) (Sources, error) {
 	return snap, nil
 }
 
-func empty(ctx context.Context, db catalogdb.DB) (bool, error) {
+func empty(ctx context.Context, db postgres.DB) (bool, error) {
 	var any bool
 	err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM mcpwarden_security.catalog_accounts) OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_access)
         OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_connectors) OR EXISTS (SELECT 1 FROM mcpwarden_security.catalog_legacy_tombstones)
@@ -387,7 +388,7 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 	if err != nil {
 		return Manifest{}, err
 	}
-	st, exists, err := catalogdb.ReadState(ctx, conn, false)
+	st, exists, err := postgres.ReadState(ctx, conn, false)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -437,7 +438,7 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		if _, err := os.Stat(src.CatalogPath); err != nil {
 			return Manifest{}, fmt.Errorf("catalog file not found")
 		}
-		st = catalogdb.State{State: "importing", ImportID: identity.New(), SourceCatalogSHA256: hashes.catalog, SourceHistorySHA256: hashes.history,
+		st = postgres.CatalogState{State: "importing", ImportID: identity.New(), SourceCatalogSHA256: hashes.catalog, SourceHistorySHA256: hashes.history,
 			SourceHistoryBytes: hashes.historyBytes, StartedAt: time.Now().UTC().Truncate(time.Microsecond)}
 		snapSrc, err := takeSnapshot(src, st)
 		if err != nil {
@@ -455,7 +456,7 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 			return Manifest{}, err
 		}
 		if err := inTx(ctx, conn, func(tx pgx.Tx) error {
-			if err := catalogdb.PutState(ctx, tx, st); err != nil {
+			if err := postgres.PutState(ctx, tx, st); err != nil {
 				return err
 			}
 			return writeSnapshot(ctx, tx, seal, snap)
@@ -463,7 +464,7 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 			return Manifest{}, err
 		}
 		// Reload so StartedAt and ChangedAt are exactly what PutState compares.
-		if st, _, err = catalogdb.ReadState(ctx, conn, false); err != nil {
+		if st, _, err = postgres.ReadState(ctx, conn, false); err != nil {
 			return Manifest{}, err
 		}
 		// The marker follows the commit, so an importing marker without state in
@@ -486,13 +487,13 @@ func Import(ctx context.Context, conn *pgx.Conn, src Sources, opts Options) (Man
 		return Manifest{}, err
 	}
 	st.State, st.Manifest = "imported", raw
-	if err := catalogdb.PutState(ctx, conn, st); err != nil {
+	if err := postgres.PutState(ctx, conn, st); err != nil {
 		return Manifest{}, err
 	}
 	return m, nil
 }
 
-func writeSnapshot(ctx context.Context, db catalogdb.DB, seal *sealer, snap catalog.Snapshot) error {
+func writeSnapshot(ctx context.Context, db postgres.DB, seal *dbcatalog.Codec, snap catalog.Snapshot) error {
 	owners := map[string]bool{}
 	for _, a := range snap.Accounts {
 		owners[a.ID] = true
@@ -510,59 +511,59 @@ func writeSnapshot(ctx context.Context, db catalogdb.DB, seal *sealer, snap cata
 		owners[k.Owner] = true
 	}
 	for owner := range owners {
-		if err := catalogdb.EnsureOwner(ctx, db, owner); err != nil {
+		if err := postgres.EnsureOwner(ctx, db, owner); err != nil {
 			return err
 		}
 	}
 	for _, a := range snap.Accounts {
-		row, err := seal.accountRow(a)
+		row, err := seal.AccountRow(a)
 		if err == nil {
-			err = catalogdb.PutAccount(ctx, db, row)
+			err = postgres.PutAccount(ctx, db, row)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	for _, r := range snap.Access {
-		row, err := seal.accessRow(r)
+		row, err := seal.AccessRow(r)
 		if err == nil {
-			err = catalogdb.PutAccess(ctx, db, row)
+			err = postgres.PutAccess(ctx, db, row)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	for _, e := range snap.Entries {
-		row, err := seal.connectorRow(e, 0)
+		row, err := seal.ConnectorRow(e)
 		if err == nil {
-			err = catalogdb.PutConnector(ctx, db, row, false, "")
+			err = postgres.PutConnector(ctx, db, row)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	for id, life := range snap.Deleted {
-		row, err := seal.legacyTombstoneRow(id, life)
+		row, err := seal.LegacyTombstoneRow(id, life)
 		if err == nil {
-			err = catalogdb.PutTombstone(ctx, db, row)
+			err = postgres.PutTombstone(ctx, db, row)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	for k, d := range snap.Discovery {
-		row, err := seal.discoveryRow(k, d)
+		row, err := seal.DiscoveryRow(k, d)
 		if err == nil {
-			err = catalogdb.PutDiscovery(ctx, db, row)
+			err = postgres.PutDiscovery(ctx, db, row)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	for k, v := range snap.Visibility {
-		row, err := seal.visibilityRow(k, v, 0)
+		row, err := seal.VisibilityRow(k, v)
 		if err == nil {
-			err = catalogdb.PutVisibility(ctx, db, row)
+			err = postgres.PutVisibility(ctx, db, row)
 		}
 		if err != nil {
 			return err
@@ -616,7 +617,7 @@ func openLines(path string, offset int64) (*os.File, *lineReader, error) {
 	return f, &lineReader{r: bufio.NewReaderSize(f, maxLine+2), off: offset}, nil
 }
 
-func importHistory(ctx context.Context, conn *pgx.Conn, snap Sources, st *catalogdb.State, opts Options) error {
+func importHistory(ctx context.Context, conn *pgx.Conn, snap Sources, st *postgres.CatalogState, opts Options) error {
 	batch := opts.BatchLines
 	if batch <= 0 {
 		batch = 2000
@@ -648,7 +649,7 @@ func importHistory(ctx context.Context, conn *pgx.Conn, snap Sources, st *catalo
 			if err != nil {
 				return err
 			}
-			row := historyRow(r, string(raw))
+			row := dbcatalog.HistoryRow(r, string(raw))
 			row.Source, row.SourceLine = "legacy", n
 			rows = append(rows, row)
 		}
@@ -666,14 +667,14 @@ func importHistory(ctx context.Context, conn *pgx.Conn, snap Sources, st *catalo
 		}
 		err := inTx(ctx, conn, func(tx pgx.Tx) error {
 			for _, row := range rows {
-				if err := catalogdb.InsertHistory(ctx, tx, row); err != nil {
+				if err := postgres.InsertHistory(ctx, tx, row); err != nil {
 					if errors.Is(err, catalogdb.ErrConflict) {
 						return fmt.Errorf("history line %d repeats an event or invocation ID", row.SourceLine)
 					}
 					return err
 				}
 			}
-			return catalogdb.PutState(ctx, tx, next)
+			return postgres.PutState(ctx, tx, next)
 		})
 		if err != nil {
 			return err
@@ -709,7 +710,7 @@ func hashRange(h hash.Hash, path string, from, to int64) error {
 // pinned hashes: the whole catalog field by field (ownership, verifiers,
 // roles, expiry, timestamps, tombstones, OAuth grants and their revisions) and
 // every history line byte for byte with its line number, event ID and order.
-func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st catalogdb.State) (Manifest, error) {
+func verify(ctx context.Context, conn *pgx.Conn, seal *dbcatalog.Codec, src Sources, st postgres.CatalogState) (Manifest, error) {
 	fail := func(format string, args ...any) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("%w: %s", ErrVerify, fmt.Sprintf(format, args...))
 	}
@@ -733,7 +734,7 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 	if err != nil {
 		return Manifest{}, err
 	}
-	var decoded *state
+	var decoded dbcatalog.Decoded
 	m := Manifest{ImportID: st.ImportID, Snapshot: filepath.Dir(snapSrc.CatalogPath), SourceCatalogSHA256: st.SourceCatalogSHA256,
 		SourceHistorySHA256: st.SourceHistorySHA256, SourceHistoryBytes: st.SourceHistoryBytes, Normalized: normalized,
 		Access: map[string]int{}, Owners: map[string]Counts{}, HistoryVersions: map[string]int64{}, HistoryOwners: map[string]int64{}}
@@ -741,11 +742,11 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 		if _, err := tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"); err != nil {
 			return catalogdb.ErrStorage
 		}
-		rows, err := catalogdb.Load(ctx, tx)
+		rows, err := postgres.Load(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if decoded, err = seal.decode(rows); err != nil {
+		if decoded, err = seal.Decode(rows); err != nil {
 			return err
 		}
 		for _, c := range rows.Connectors {
@@ -761,7 +762,7 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 			defer f.Close()
 		}
 		var n int64
-		err = catalogdb.LegacyHistory(ctx, tx, func(got catalogdb.HistoryRow) error {
+		err = postgres.LegacyHistory(ctx, tx, func(got catalogdb.HistoryRow) error {
 			raw, ok, err := lines.next()
 			if err != nil {
 				return err
@@ -777,7 +778,7 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 			// Queries read the derived columns, not the record: owner, event ID
 			// (derived for v0 lines), filters, ordering and timing must all be
 			// what the JSONL reader derives from this line.
-			want := historyRow(r, string(raw))
+			want := dbcatalog.HistoryRow(r, string(raw))
 			want.Source, want.SourceLine = "legacy", n
 			if got != want {
 				return fmt.Errorf("%w: history line %d columns differ", ErrVerify, n)
@@ -805,20 +806,20 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 	if err != nil {
 		return Manifest{}, err
 	}
-	if len(decoded.tombstones) != 0 {
+	if decoded.Tombstones != 0 {
 		return fail("unexpected connector tombstones")
 	}
-	if len(decoded.revisions) != 0 {
+	if decoded.Revisions != 0 {
 		return fail("unexpected provider security revisions")
 	}
-	same, err := sameSnapshot(source, decoded.snapshot())
+	same, err := dbcatalog.SameSnapshot(source, decoded.Snapshot)
 	if err != nil {
 		return Manifest{}, err
 	}
 	if !same {
 		return fail("catalog records differ from the source file")
 	}
-	if m.CatalogDigest, err = seal.snapshotDigest(source); err != nil {
+	if m.CatalogDigest, err = snapshotDigest(seal, source); err != nil {
 		return Manifest{}, err
 	}
 	m.Accounts, m.Connectors, m.Tombstones = len(source.Accounts), len(source.Entries), len(source.Deleted)
@@ -848,21 +849,21 @@ func verify(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 
 // snapshotDigest is a keyed digest of the whole catalog, so the manifest can
 // pin it without being a guessable hash of verifiers.
-func (s *sealer) snapshotDigest(snap catalog.Snapshot) (string, error) {
+func snapshotDigest(seal *dbcatalog.Codec, snap catalog.Snapshot) (string, error) {
 	raw, err := snap.Canonical()
 	if err != nil {
 		return "", err
 	}
 	defer clear(raw)
-	h := hmac.New(sha256.New, s.mac)
+	h := hmac.New(sha256.New, seal.MAC())
 	h.Write([]byte("snapshot\x00"))
 	h.Write(raw)
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Status returns the current state and its manifests.
-func Status(ctx context.Context, conn *pgx.Conn) (catalogdb.State, bool, error) {
-	return catalogdb.ReadState(ctx, conn, false)
+func Status(ctx context.Context, conn *pgx.Conn) (postgres.CatalogState, bool, error) {
+	return postgres.ReadState(ctx, conn, false)
 }
 
 // Cutover makes PostgreSQL authoritative. It re-verifies the import against
@@ -874,7 +875,7 @@ func Cutover(ctx context.Context, conn *pgx.Conn, src Sources) (Manifest, error)
 		return Manifest{}, err
 	}
 	defer unlock()
-	st, exists, err := catalogdb.ReadState(ctx, conn, false)
+	st, exists, err := postgres.ReadState(ctx, conn, false)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -895,7 +896,7 @@ func Cutover(ctx context.Context, conn *pgx.Conn, src Sources) (Manifest, error)
 			return Manifest{}, fmt.Errorf("%w: manifest differs from the imported rows", ErrVerify)
 		}
 		st.State = "active"
-		if err := catalogdb.PutState(ctx, conn, st); err != nil {
+		if err := postgres.PutState(ctx, conn, st); err != nil {
 			return Manifest{}, err
 		}
 	case "active":
@@ -923,7 +924,7 @@ func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 		return err
 	}
 	defer unlock()
-	st, exists, err := catalogdb.ReadState(ctx, conn, false)
+	st, exists, err := postgres.ReadState(ctx, conn, false)
 	if err != nil {
 		return err
 	}
@@ -957,7 +958,7 @@ func Abort(ctx context.Context, conn *pgx.Conn, src Sources) error {
 			}
 		}
 		st.State = "aborting"
-		return catalogdb.PutState(ctx, tx, st)
+		return postgres.PutState(ctx, tx, st)
 	})
 	if err != nil {
 		return err

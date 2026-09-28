@@ -1,10 +1,12 @@
-// Package pgcatalog is the PostgreSQL catalog and history backend: the runtime
-// repository, the audit store, and the operator import, cutover and rollback.
+// Package dbcatalog is the database catalog and history, over either store
+// (PostgreSQL or SQLite): the runtime repository and the audit store. It
+// never sees SQL; each store implements the catalogdb interfaces.
 //
-// Secret-bearing values stay in legacy server-managed custody. They are sealed
-// with a key derived from the existing catalog key before reaching PostgreSQL;
-// the gateway can still decrypt them, exactly as it can decrypt the file.
-package pgcatalog
+// Catalog records are sealed with keys derived from the catalog key before
+// they reach the database. Credentials never enter the catalog: they live in
+// the owner vault. The key derivation labels still name PostgreSQL, where
+// this format started; they are domain separators only.
+package dbcatalog
 
 import (
 	"crypto/aes"
@@ -31,7 +33,7 @@ type sealer struct {
 }
 
 // newSealer derives independent field-encryption and verifier-digest keys, so
-// no PostgreSQL value is encrypted under the file key itself.
+// no database value is encrypted under the file key itself.
 func newSealer(encodedKey string) (*sealer, error) {
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {

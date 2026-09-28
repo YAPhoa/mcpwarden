@@ -20,6 +20,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
@@ -165,7 +167,7 @@ func (noActivator) Stage(context.Context, string, lease.Credential, []byte) (lea
 }
 
 // gateway starts the runtime side as the PostgreSQL backend does.
-func (f *fixture) gateway() (*Repository, *postgres.Store, *lease.Service, *bool) {
+func (f *fixture) gateway() (*dbcatalog.Repository, *postgres.Store, *lease.Service, *bool) {
 	f.t.Helper()
 	db, err := postgres.Open(f.t.Context(), f.db.RuntimeDSN)
 	if err != nil {
@@ -176,7 +178,7 @@ func (f *fixture) gateway() (*Repository, *postgres.Store, *lease.Service, *bool
 		f.t.Fatal(err)
 	}
 	failed := new(bool)
-	repo, err := New(f.src.CatalogKey, db, func() { *failed = true })
+	repo, err := dbcatalog.New(f.src.CatalogKey, db, func() { *failed = true })
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -283,7 +285,7 @@ func TestImportPreservesCatalogAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	history := NewHistory(db)
+	history := dbcatalog.NewHistory(db)
 	for _, q := range []audit.HistoryFilter{
 		{Owner: f.alice, Page: 1, Size: 5}, {Owner: f.alice, Page: 2, Size: 5}, {Owner: f.alice, Page: 3, Size: 5},
 		{Owner: f.bob, Page: 1, Size: 100}, {Owner: f.alice, Status: "unknown", Page: 1, Size: 10},
@@ -483,7 +485,7 @@ func TestAbortBeforeCutoverRestoresFileGateway(t *testing.T) {
 		t.Fatal("abort after cutover", err)
 	}
 	_, db, _, _ := f.gateway()
-	indexed := NewHistory(db)
+	indexed := dbcatalog.NewHistory(db)
 	unknown, total, tools, _, err := indexed.QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Status: "unknown", Page: 1, Size: 25})
 	if err != nil || total != 1 || len(unknown) != 1 || unknown[0].EventType != audit.DispatchAdmitted || len(tools) != 1 || tools[0].Name != "remote__search" {
 		t.Fatal("history after a repeated import:", total, tools, err)
@@ -599,7 +601,7 @@ func TestRepositoryCommitsAtomicallyAndFailsClosed(t *testing.T) {
 	if _, ok := repo.AuthenticateAccess(f.tokens["agent"], "api_key"); ok {
 		t.Fatal("authenticated after storage loss")
 	}
-	if err := repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "all"}); !errors.Is(err, ErrUnavailable) {
+	if err := repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "all"}); !errors.Is(err, dbcatalog.ErrUnavailable) {
 		t.Fatal("change without storage", err)
 	}
 	if repo.Visibility(f.alice, "remote").Mode != "selected" {
@@ -619,7 +621,7 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := audit.Record{Owner: f.alice, Tool: "remote__search", Upstream: "remote", Decision: "allow", Status: "ok", TS: time.Now().UTC(), ArgsSHA256: strings.Repeat("b", 64)}
-	if err := NewHistory(db).Write(live); err != nil {
+	if err := dbcatalog.NewHistory(db).Write(live); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Rollback(t.Context(), f.db.Admin, f.src); !errors.Is(err, ErrLocked) {
@@ -633,7 +635,7 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.gatewayErr(); !errors.Is(err, ErrNotActive) {
+	if _, err := f.gatewayErr(); !errors.Is(err, catalogdb.ErrNotActive) {
 		t.Fatal("PostgreSQL gateway loaded while rolling back", err)
 	}
 	// A file someone put back is never overwritten silently.
@@ -716,7 +718,7 @@ func (f *fixture) closeStore(db *postgres.Store) {
 	}
 }
 
-func (f *fixture) gatewayErr() (*Repository, error) {
+func (f *fixture) gatewayErr() (*dbcatalog.Repository, error) {
 	db, err := postgres.Open(f.t.Context(), f.db.RuntimeDSN)
 	if err != nil {
 		return nil, err
@@ -725,7 +727,7 @@ func (f *fixture) gatewayErr() (*Repository, error) {
 	if err := db.Start(f.t.Context(), identity.New()); err != nil {
 		return nil, err
 	}
-	repo, err := New(f.src.CatalogKey, db, nil)
+	repo, err := dbcatalog.New(f.src.CatalogKey, db, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -971,60 +973,6 @@ func TestAbortResumesAfterItsDatabaseCommit(t *testing.T) {
 	}
 }
 
-// A PostgreSQL catalog holding a connector sealed by an older build (header
-// values, OAuth settings or a grant) is refused at load. An older no-auth
-// connector (empty header map, null OAuth) still loads.
-func TestOldFormatRefusedOnLoad(t *testing.T) {
-	for name, tc := range map[string]struct {
-		connector string
-		mutate    func(p map[string]any) (grant bool)
-		refused   bool
-	}{
-		"header values": {"remote", func(p map[string]any) bool {
-			p["headers"] = map[string]string{"Authorization": "Bearer synthetic"}
-			return false
-		}, true},
-		"oauth":         {"remote", func(p map[string]any) bool { p["oauth"] = map[string]any{"scopes": []string{"read"}}; return false }, true},
-		"grant id":      {"remote", func(p map[string]any) bool { return true }, true},
-		"empty headers": {"svc", func(p map[string]any) bool { p["headers"] = map[string]string{}; p["oauth"] = nil; return false }, false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			f.cutover()
-			repo, _, _, _ := f.gateway()
-			var e catalog.Entry
-			for _, owner := range []string{f.alice, f.bob} {
-				for _, x := range repo.List(owner) {
-					if x.Name == tc.connector {
-						e = x
-					}
-				}
-			}
-			p := map[string]any{"id": e.ID, "owner": e.Owner, "name": e.Name, "url": e.URL, "auth_type": e.AuthType, "header_names": e.HeaderNames,
-				"call_timeout": e.CallTimeout, "created_at": e.CreatedAt, "updated_at": e.UpdatedAt}
-			q, args := "UPDATE mcpwarden_security.catalog_connectors SET grant_id='g1' WHERE connector_id=$1", []any{e.ID}
-			if !tc.mutate(p) {
-				sealed, err := repo.seal.seal(connectorAAD(e.ID), p)
-				if err != nil {
-					t.Fatal(err)
-				}
-				q, args = "UPDATE mcpwarden_security.catalog_connectors SET sealed=$1 WHERE connector_id=$2", []any{sealed, e.ID}
-			}
-			if _, err := f.db.Admin.Exec(t.Context(), q, args...); err != nil {
-				t.Fatal(err)
-			}
-			fresh, err := New(f.src.CatalogKey, repo.loader, func() {})
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = fresh.Load(t.Context())
-			if tc.refused != errors.Is(err, catalog.ErrOldFormat) || !tc.refused && err != nil {
-				t.Fatalf("%s: got %v", name, err)
-			}
-		})
-	}
-}
-
 // Above 25,000 matches the readers differ on purpose: PostgreSQL counts the
 // newest 25,000 and reports the rest as capped, while the JSONL reader, which
 // PR 4 removes, still counts everything. Below the window they agree (see
@@ -1058,14 +1006,14 @@ func TestCappedHistoryDiffersFromJSONL(t *testing.T) {
 	}
 	f.cutover()
 	_, db, _, _ := f.gateway()
-	_, total, _, stats, err := NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
+	_, total, _, stats, err := dbcatalog.NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fileTotal <= 25000 || total != 25000 || !stats.Capped {
 		t.Fatal("capped difference:", fileTotal, total, stats.Capped)
 	}
-	if _, _, _, _, err := NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1001, Size: 25}); err == nil {
+	if _, _, _, _, err := dbcatalog.NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1001, Size: 25}); err == nil {
 		t.Fatal("a page beyond the window was served")
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease"
 )
@@ -53,7 +52,7 @@ func TestCancelledCallerCommitsNothing(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, lease.ErrRolledBack) {
 		t.Fatal("cancel inside the callback:", err)
 	}
-	err = s.Run(inside, func(context.Context, catalogdb.DB) error { return nil })
+	err = s.run(inside, ownerDeadline, func(context.Context, DB) error { return nil })
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal("run with a gone caller:", err)
 	}
@@ -107,7 +106,7 @@ func TestLongHolderIsNotSessionLoss(t *testing.T) {
 	if err := s.Start(t.Context(), identity.New()); err != nil {
 		t.Fatal(err)
 	}
-	err := s.Run(t.Context(), func(ctx context.Context, db catalogdb.DB) error {
+	err := s.run(t.Context(), ownerDeadline, func(ctx context.Context, db DB) error {
 		time.Sleep(3 * time.Second)
 		_, err := db.Exec(ctx, "SELECT 1")
 		return err

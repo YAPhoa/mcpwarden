@@ -6,7 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
-	"github.com/yaphoa/mcpwarden/internal/catalog/pgcatalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/policy"
@@ -20,8 +20,8 @@ var errCatalogFailed = errors.New("PostgreSQL catalog storage failed; the gatewa
 // pgBackend is the PostgreSQL catalog, its indexed history and the lease
 // service that coordinates every catalog change.
 type pgBackend struct {
-	repo     *pgcatalog.Repository
-	history  *pgcatalog.History
+	repo     *dbcatalog.Repository
+	history  *dbcatalog.History
 	accounts *accountAuth
 	security *securityAPI
 }
@@ -41,7 +41,7 @@ func openPostgresCatalog(ctx context.Context, cfg config.Config, pol *policy.Pol
 		logger.Error("catalog storage failed; stopping")
 		fail(errCatalogFailed)
 	}
-	repo, err := pgcatalog.New(cfg.Managed.Key, db, stopped)
+	repo, err := dbcatalog.New(cfg.Managed.Key, db, stopped)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func openPostgresCatalog(ctx context.Context, cfg config.Config, pol *policy.Pol
 	}
 	if err := repo.Load(ctx); err != nil {
 		security.close()
-		if errors.Is(err, pgcatalog.ErrNotActive) {
+		if errors.Is(err, catalogdb.ErrNotActive) {
 			return nil, err
 		}
 		return nil, errors.New("PostgreSQL catalog could not be loaded")
@@ -69,7 +69,7 @@ func openPostgresCatalog(ctx context.Context, cfg config.Config, pol *policy.Pol
 		case <-ctx.Done():
 		}
 	}()
-	return &pgBackend{repo: repo, history: pgcatalog.NewHistory(db), accounts: accounts, security: security}, nil
+	return &pgBackend{repo: repo, history: dbcatalog.NewHistory(db), accounts: accounts, security: security}, nil
 }
 
 func (b *pgBackend) close() { b.security.close() }
@@ -78,14 +78,8 @@ func (b *pgBackend) close() { b.security.close() }
 // taking or returning, catalog authority. The marker beside the catalog file
 // enforces the same rule without a database.
 func fileAuthority(ctx context.Context, db *postgres.Store) error {
-	var state string
-	err := db.Run(ctx, func(ctx context.Context, tx catalogdb.DB) error {
-		st, ok, err := catalogdb.ReadState(ctx, tx, false)
-		if ok {
-			state = st.State
-		}
-		return err
-	})
+	st, _, err := db.ReadCatalogState(ctx)
+	state := st.State
 	if err != nil {
 		return errors.New("catalog state could not be read")
 	}

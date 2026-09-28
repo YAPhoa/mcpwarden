@@ -1,4 +1,4 @@
-package pgcatalog
+package dbcatalog
 
 import (
 	"context"
@@ -32,10 +32,10 @@ type Coordinator interface {
 	BootID() string
 }
 
-// Loader reads committed rows on the executor session, under the startup
-// deadline.
+// Loader reads every committed catalog row on the executor session, under
+// the startup deadline.
 type Loader interface {
-	Load(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
+	LoadCatalog(ctx context.Context) (catalogdb.Rows, error)
 }
 
 var (
@@ -45,11 +45,9 @@ var (
 	// ErrNotSaved means the change was rolled back before commit; the
 	// catalog is unchanged and the change can be tried again.
 	ErrNotSaved = errors.New("change not saved; try again")
-	// ErrNotActive means PostgreSQL is not the authoritative catalog.
-	ErrNotActive = errors.New("the PostgreSQL catalog is not active: it was never cut over or has been rolled back")
 )
 
-// Repository implements catalog.Repository over PostgreSQL for one active
+// Repository implements catalog.Repository over a database store for one active
 // gateway process. Reads come from the committed in-memory view. A change
 // takes the owner gate, then the view lock inside the owner transaction, and
 // publishes after commit before releasing the view lock, so readers never see
@@ -87,25 +85,14 @@ func New(encodedKey string, loader Loader, onFail func()) (*Repository, error) {
 	return r, nil
 }
 
-// Load reads and verifies every row in one transaction. It requires the
-// catalog state to be active (cut over and not rolled back).
+// Load reads and verifies every row in one transaction. The store refuses a
+// catalog that is not this gateway's to serve (catalogdb.ErrNotActive).
 func (r *Repository) Load(ctx context.Context) error {
 	var st *state
-	err := r.loader.Load(ctx, func(ctx context.Context, db catalogdb.DB) error {
-		cs, ok, err := catalogdb.ReadState(ctx, db, false)
-		if err != nil {
-			return err
-		}
-		if !ok || cs.State != "active" {
-			return ErrNotActive
-		}
-		rows, err := catalogdb.Load(ctx, db)
-		if err != nil {
-			return err
-		}
+	rows, err := r.loader.LoadCatalog(ctx)
+	if err == nil {
 		st, err = r.seal.decode(rows)
-		return err
-	})
+	}
 	if err != nil {
 		return err
 	}
@@ -142,6 +129,7 @@ func (r *Repository) Failed() bool {
 
 type change struct {
 	tx     catalogdb.OwnerTx
+	rows   catalogdb.Tx
 	events []lease.Event
 	boot   string
 	now    time.Time
@@ -149,8 +137,6 @@ type change struct {
 	end string
 }
 
-func (c *change) ctx() context.Context { return c.tx.CatalogContext() }
-func (c *change) db() catalogdb.DB     { return c.tx.CatalogDB() }
 func (c *change) event(kind, subject string) {
 	e := lease.Event{ID: identity.New(), OwnerID: c.tx.CatalogOwner(), Type: kind, BootID: c.boot}
 	if identity.Valid(subject) {
@@ -187,7 +173,7 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 		if r.st == nil {
 			return nil, lease.Ending{}, ErrUnavailable
 		}
-		c := &change{tx: otx, boot: coord.BootID(), now: r.now()}
+		c := &change{tx: otx, rows: otx.CatalogRows(), boot: coord.BootID(), now: r.now()}
 		publish, err := plan(c, r.st)
 		if err != nil {
 			return nil, lease.Ending{}, err
@@ -298,7 +284,7 @@ func (r *Repository) Add(e catalog.Entry) error {
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutConnector(c.ctx(), c.db(), row, false, ""); err != nil {
+		if err := c.rows.PutConnector(row); err != nil {
 			return nil, err
 		}
 		c.event("connector.created", e.ID)
@@ -321,13 +307,13 @@ func (r *Repository) Delete(owner, name string) error {
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutConnector(c.ctx(), c.db(), row, false, ""); err != nil {
+		if err := c.rows.PutConnector(row); err != nil {
 			return nil, err
 		}
-		if err := catalogdb.DeleteDiscovery(c.ctx(), c.db(), owner, name); err != nil {
+		if err := c.rows.DeleteDiscovery(owner, name); err != nil {
 			return nil, err
 		}
-		if err := catalogdb.DeleteVisibility(c.ctx(), c.db(), owner, name); err != nil {
+		if err := c.rows.DeleteVisibility(owner, name); err != nil {
 			return nil, err
 		}
 		c.event("connector.deleted", e.ID)
@@ -432,7 +418,7 @@ func (r *Repository) SetVisibility(owner, provider string, setting catalog.Visib
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutVisibility(c.ctx(), c.db(), row); err != nil {
+		if err := c.rows.PutVisibility(row); err != nil {
 			return nil, err
 		}
 		c.event("connector.visibility_changed", st.connectorID(owner, provider))
@@ -480,7 +466,7 @@ func (r *Repository) SetDiscovery(owner, name string, tools []*mcp.Tool) error {
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutDiscovery(c.ctx(), c.db(), row); err != nil {
+		if err := c.rows.PutDiscovery(row); err != nil {
 			return nil, err
 		}
 		return func() { st.discovery[k] = d }, nil
@@ -508,7 +494,7 @@ func (r *Repository) SetProviderEnabled(owner, provider string, enabled bool) er
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutVisibility(c.ctx(), c.db(), row); err != nil {
+		if err := c.rows.PutVisibility(row); err != nil {
 			return nil, err
 		}
 		c.event("connector.availability_changed", st.connectorID(owner, provider))
@@ -578,7 +564,7 @@ func (r *Repository) AddAccount(a catalog.Account) error {
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutAccount(c.ctx(), c.db(), row); err != nil {
+		if err := c.rows.PutAccount(row); err != nil {
 			if errors.Is(err, catalogdb.ErrConflict) {
 				return nil, fmt.Errorf("username unavailable")
 			}
@@ -642,7 +628,7 @@ func (r *Repository) ChangePassword(username string, expected, salt, hash []byte
 		if err != nil {
 			return nil, err
 		}
-		if err := catalogdb.PutAccount(c.ctx(), c.db(), row); err != nil {
+		if err := c.rows.PutAccount(row); err != nil {
 			return nil, err
 		}
 		c.event("account.password_changed", next.ID)
@@ -712,7 +698,7 @@ func (r *Repository) putAccess(c *change, st *state, a catalog.AccessRecord, eve
 	if err != nil {
 		return nil, err
 	}
-	if err := catalogdb.PutAccess(c.ctx(), c.db(), row); err != nil {
+	if err := c.rows.PutAccess(row); err != nil {
 		return nil, err
 	}
 	if event != "" {
@@ -744,7 +730,7 @@ func (r *Repository) addAccess(c *change, st *state, a catalog.AccessRecord, rev
 	if count >= limit {
 		return nil, fmt.Errorf("active %s limit reached (%d)", a.Kind, limit)
 	}
-	stored, err := catalogdb.ActiveAccess(c.ctx(), c.db(), a.Owner, kinds, c.now)
+	stored, err := c.rows.ActiveAccess(a.Owner, kinds, c.now)
 	if err != nil {
 		return nil, err
 	}

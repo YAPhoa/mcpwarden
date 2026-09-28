@@ -1,4 +1,4 @@
-package pgcatalog
+package dbcatalog
 
 import (
 	"bytes"
@@ -46,7 +46,7 @@ func newState() *state {
 		discovery: map[catalog.ProviderKey]catalog.Discovery{}, visibility: map[catalog.ProviderKey]catalog.Visibility{}, revisions: map[catalog.ProviderKey]int64{}}
 }
 
-// sameTime compares a payload time with its column, which PostgreSQL keeps at
+// sameTime compares a payload time with its column, which both stores keep at
 // microsecond precision.
 func sameTime(payload, column time.Time) bool {
 	if payload.IsZero() || column.IsZero() {

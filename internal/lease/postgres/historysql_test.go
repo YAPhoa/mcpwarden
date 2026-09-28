@@ -1,4 +1,4 @@
-package catalogdb_test
+package postgres_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
+	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres/pgtest"
 )
 
@@ -26,7 +27,7 @@ func event(owner, id, kind, invocation, toolID, tool, upstream, status string, n
 func insert(t *testing.T, db *pgx.Conn, rows ...catalogdb.HistoryRow) {
 	t.Helper()
 	for _, r := range rows {
-		err := pgx.BeginFunc(t.Context(), db, func(tx pgx.Tx) error { return catalogdb.InsertHistory(t.Context(), tx, r) })
+		err := pgx.BeginFunc(t.Context(), db, func(tx pgx.Tx) error { return postgres.InsertHistory(t.Context(), tx, r) })
 		if err != nil {
 			t.Fatal(r.EventID, err)
 		}
@@ -41,7 +42,7 @@ func query(t *testing.T, db *pgx.Conn, q catalogdb.HistoryQuery) catalogdb.Histo
 	var out catalogdb.HistoryResult
 	err := pgx.BeginFunc(t.Context(), db, func(tx pgx.Tx) error {
 		var err error
-		out, err = catalogdb.QueryHistory(t.Context(), tx, q)
+		out, err = postgres.QueryHistory(t.Context(), tx, q)
 		return err
 	})
 	if err != nil {
@@ -94,7 +95,7 @@ func TestHistoryWindow(t *testing.T) {
 		t.Fatal("last page:", ids(last.Records))
 	}
 	err := pgx.BeginFunc(t.Context(), db, func(tx pgx.Tx) error {
-		_, err := catalogdb.QueryHistory(t.Context(), tx, catalogdb.HistoryQuery{Owner: "alice", Offset: catalogdb.HistoryWindow - 24, Limit: 25})
+		_, err := postgres.QueryHistory(t.Context(), tx, catalogdb.HistoryQuery{Owner: "alice", Offset: catalogdb.HistoryWindow - 24, Limit: 25})
 		return err
 	})
 	if !errors.Is(err, catalogdb.ErrHistoryWindow) {
@@ -135,7 +136,7 @@ func TestHistoryPlansUseFilterIndexes(t *testing.T) {
 		"unknown":  {catalogdb.HistoryQuery{Status: "unknown"}, "history_owner_status"},
 	} {
 		c.q.Owner = "alice"
-		sql, args := catalogdb.Window(c.q)
+		sql, args := postgres.Window(c.q)
 		var plan []string
 		err := pgx.BeginFunc(t.Context(), db, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(t.Context(), "SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off; SET LOCAL enable_sort=off; SET LOCAL plan_cache_mode=force_generic_plan; DEALLOCATE ALL", pgx.QueryExecModeSimpleProtocol); err != nil {

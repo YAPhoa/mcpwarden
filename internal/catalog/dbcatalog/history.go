@@ -1,4 +1,4 @@
-package pgcatalog
+package dbcatalog
 
 import (
 	"context"
@@ -18,10 +18,11 @@ import (
 // Pages read on a separate read-only session, so they never hold the executor.
 type History struct{ db HistoryDB }
 
-// HistoryDB writes on the executor session and reads on the history session.
+// HistoryDB writes on the executor session and reads on the history
+// connection.
 type HistoryDB interface {
-	Run(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
-	ReadHistory(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error
+	InsertHistory(context.Context, catalogdb.HistoryRow) error
+	QueryHistory(context.Context, catalogdb.HistoryQuery) (catalogdb.HistoryResult, error)
 }
 
 var _ audit.Store = (*History)(nil)
@@ -37,7 +38,7 @@ func (h *History) Write(r audit.Record) error {
 	row.Source = "live"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := h.db.Run(ctx, func(ctx context.Context, db catalogdb.DB) error { return catalogdb.InsertHistory(ctx, db, row) }); err != nil {
+	if err := h.db.InsertHistory(ctx, row); err != nil {
 		return fmt.Errorf("history write failed")
 	}
 	return nil
@@ -87,12 +88,7 @@ func (h *History) QueryHistoryPerformance(q audit.HistoryFilter) ([]audit.Record
 	if query.HasTo {
 		query.ToNano = q.To.UnixNano()
 	}
-	var result catalogdb.HistoryResult
-	err := h.db.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
-		var err error
-		result, err = catalogdb.QueryHistory(ctx, db, query)
-		return err
-	})
+	result, err := h.db.QueryHistory(context.Background(), query)
 	if err != nil {
 		return nil, 0, nil, stats, fmt.Errorf("history unavailable")
 	}

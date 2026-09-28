@@ -1,4 +1,4 @@
-package catalogdb
+package postgres
 
 import (
 	"context"
@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
 )
 
-// State is the single catalog_state row: which store is authoritative, and the
+// CatalogState is the single catalog_state row: which store is authoritative, and the
 // import's source identity and history checkpoint.
-type State struct {
+type CatalogState struct {
 	State               string
 	ImportID            string
 	SourceCatalogSHA256 string
@@ -27,8 +28,8 @@ type State struct {
 }
 
 // ReadState returns ok=false when no import has started.
-func ReadState(ctx context.Context, db DB, lock bool) (State, bool, error) {
-	var s State
+func ReadState(ctx context.Context, db DB, lock bool) (CatalogState, bool, error) {
+	var s CatalogState
 	var rollback *string
 	sql := `SELECT state,import_id::text,source_catalog_sha256,source_history_sha256,source_history_bytes,history_lines,history_bytes,
         history_sha256_state,manifest,rollback_id::text,rollback_manifest,started_at,changed_at FROM mcpwarden_security.catalog_state`
@@ -38,10 +39,10 @@ func ReadState(ctx context.Context, db DB, lock bool) (State, bool, error) {
 	err := db.QueryRow(ctx, sql).Scan(&s.State, &s.ImportID, &s.SourceCatalogSHA256, &s.SourceHistorySHA256, &s.SourceHistoryBytes,
 		&s.HistoryLines, &s.HistoryBytes, &s.HistoryHashState, &s.Manifest, &rollback, &s.RollbackManifest, &s.StartedAt, &s.ChangedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return State{}, false, nil
+		return CatalogState{}, false, nil
 	}
 	if err != nil {
-		return State{}, false, ErrStorage
+		return CatalogState{}, false, catalogdb.ErrStorage
 	}
 	if rollback != nil {
 		s.RollbackID = *rollback
@@ -51,7 +52,7 @@ func ReadState(ctx context.Context, db DB, lock bool) (State, bool, error) {
 }
 
 // PutState writes the whole row. Only the migration role may call it.
-func PutState(ctx context.Context, db DB, s State) error {
+func PutState(ctx context.Context, db DB, s CatalogState) error {
 	var manifest, rollbackManifest, hashState any
 	if s.Manifest != nil {
 		manifest = s.Manifest
@@ -78,7 +79,19 @@ func PutState(ctx context.Context, db DB, s State) error {
 		return classify(err)
 	}
 	if tag.RowsAffected() != 1 {
-		return ErrConflict
+		return catalogdb.ErrConflict
 	}
 	return nil
+}
+
+// ReadCatalogState reads the state row on the executor session.
+func (s *Store) ReadCatalogState(ctx context.Context) (CatalogState, bool, error) {
+	var st CatalogState
+	var ok bool
+	err := s.run(ctx, ownerDeadline, func(ctx context.Context, db DB) error {
+		var err error
+		st, ok, err = ReadState(ctx, db, false)
+		return err
+	})
+	return st, ok, err
 }

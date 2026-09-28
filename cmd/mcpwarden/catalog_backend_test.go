@@ -16,6 +16,7 @@ import (
 
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
 	"github.com/yaphoa/mcpwarden/internal/catalog/pgcatalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
@@ -257,7 +258,7 @@ func testPostgresCatalogLossAndRollback(t *testing.T) {
 		t.Fatal("rollback suspension not audited", suspended, err)
 	}
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	if _, err := openPostgresCatalog(ctx, f.cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), func(error) {}); !errors.Is(err, pgcatalog.ErrNotActive) {
+	if _, err := openPostgresCatalog(ctx, f.cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), func(error) {}); !errors.Is(err, catalogdb.ErrNotActive) {
 		t.Fatal("PostgreSQL gateway started after rollback", err)
 	}
 
