@@ -1513,3 +1513,12 @@ history page and turns waiting pages away, so shutdown never queues behind
 history (R2-N1, `TestHistoryCloseEndsPages`). A free session is taken without a
 select, the history statement timeout is 4.5 s, and `lease-storage.md` wording
 is fixed (R2-T1 to T3). The same validation passed again.
+
+Second review: a catalog change whose repository context ended before COMMIT
+was rolled back safely by the store, yet the repository still stopped the
+gateway as if the commit were uncertain. The store now wraps that error in
+`lease.ErrRolledBack` and the repository fails only the change
+(`TestRolledBackChangeKeepsCatalogUp`, which fails without the fix). The
+pgcatalog fixture's `gatewayErr` now waits for the server to release the session
+lock, as `stop` does; `TestRollbackResumesAndRefusesReplacedFiles` failed once
+on that race. The same validation passed again, with three clean full race runs.

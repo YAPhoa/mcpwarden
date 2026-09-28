@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -234,8 +235,9 @@ const (
 // transaction runs fn on the executor session. Statements use a store context
 // detached from the caller, so a client that disconnects never interrupts a
 // statement (pgx would close the session). The caller's context is checked
-// before COMMIT instead: a caller that has gone gets its context error and
-// nothing is committed. fail() is kept for real session loss.
+// before COMMIT instead: a caller that has gone gets its context error,
+// wrapped in lease.ErrRolledBack, and nothing is committed. fail() is kept for
+// real session loss.
 func (s *Store) transaction(caller context.Context, deadline time.Duration, fn func(context.Context, pgx.Tx) error) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(caller), deadline)
 	defer cancel()
@@ -263,7 +265,7 @@ func (s *Store) transaction(caller context.Context, deadline time.Duration, fn f
 		return lease.ErrStorage
 	}
 	if err := caller.Err(); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", lease.ErrRolledBack, err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		s.fail()

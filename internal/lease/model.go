@@ -20,6 +20,9 @@ var (
 	ErrLocked   = errors.New("execution is locked")
 	ErrLimit    = errors.New("access request limit reached")
 	ErrKey      = errors.New("credential activation failed")
+	// ErrRolledBack wraps the caller's context error when a transaction was
+	// abandoned before COMMIT: nothing was committed and the session is fine.
+	ErrRolledBack = errors.New("transaction rolled back before commit")
 )
 
 // Binding is immutable after creation. The store must reject substitutions,

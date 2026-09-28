@@ -690,6 +690,13 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 func (f *fixture) stop(service *lease.Service, db *postgres.Store) {
 	f.t.Helper()
 	service.Close()
+	f.closeStore(db)
+}
+
+// closeStore closes a store and waits until the server has released its
+// session lock: the backend exits after the client closes, not before.
+func (f *fixture) closeStore(db *postgres.Store) {
+	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = db.Close(ctx)
@@ -714,11 +721,7 @@ func (f *fixture) gatewayErr() (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = db.Close(ctx)
-	}()
+	defer f.closeStore(db)
 	if err := db.Start(f.t.Context(), identity.New()); err != nil {
 		return nil, err
 	}

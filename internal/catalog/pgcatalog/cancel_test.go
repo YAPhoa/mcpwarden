@@ -1,0 +1,94 @@
+package pgcatalog
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/lease"
+)
+
+// cancelBeforeCommit ends the repository's context after the mutation, just
+// before COMMIT.
+type cancelBeforeCommit struct{ Coordinator }
+
+func (c cancelBeforeCommit) Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	return c.Coordinator.Catalog(ctx, owner, func(tx lease.Tx) (func(), lease.Ending, error) {
+		publish, ending, err := mutation(tx)
+		if err == nil {
+			cancel()
+		}
+		return publish, ending, err
+	})
+}
+
+// deadlineBeforeCommit uses most of the repository's own deadline before the
+// owner transaction, as a queue can, and lets it expire before COMMIT while
+// the store's deadline still holds.
+type deadlineBeforeCommit struct {
+	Coordinator
+	left time.Duration
+}
+
+func (c deadlineBeforeCommit) Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return errors.New("catalog context has no deadline")
+	}
+	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(c.left))
+	defer cancel()
+	if deadline.Before(time.Now().Add(c.left)) {
+		return errors.New("catalog deadline shorter than the test needs")
+	}
+	return c.Coordinator.Catalog(ctx, owner, func(tx lease.Tx) (func(), lease.Ending, error) {
+		publish, ending, err := mutation(tx)
+		if err == nil {
+			<-ctx.Done()
+		}
+		return publish, ending, err
+	})
+}
+
+// A change the store rolled back before COMMIT committed nothing: it fails,
+// publishes nothing, and leaves the catalog and the gateway running.
+func TestRolledBackChangeKeepsCatalogUp(t *testing.T) {
+	for name, wrap := range map[string]func(Coordinator) Coordinator{
+		"cancelled": func(c Coordinator) Coordinator { return cancelBeforeCommit{c} },
+		"deadline":  func(c Coordinator) Coordinator { return deadlineBeforeCommit{c, time.Second} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.cutover()
+			repo, db, service, failed := f.gateway()
+			repo.Attach(wrap(service))
+			err := repo.Add(catalog.Entry{Owner: f.alice, Name: "rolled-back", URL: "https://example.test/mcp"})
+			if !errors.Is(err, lease.ErrRolledBack) {
+				t.Fatal("rolled-back change:", err)
+			}
+			if n := f.count("SELECT count(*) FROM mcpwarden_security.catalog_connectors WHERE name='rolled-back'"); n != 0 {
+				t.Fatal("rolled-back connector committed")
+			}
+			for _, e := range repo.List(f.alice) {
+				if e.Name == "rolled-back" {
+					t.Fatal("rolled-back connector published")
+				}
+			}
+			select {
+			case <-db.Lost():
+				t.Fatal("the database session was lost")
+			default:
+			}
+			if *failed || repo.Failed() {
+				t.Fatal("a rolled-back change stopped the catalog:", *failed, repo.Failed())
+			}
+			repo.Attach(service)
+			if err := repo.Add(catalog.Entry{Owner: f.alice, Name: "after", URL: "https://example.test/mcp"}); err != nil {
+				t.Fatal("next change:", err)
+			}
+		})
+	}
+}

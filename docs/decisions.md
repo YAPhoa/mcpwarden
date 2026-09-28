@@ -537,7 +537,9 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   load and custody load). pgx closes a session whose statement context ends, so
   a client disconnect used to stop the gateway. The caller's context is checked
   before COMMIT instead: a caller that has gone gets its context error, nothing
-  is committed and `Lost()` stays open. Revoke, deny and lock execution detach
+  is committed and `Lost()` stays open. The error wraps `lease.ErrRolledBack`,
+  so the catalog repository fails only that change, not the gateway, when its
+  own 15 s context ends before COMMIT (found by an independent second review). Revoke, deny and lock execution detach
   from the request, so a closed tab never loses them.
 - The heartbeat pings only when the executor gate is idle. A busy gate is
   bounded by the holder's store deadline, so contention is never read as loss.

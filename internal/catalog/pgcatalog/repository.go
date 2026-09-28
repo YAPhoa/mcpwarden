@@ -200,8 +200,10 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 			r.mu.Unlock()
 		}, lease.Ending{All: endLeases, Connector: c.end}, nil
 	})
-	if err != nil && wrote {
-		// The writes ran; the commit may or may not have happened.
+	if err != nil && wrote && !errors.Is(err, lease.ErrRolledBack) {
+		// The writes ran; the commit may or may not have happened. A
+		// transaction the store abandoned before COMMIT committed nothing, so
+		// the view is still right and the catalog stays up.
 		r.fail()
 	}
 	return mapError(err)

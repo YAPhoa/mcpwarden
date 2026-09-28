@@ -50,7 +50,7 @@ func TestCancelledCallerCommitsNothing(t *testing.T) {
 		// Statements keep running on the store context.
 		return tx.(*ownerTx).Event(lease.Event{ID: identity.New(), OwnerID: "inside", Type: "execution.locked", At: tx.Now(), BootID: identity.New()})
 	})
-	if !errors.Is(err, context.Canceled) {
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, lease.ErrRolledBack) {
 		t.Fatal("cancel inside the callback:", err)
 	}
 	err = s.Run(inside, func(context.Context, catalogdb.DB) error { return nil })
