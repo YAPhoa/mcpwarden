@@ -720,3 +720,16 @@ discovery ends without permitting tool execution.
   are removed. The browser flows discover through Connect and inspect against
   the synthetic upstream, which accepts only the vault credentials, and make one
   real agent call inside a window.
+- **Tools the SDK server cannot register are refused (review round 1).**
+  `mcp.Server.AddTool` (go-sdk v1.8.0, `server.go`) panics on a tool whose
+  input schema is missing, is not a JSON object or has a type other than
+  `"object"`, or whose output schema does not encode; the SDK client does not
+  check this when listing. `registry.CheckSchemas` makes the same checks.
+  Discovery fails the whole run on such a tool (502, `setup_failed`, nothing
+  saved), and `Registry.Replace` skips and reports it for every connector, so
+  no listed or stored tool can panic a runtime or a manager goroutine.
+- **Failures keep a category, not a cause.** `upstream.DiscoveryError` names
+  the failed step (connect, list, pages, tools, size, name, schema, cursor),
+  which the route logs without upstream text. A window that ended during the
+  run answers 409 `stale`, and a catalog save that did not commit answers 503
+  `not_saved`. The console asks for a 60-second window.

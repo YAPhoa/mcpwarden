@@ -2,11 +2,10 @@ package custody
 
 import (
 	"sort"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"

@@ -29,6 +29,8 @@ func (s *Service) Setup(ctx context.Context, leaseID string, discover func(conte
 		return ErrDenied
 	}
 	var permit *Admission
+	var window *runtimeLease
+	var state *ownerState
 	err := s.transition(ctx, a.Owner, func(tx Tx, o *ownerState) error {
 		actor, err := s.actor(ctx, tx.Now(), true)
 		if err != nil {
@@ -58,6 +60,7 @@ func (s *Service) Setup(ctx context.Context, leaseID string, discover func(conte
 		}
 		callCtx, cancel := context.WithCancel(ctx)
 		stop := context.AfterFunc(rt.ctx, cancel)
+		window, state = rt, o
 		permit = &Admission{material: rt.material}
 		permit.start = s.useCheck(callCtx, o, rt, r)
 		permit.ctx = withUse(callCtx, rt.material, "setup", [32]byte{}, permit.start)
@@ -96,11 +99,19 @@ func (s *Service) Setup(ctx context.Context, leaseID string, discover func(conte
 		}
 		return err
 	}
-	err = permit.RunWithMaterial(discover)
-	if err == nil {
-		err = save()
+	if err = permit.RunWithMaterial(discover); err != nil {
+		// A window stopped or expired during the run also fails the upstream
+		// exchange; report it as the window ending, not the connector failing.
+		state.mu.Lock()
+		ended := !s.live(window, s.opts.Clock.Wall())
+		state.mu.Unlock()
+		s.failSetup(ctx, leaseID)
+		if ended {
+			return fmt.Errorf("%w: setup window ended during discovery", ErrStale)
+		}
+		return err
 	}
-	if err != nil {
+	if err = save(); err != nil {
 		s.failSetup(ctx, leaseID)
 	}
 	return err

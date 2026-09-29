@@ -60,12 +60,12 @@ func TestConnectAndInspect(t *testing.T) {
 		t.Helper()
 		var request requestView
 		f.expect(req{method: "POST", path: "/api/access-requests", user: "alice", body: encode(setup(nil))}, 201, &request)
-		if request.Purpose != "setup_discovery" || len(request.Tools) != 0 || request.MaxCalls != nil {
+		if request.Purpose != "setup_discovery" || len(request.Tools) != 0 || request.MaxCalls != nil || !request.Requester.Current {
 			t.Fatalf("setup request: %+v", request)
 		}
 		var window leaseView
 		f.expect(req{method: "POST", path: "/api/approvals/" + request.ID + "/activate", user: "alice", idempotency: identity.New(), body: f.activation(f.ownerRequest(request.ID), f.cek)}, 200, &window)
-		if window.Purpose != "setup_discovery" || window.ExpiresAt.Sub(window.ActivatedAt).Seconds() != 300 {
+		if window.Purpose != "setup_discovery" || window.ExpiresAt.Sub(window.ActivatedAt).Seconds() != 300 || !window.Client.Current {
 			t.Fatalf("setup window: %+v", window)
 		}
 		return window
@@ -80,10 +80,8 @@ func TestConnectAndInspect(t *testing.T) {
 	}
 	discover := "/api/leases/" + window.LeaseID + "/discover"
 	f.expect(req{method: "POST", path: discover, key: "agent", body: "{}"}, 403, nil)
-	bob := f.do(req{method: "POST", path: discover, user: "bob", body: "{}"})
-	if bob.Code == http.StatusOK {
-		t.Fatal("another account ran the owner's inspect")
-	}
+	// Another account does not see the window at all.
+	f.expect(req{method: "POST", path: discover, user: "bob", body: "{}"}, 409, nil)
 
 	var result struct {
 		Provider  string   `json:"provider"`

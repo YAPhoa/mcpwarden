@@ -22,12 +22,14 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/custody"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/policy"
+	"github.com/yaphoa/mcpwarden/internal/registry"
 	"github.com/yaphoa/mcpwarden/internal/secret"
 	"github.com/yaphoa/mcpwarden/internal/upstream"
 	"github.com/yaphoa/mcpwarden/internal/vault"
@@ -55,7 +57,9 @@ type securityAPI struct {
 	catalog   custody.Catalog
 	// saveDiscovery saves a setup discovery and ends its window; startup
 	// points it at the runtimes so the tools show without a restart.
-	saveDiscovery         func(owner, name, connectorID, leaseID string, tools []*mcp.Tool) error
+	saveDiscovery func(owner, name, connectorID, leaseID string, tools []*mcp.Tool) error
+	// discoverTools lists a connector's tools under setup material.
+	discoverTools         func(context.Context, lease.Material) ([]*mcp.Tool, error)
 	accounts              *accountAuth
 	origins               []string
 	csrfKey               []byte
@@ -87,7 +91,7 @@ func startSecurity(ctx context.Context, cfg config.Config, db storageDB, store c
 		closeStore(db)
 		return nil, errors.New("security executor could not start")
 	}
-	api := &securityAPI{service: service, store: db, cache: cache, index: index, authority: authority, catalog: store, saveDiscovery: store.SetupDiscovery,
+	api := &securityAPI{service: service, store: db, cache: cache, index: index, authority: authority, catalog: store, saveDiscovery: store.SetupDiscovery, discoverTools: upstream.DiscoverLeased,
 		accounts: accounts, origins: cfg.Origins, csrfKey: randBytes(32), limits: newRateLimits(), logger: logger,
 		trustedProxies: trustedProxies, allowInsecureLoopback: allowInsecureLoopback}
 	snapshot, err := db.LoadCustody(ctx)
@@ -847,6 +851,9 @@ type callerView struct {
 	AccessID string `json:"access_id"`
 	PublicID string `json:"public_id,omitempty"`
 	Label    string `json:"label,omitempty"`
+	// Current marks the calling access record: a setup item of another
+	// browser session of the same owner can be seen but not run.
+	Current bool `json:"current,omitempty"`
 }
 type toolScopeView struct {
 	ToolID           string             `json:"tool_id"`
@@ -863,13 +870,14 @@ func (api *securityAPI) callerView(owner, id string) callerView {
 	return v
 }
 
-func (api *securityAPI) viewRequest(r lease.Request, owner bool) requestView {
+func (api *securityAPI) viewRequest(r lease.Request, callerID string, owner bool) requestView {
 	s := r.Scope
 	v := requestView{ID: r.ID, Purpose: s.Purpose, State: r.State, ApprovalMode: r.Mode, ApprovalPolicyRevision: r.ApprovalPolicyRevision, VerificationMethod: r.VerificationMethod,
 		AuthorizationSource: r.AuthorizationSource, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt, LeaseID: r.LeaseID,
 		Requester:       api.callerView(s.OwnerID, s.RequesterAccessID),
 		Credential:      api.summarize(s.OwnerID, custody.Head{CredentialID: s.CredentialID, ConnectorID: s.ConnectorID, Epoch: s.CredentialEpoch}),
 		DurationSeconds: s.DurationSeconds, MaxCalls: s.MaxCalls, Tools: []toolScopeView{}}
+	v.Requester.Current = s.RequesterAccessID == callerID
 	v.Credential.Revision = ""
 	if !r.ActivationDeadline.IsZero() {
 		v.ActivationDeadline = &r.ActivationDeadline
@@ -901,7 +909,7 @@ func (api *securityAPI) accessRequests(w http.ResponseWriter, r *http.Request, c
 		out := []requestView{}
 		for _, request := range view.Requests {
 			if interactive || request.Scope.RequesterAccessID == caller.ID {
-				out = append(out, api.viewRequest(request, interactive))
+				out = append(out, api.viewRequest(request, caller.ID, interactive))
 			}
 		}
 		jsonResponse(w, http.StatusOK, out)
@@ -934,7 +942,7 @@ func (api *securityAPI) accessRequests(w http.ResponseWriter, r *http.Request, c
 			securityError(w, err)
 			return
 		}
-		jsonResponse(w, http.StatusCreated, api.viewRequest(request, interactive))
+		jsonResponse(w, http.StatusCreated, api.viewRequest(request, caller.ID, interactive))
 	default:
 		methodNotAllowed(w, "GET, POST")
 	}
@@ -955,7 +963,7 @@ func (api *securityAPI) accessRequest(w http.ResponseWriter, r *http.Request, ca
 		securityError(w, err)
 		return
 	}
-	jsonResponse(w, http.StatusOK, api.viewRequest(request, interactive))
+	jsonResponse(w, http.StatusOK, api.viewRequest(request, caller.ID, interactive))
 }
 
 // keyInput decodes a base64url credential key directly into an owned buffer.
@@ -998,7 +1006,7 @@ func (api *securityAPI) approval(w http.ResponseWriter, r *http.Request, caller 
 			securityError(w, err)
 			return
 		}
-		jsonResponse(w, http.StatusOK, api.viewRequest(request, true))
+		jsonResponse(w, http.StatusOK, api.viewRequest(request, caller.ID, true))
 	case "deny":
 		var in struct{}
 		if !decodeBody(w, r, 4096, &in) {
@@ -1013,7 +1021,7 @@ func (api *securityAPI) approval(w http.ResponseWriter, r *http.Request, caller 
 			securityError(w, err)
 			return
 		}
-		jsonResponse(w, http.StatusOK, api.viewRequest(request, true))
+		jsonResponse(w, http.StatusOK, api.viewRequest(request, caller.ID, true))
 	case "activate":
 		api.activate(w, r, caller, id)
 	}
@@ -1092,7 +1100,7 @@ func (api *securityAPI) activate(w http.ResponseWriter, r *http.Request, caller 
 	if decided, err := api.service.LookupRequest(r.Context(), caller.Owner, id); err == nil {
 		request = decided
 	}
-	jsonResponse(w, http.StatusOK, api.viewLease(caller.Owner, lease.LeaseView{Lease: l, RuntimeAvailable: true}, request))
+	jsonResponse(w, http.StatusOK, api.viewLease(caller.Owner, caller.ID, lease.LeaseView{Lease: l, RuntimeAvailable: true}, request))
 }
 
 type leaseView struct {
@@ -1118,7 +1126,7 @@ type leaseView struct {
 	RenewalApprovalRevision string            `json:"renewal_approval_policy_revision"`
 }
 
-func (api *securityAPI) viewLease(owner string, l lease.LeaseView, r lease.Request) leaseView {
+func (api *securityAPI) viewLease(owner, callerID string, l lease.LeaseView, r lease.Request) leaseView {
 	p := api.index.Policy(owner)
 	v := leaseView{LeaseID: l.ID, RequestID: l.RequestID, Purpose: r.Scope.Purpose, Client: api.callerView(owner, l.CallerID),
 		Credential: api.summarize(owner, custody.Head{CredentialID: l.CredentialID, ConnectorID: r.Scope.ConnectorID, Epoch: l.Epoch}),
@@ -1126,6 +1134,7 @@ func (api *securityAPI) viewLease(owner string, l lease.LeaseView, r lease.Reque
 		AdmittedCalls: l.AdmittedCalls, MaxCalls: l.MaxCalls, InFlight: l.InFlight, ApprovalMode: r.Mode,
 		AuthorizationSource: r.AuthorizationSource, VerificationMethod: r.VerificationMethod,
 		RenewalRequiresOwner: true, RenewalRequiresConfirm: p.Mode == "confirm", RenewalApprovalRevision: p.Revision}
+	v.Client.Current = l.CallerID == callerID
 	v.Credential.Revision = ""
 	if !l.EndedAt.IsZero() {
 		v.EndedAt = &l.EndedAt
@@ -1186,7 +1195,7 @@ func (api *securityAPI) leases(w http.ResponseWriter, r *http.Request, caller ca
 			securityError(w, err)
 			return
 		}
-		out = append(out, api.viewLease(caller.Owner, l, request))
+		out = append(out, api.viewLease(caller.Owner, caller.ID, l, request))
 	}
 	jsonResponse(w, http.StatusOK, out)
 }
@@ -1262,26 +1271,42 @@ func (api *securityAPI) discover(w http.ResponseWriter, r *http.Request, caller 
 	var tools []*mcp.Tool
 	err = api.service.Setup(ctx, id, func(ctx context.Context, material lease.Material) error {
 		var err error
-		tools, err = upstream.DiscoverLeased(ctx, material)
+		tools, err = api.discoverTools(ctx, material)
 		return err
 	}, func() error {
 		return api.saveDiscovery(caller.Owner, entry.Name, entry.ID, id, tools)
 	})
+	var failed *upstream.DiscoveryError
 	switch {
 	case err == nil:
-	case errors.Is(err, upstream.ErrLeasedUpstream), errors.Is(err, context.DeadlineExceeded):
+	case errors.As(err, &failed), errors.Is(err, upstream.ErrLeasedUpstream), errors.Is(err, context.DeadlineExceeded):
+		step := "timeout"
+		if failed != nil {
+			step = failed.Step
+		}
+		api.logger.Warn("connect and inspect failed", "provider", entry.Name, "step", step)
 		securityFailure(w, http.StatusBadGateway, "discovery_failed", "The connector could not be reached or did not return a valid tool list. The inspect window has ended; start a new one to try again.")
+		return
+	case errors.Is(err, dbcatalog.ErrNotSaved):
+		securityFailure(w, http.StatusServiceUnavailable, "not_saved", "The tool list was not saved. The inspect window has ended; start a new one to try again.")
 		return
 	default:
 		securityError(w, err)
 		return
 	}
-	names := make([]string, 0, len(tools))
+	// Agents see only tools whose exposed name the registry accepts; the
+	// others are saved but skipped, as for any connector.
+	names, skipped := []string{}, []string{}
 	for _, t := range tools {
-		names = append(names, t.Name)
+		if _, ok := registry.Join(entry.Name, t.Name); ok {
+			names = append(names, t.Name)
+		} else {
+			skipped = append(skipped, t.Name)
+		}
 	}
 	sort.Strings(names)
-	jsonResponse(w, http.StatusOK, map[string]any{"provider": entry.Name, "tool_count": len(names), "tools": names})
+	sort.Strings(skipped)
+	jsonResponse(w, http.StatusOK, map[string]any{"provider": entry.Name, "tool_count": len(names), "tools": names, "skipped": skipped})
 }
 
 // setupDiscoveryTimeout bounds one "Connect and inspect" run, well inside the

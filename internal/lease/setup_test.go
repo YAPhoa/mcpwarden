@@ -229,3 +229,51 @@ func TestSetupSaveRefusedAfterTheWindowEnds(t *testing.T) {
 		t.Fatalf("a changed credential saved: %v", err)
 	}
 }
+
+func TestSetupRequesterRules(t *testing.T) {
+	h := newHarness(t, "none", nil)
+	// A tool window names a key, never a browser session.
+	browserTools := fixtureScope()
+	browserTools.RequesterAccessID = browserID
+	if _, err := h.service.Request(h.browser, scopeBytes(t, browserTools)); !errors.Is(err, ErrDenied) {
+		t.Fatalf("a browser session was named as a tool window's requester: %v", err)
+	}
+	// Another browser session of the same owner cannot ask for this session's
+	// setup window.
+	other := Caller{Actor: h.authority.callers[browserID].Actor, Active: true, Interactive: true}
+	other.AccessID = "018fd508-fbbb-4e8c-bbad-6ac1b411ef59"
+	h.authority.mu.Lock()
+	h.authority.callers[other.AccessID] = other
+	h.authority.mu.Unlock()
+	if _, err := h.service.Request(identity.WithActor(context.Background(), other.Actor), scopeBytes(t, setupScope())); !errors.Is(err, ErrDenied) {
+		t.Fatalf("another session requested this session's setup window: %v", err)
+	}
+	// A save for a window that never ran is refused.
+	l := h.startSetup(t)
+	if err := h.saveSetup(l, connectorID)(); !errors.Is(err, ErrStale) || !errors.Is(err, ErrRolledBack) {
+		t.Fatalf("saved without a discovery run: %v", err)
+	}
+	if st := h.store.snapshot(); st.Leases[l.ID].State != "active" {
+		t.Fatal("a refused save ended an unused window")
+	}
+}
+
+func TestEventSources(t *testing.T) {
+	h := newHarness(t, "none", nil)
+	h.startSetup(t)
+	events := h.store.snapshot().Events
+	if len(events) == 0 {
+		t.Fatal("no events")
+	}
+	e := events[len(events)-1]
+	for _, source := range []string{"", "client_activation", "owner_confirmation", "setup_completed", "setup_failed"} {
+		e.Source = source
+		if !ValidEvent(e.OwnerID, e) {
+			t.Fatalf("source %q refused", source)
+		}
+	}
+	e.Source = "setup_skipped"
+	if ValidEvent(e.OwnerID, e) {
+		t.Fatal("an unknown event source was accepted")
+	}
+}

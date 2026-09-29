@@ -20,6 +20,20 @@ Windows/macOS vet of `./internal/lease/sqlite ./cmd/mcpwarden`,
 `go test -race -count=1 ./...` with the isolated PostgreSQL fixture passed.
 `npm test` (72) and the Chromium owner flows on SQLite and PostgreSQL passed.
 
+Review round 1 (`d30ae86`): one blocking finding and three should-fix test
+groups. A tool without an object input schema passed discovery and then
+panicked `AddTool` on publication; discovery now fails on it, and every runtime
+skips such tools (`registry.CheckSchemas`), which also fixes the same crash
+from a no-auth connector. Added tests for the setup phase of the credential
+transport, every discovery bound, a closed tab, Stop during a run, a refused
+save, tool windows across an inspect, requester rules, and event sources.
+Optional fixes: the route counts only exposable names and lists `skipped`,
+logs the failed step, answers 409 when the window ended during the run and
+503 `not_saved` when the save did not commit; the console hides run buttons
+on another session's setup items, uses a 60-second window and setup-specific
+Stop copy. All the checks above passed again, including the full race suite
+with PostgreSQL and the Chromium flows on both databases.
+
 ## 2026-09-25 — PR #8 follow-up review, merge and deployment
 
 Reviewed head `5e61ae5` and confirmed both earlier findings are fixed. SSE events

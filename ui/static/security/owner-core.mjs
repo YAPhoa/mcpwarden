@@ -35,6 +35,7 @@ const messages = {
   json_required: 'The request was malformed.',
   method_not_allowed: 'The gateway does not support this action.',
   discovery_failed: 'The connector could not be reached or did not return a valid tool list. The inspect window has ended; try again.',
+  not_saved: 'The tool list was not saved. The inspect window has ended; try again.',
 };
 export function errorMessage(code) { return messages[code] || 'The request could not be completed.'; }
 

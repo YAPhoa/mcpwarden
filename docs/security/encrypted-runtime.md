@@ -94,7 +94,7 @@ A vault connector's tools are discovered only when its owner asks, from
 1. The owner's browser session requests a `setup_discovery` window for the
    credential (`POST /api/access-requests` with `"purpose": "setup_discovery"`).
    The scope names no tools and no call budget and lasts at most 300 seconds
-   (the console asks for 300). The requester is that browser session itself;
+   (the console asks for 60). The requester is that browser session itself;
    API keys, admin keys and other sessions cannot request, start or run it. The
    approval policy applies as for tool windows (`confirm` means begin, then
    activate, both by the owner), and activation releases the credential key as
@@ -108,10 +108,14 @@ A vault connector's tools are discovered only when its owner asks, from
    never admits a call for a setup scope. `upstream.DiscoverLeased` opens one
    SDK session with no retries or standalone stream through the destination
    guard, pages `tools/list` at most 16 times, and fails the whole run on a
-   repeated cursor, a duplicate or empty name, more than 256 tools or more than
-   4 MiB of definitions. The run times out after 30 seconds.
+   repeated cursor, a duplicate or empty name, a tool the gateway could not
+   register (an input schema that is missing, not a JSON object, or not of
+   type `"object"`, or an output schema that does not encode), more than 256
+   tools or more than 4 MiB of definitions. The whole run times out after 30
+   seconds, and each upstream response must start within the destination
+   transport's 15-second header timeout.
 3. `Repository.SetupDiscovery` saves the list and ends the window in one owner
-   transaction (`lease.Ending.Setup`): the save commits only if the window is
+   transaction (`Service.CatalogSetup` with a `lease.SetupEnd`): the save commits only if the window is
    still active, live and current, has run, and names the same connector, and
    the connector was not replaced. Otherwise the transaction rolls back and
    nothing is saved. The tools are then published to the owner's runtime under
@@ -119,7 +123,15 @@ A vault connector's tools are discovered only when its owner asks, from
 4. The window ends after this one run: `lease.revoked` with source
    `setup_completed`, or `setup_failed` when the upstream failed or the save
    was refused. Provider errors are not returned; the route answers 502
-   `discovery_failed`.
+   `discovery_failed` and logs only the failed step (connect, list, pages,
+   tools, size, name, schema or cursor). A window stopped or expired during the
+   run answers 409 `stale`, and a save the catalog did not commit answers 503
+   `not_saved`. The response counts only tools whose exposed name agents can
+   use and lists the others as `skipped`.
+
+Every runtime also skips, and logs, any tool the SDK server could not register
+(`registry.CheckSchemas`), whatever connector listed it, so a stored or listed
+tool can never stop the gateway.
 
 Saving discovery does not end tool windows. A window whose selected tool's
 definition changed is stale by its definition digest, so an agent must ask again

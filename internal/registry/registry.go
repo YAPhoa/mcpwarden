@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"regexp"
 	"sort"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/identity"
+	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"
 )
 
 var exposedName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
@@ -55,11 +57,45 @@ func Join(upstream, name string) (string, bool) {
 	result := upstream + "__" + name
 	return result, exposedName.MatchString(result)
 }
+
+// Skipped is a tool Replace left out, by its upstream name.
+type Skipped struct {
+	Name   string
+	Reason string // "name" or "schema"
+}
+
+var errInputSchema = errors.New(`input schema must be a JSON object with type "object"`)
+
+// CheckSchemas reports whether the SDK server can register t. mcp.Server.AddTool
+// panics on a missing input schema, one that is not a JSON object, one whose
+// type is not "object", and an output schema that does not encode as JSON. An
+// upstream can list any of these, so every tool is checked before it is saved
+// or published.
+func CheckSchemas(t *mcp.Tool) error {
+	if t == nil || t.InputSchema == nil {
+		return errInputSchema
+	}
+	var input map[string]any
+	if raw, err := json.Marshal(t.InputSchema); err != nil || json.Unmarshal(raw, &input) != nil || input == nil || input["type"] != "object" {
+		return errInputSchema
+	}
+	if t.OutputSchema != nil {
+		var output any
+		if raw, err := json.Marshal(t.OutputSchema); err != nil || json.Unmarshal(raw, &output) != nil || output == nil {
+			return errors.New("output schema must encode as JSON")
+		}
+	}
+	return nil
+}
+
 func Split(name string) (string, string, bool) {
 	u, n, ok := strings.Cut(name, "__")
 	return u, n, ok && u != "" && n != ""
 }
-func (r *Registry) Replace(upstream string, tools []*mcp.Tool, healthy bool) (skipped []string) {
+
+// Replace sets the tools of an upstream. It leaves out, and returns, tools
+// whose exposed name is invalid or that the SDK server could not register.
+func (r *Registry) Replace(upstream string, tools []*mcp.Tool, healthy bool) (skipped []Skipped) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !healthy {
@@ -83,7 +119,11 @@ func (r *Registry) Replace(upstream string, tools []*mcp.Tool, healthy bool) (sk
 		}
 		name, valid := Join(upstream, t.Name)
 		if !valid {
-			skipped = append(skipped, t.Name)
+			skipped = append(skipped, Skipped{Name: t.Name, Reason: "name"})
+			continue
+		}
+		if CheckSchemas(t) != nil {
+			skipped = append(skipped, Skipped{Name: t.Name, Reason: "schema"})
 			continue
 		}
 		copyTool := *t

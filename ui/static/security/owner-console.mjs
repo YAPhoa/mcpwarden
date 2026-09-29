@@ -296,12 +296,15 @@ function setupCard(r, phase, pending, busy) {
   const actionable = phase.key === 'pending' || phase.key === 'approved', actions = [];
   if (pending?.uncertain) actions.push(el('p', {class: 'help warning', text: 'The gateway did not confirm whether the inspect window started. Check its status before trying again.'}),
     el('button', {type: 'button', 'data-request': r.id, 'data-action': 'check', disabled: busy, text: 'Check status'}));
-  else if (actionable) actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'deny', disabled: Boolean(state.busy), text: 'Cancel'}),
-    el('button', {type: 'button', class: 'primary', 'data-request': r.id, 'data-action': 'inspect', disabled: Boolean(state.busy), 'aria-describedby': unlocked() ? null : 'vault-status-text', text: busy ? 'Inspecting…' : 'Connect and inspect'}));
+  else if (actionable) {
+    actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'deny', disabled: Boolean(state.busy), text: 'Cancel'}));
+    // Only the browser session that asked can run it.
+    if (r.requester.current) actions.push(el('button', {type: 'button', class: 'primary', 'data-request': r.id, 'data-action': 'inspect', disabled: Boolean(state.busy), 'aria-describedby': unlocked() ? null : 'vault-status-text', text: busy ? 'Inspecting…' : 'Connect and inspect'}));
+  }
   return el('article', {class: 'access-row vault-request', 'data-request-card': r.id},
     el('div', {class: 'access-record'}, el('h3', {text: `Connect and inspect ${connectorName(r.credential)}`}),
       el('p', {class: 'record-meta'}, el('span', {class: `badge ${phase.tone}`, text: phase.label}), el('span', {text: `Requested ${exact(r.created_at)}`})),
-      el('p', {class: 'help', text: 'Lists the connector’s tools once and saves them. It cannot call a tool.'})),
+      el('p', {class: 'help', text: r.requester.current ? 'Lists the connector’s tools once and saves them. It cannot call a tool.' : 'Started from another browser session; only that session can run it.'})),
     actions.length ? el('div', {class: 'access-row-actions'}, actions) : '');
 }
 function requestCard(r, now) {
@@ -352,13 +355,13 @@ function syncFilter(id, all, entries) {
   select.value = entries.some(([key]) => key === value) ? value : '';
 }
 function setupWindowCard(l, live) {
-  const actions = live ? [el('button', {type: 'button', class: 'danger', 'data-window': l.lease_id, 'data-action': 'stop', disabled: Boolean(state.busy), text: 'Stop'}),
-    el('button', {type: 'button', class: 'primary', 'data-window': l.lease_id, 'data-action': 'inspect', disabled: Boolean(state.busy), text: state.busy === l.lease_id ? 'Inspecting…' : 'Inspect now'})] : [];
+  const actions = live ? [el('button', {type: 'button', class: 'danger', 'data-window': l.lease_id, 'data-action': 'stop', disabled: Boolean(state.busy), text: 'Stop'})] : [];
+  if (live && l.client.current) actions.push(el('button', {type: 'button', class: 'primary', 'data-window': l.lease_id, 'data-action': 'inspect', disabled: Boolean(state.busy), text: state.busy === l.lease_id ? 'Inspecting…' : 'Inspect now'}));
   const ends = live ? el('span', {}, 'Ends at ', el('strong', {text: exact(l.expires_at)}), ' · ', el('span', {role: 'timer', 'data-deadline': l.expires_at, 'data-window-deadline': l.lease_id}), ' left')
     : el('span', {text: `Ended ${exact(l.ended_at || l.expires_at)}`});
   return el('article', {class: 'access-row vault-window', 'data-window-card': l.lease_id, 'data-state': l.phase.key},
     el('div', {class: 'access-record'}, el('h3', {text: `Connect and inspect · ${connectorName(l.credential)}`}),
-      el('p', {class: 'record-meta'}, el('span', {class: `badge ${l.phase.tone}`, text: l.phase.label}), ends, el('span', {text: 'Lists tools only · no tool calls'}))),
+      el('p', {class: 'record-meta'}, el('span', {class: `badge ${l.phase.tone}`, text: l.phase.label}), ends, el('span', {text: l.client.current ? 'Lists tools only · no tool calls' : 'Another browser session · lists tools only'}))),
     actions.length ? el('div', {class: 'access-row-actions'}, actions) : '');
 }
 function windowCard(l) {
@@ -666,7 +669,7 @@ async function inspect(connection, stored) {
   if (!unlocked()) { openUnlock('Unlock your vault, then connect and inspect again.'); return; }
   const generation = state.generation; state.busy = connection.id; render();
   try {
-    const request = (await client.request('POST', '/api/access-requests', {body: JSON.stringify({purpose: 'setup_discovery', credential_id: stored.credential_id, duration_seconds: 300})})).data;
+    const request = (await client.request('POST', '/api/access-requests', {body: JSON.stringify({purpose: 'setup_discovery', credential_id: stored.credential_id, duration_seconds: 60})})).data;
     guard(generation);
     await inspectStarted(request, generation, connection.name);
   } catch (error) { inspectFailed(error); }
@@ -691,7 +694,8 @@ async function inspectStarted(request, generation, name) {
 async function discover(leaseID, name, generation) {
   const result = (await client.request('POST', `/api/leases/${leaseID}/discover`, {body: '{}'})).data;
   guard(generation);
-  notice(`${name}: saved ${result.tool_count} tool${result.tool_count === 1 ? '' : 's'}. The inspect window has ended; agents still need an access window to call them.`);
+  const skipped = result.skipped?.length ? ` ${result.skipped.length} more ${result.skipped.length === 1 ? 'has a name' : 'have names'} agents cannot use and ${result.skipped.length === 1 ? 'is' : 'are'} skipped.` : '';
+  notice(`${name}: saved ${result.tool_count} tool${result.tool_count === 1 ? '' : 's'}.${skipped} The inspect window has ended; agents still need an access window to call them.`);
   await load();
 }
 function inspectFailed(error) {
@@ -726,7 +730,11 @@ $('vault-windows').addEventListener('click', event => {
 });
 async function stop(l) {
   const generation = state.generation; state.busy = l.lease_id; render();
-  try { await client.request('DELETE', `/api/leases/${l.lease_id}`); guard(generation); notice(`Access stopped for ${l.client.label || 'the agent'}. Calls already running may finish.`); await load(); }
+  try {
+    await client.request('DELETE', `/api/leases/${l.lease_id}`); guard(generation);
+    notice(setup(l) ? 'Inspect window stopped. Nothing more is listed or saved under it.' : `Access stopped for ${l.client.label || 'the agent'}. Calls already running may finish.`);
+    await load();
+  }
   catch (error) { failed(error); }
   finally { if (generation === state.generation) { state.busy = ''; render(); } }
 }
