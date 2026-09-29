@@ -1,5 +1,6 @@
-// Isolated end-to-end fixture for the owner console: a scratch PostgreSQL
-// database and runtime role, a real gateway binary with owner_security and
+// Isolated end-to-end fixture for the owner console: a scratch SQLite file
+// (the default) or, with OWNER_STORAGE=postgres, a scratch PostgreSQL
+// database and runtime role; a real gateway binary with owner_security and
 // direct loopback development transport, a synthetic header-authenticated MCP
 // upstream, and a static UI server that proxies /api/ like the bundled nginx.
 // Everything binds to 127.0.0.1 and uses synthetic credentials only.
@@ -105,13 +106,25 @@ export async function startUI(gatewayPort) {
 export async function startFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'mcpwarden-owner-flows-'));
   const bin = buildBinaries(dir);
-  const admin = adminDSN(), suffix = randomBytes(8).toString('hex');
-  const database = `mcpwarden_ui_${suffix}`, role = `mcpw_uirt_${suffix}`, password = 'test-only-password';
-  psql(admin, `CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
-  psql(admin, `CREATE DATABASE ${database}`);
-  const scratch = new URL(admin); scratch.pathname = '/' + database;
-  execFileSync(join(bin, 'mcpwarden-security-db'), ['-runtime-role', role], {env: {...process.env, MCPWARDEN_MIGRATION_DATABASE_URL: scratch.toString()}, stdio: ['ignore', 'ignore', 'inherit']});
-  const runtime = new URL(scratch); runtime.username = role; runtime.password = password; runtime.search = '?sslmode=disable';
+  const postgres = process.env.OWNER_STORAGE === 'postgres';
+  if (!postgres && (process.env.OWNER_STORAGE || 'sqlite') !== 'sqlite') throw new Error('OWNER_STORAGE must be sqlite or postgres.');
+  const env = {PATH: process.env.PATH, HOME: dir, MCPWARDEN_TEST_CATALOG_KEY: randomBytes(32).toString('base64')};
+  let storage = ['storage:', '  driver: sqlite', `  path: ${JSON.stringify(join(dir, 'data', 'mcpwarden.db'))}`, '  key_env: MCPWARDEN_TEST_CATALOG_KEY'];
+  let dropDatabase = () => {};
+  if (postgres) {
+    const admin = adminDSN(), suffix = randomBytes(8).toString('hex');
+    const database = `mcpwarden_ui_${suffix}`, role = `mcpw_uirt_${suffix}`, password = 'test-only-password';
+    psql(admin, `CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
+    psql(admin, `CREATE DATABASE ${database}`);
+    const scratch = new URL(admin); scratch.pathname = '/' + database;
+    execFileSync(join(bin, 'mcpwarden-security-db'), ['-runtime-role', role], {env: {...process.env, MCPWARDEN_MIGRATION_DATABASE_URL: scratch.toString()}, stdio: ['ignore', 'ignore', 'inherit']});
+    const runtime = new URL(scratch); runtime.username = role; runtime.password = password; runtime.search = '?sslmode=disable';
+    env.MCPWARDEN_SECURITY_DATABASE_URL = runtime.toString();
+    storage = ['storage:', '  driver: postgres', '  database_url_env: MCPWARDEN_SECURITY_DATABASE_URL', '  key_env: MCPWARDEN_TEST_CATALOG_KEY'];
+    dropDatabase = () => {
+      try { psql(admin, `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`); psql(admin, `DROP ROLE IF EXISTS ${role}`); } catch { console.error('scratch database cleanup failed'); }
+    };
+  }
 
   const upstream = await startUpstream();
   const gatewayPort = {value: await freePort()};
@@ -122,10 +135,9 @@ export async function startFixture() {
     `allowed_origins: ["${ui.origin}"]`,
     'upstreams: []',
     'policy:', '  default: allow',
-    'storage:', '  driver: postgres', '  database_url_env: MCPWARDEN_SECURITY_DATABASE_URL', '  key_env: MCPWARDEN_TEST_CATALOG_KEY',
+    ...storage,
     'accounts:', '  allow_registration: true',
     'owner_security:', '  allow_insecure_loopback: true', ''].join('\n'));
-  const env = {PATH: process.env.PATH, HOME: dir, MCPWARDEN_SECURITY_DATABASE_URL: runtime.toString(), MCPWARDEN_TEST_CATALOG_KEY: randomBytes(32).toString('base64')};
   let child = null, logs = '';
   const gateway = `http://127.0.0.1:${gatewayPort.value}`;
   async function start() {
@@ -179,7 +191,7 @@ export async function startFixture() {
     },
     close: async () => {
       await stop(); await ui.close(); await upstream.close();
-      try { psql(admin, `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`); psql(admin, `DROP ROLE IF EXISTS ${role}`); } catch { console.error('scratch database cleanup failed'); }
+      dropDatabase();
       rmSync(dir, {recursive: true, force: true});
     },
   };

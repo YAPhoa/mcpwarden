@@ -2,7 +2,7 @@
 
 `internal/secret`, the lease material capability, and the guarded proxy execution
 adapter form a tested path from a released CEK to a real MCP upstream with
-PostgreSQL admission. Startup installs the adapter whenever `owner_security`
+durable admission on PostgreSQL or SQLite. Startup installs the adapter whenever `owner_security`
 runs, for every personal connector with credentials (see
 [startup integration](#startup-integration)). Such connectors store header names
 only; their credentials exist only as vault ciphertext. The live deployment does
@@ -70,7 +70,7 @@ path. The manager never connects a bound provider.
 The ephemeral wire-argument binding uses Sonic's number-preserving decode and
 deterministic encoding before SHA-256. It tolerates JSON escaping/object order
 changes without rounding large integer tokens. It is separate from both RFC 8785
-scope hashes and the unchanged legacy audit argument hash, whose historical
+scope hashes and the unchanged audit argument hash, whose historical
 float64 behavior is preserved. Raw arguments are not persisted by this binding.
 
 The first adapter intentionally opens a session per call. It has no connection
@@ -129,8 +129,9 @@ Guarded execution is installed whenever `owner_security` runs; the former
   never connects it, and refuses refresh (409) and calls (`upstream.ErrGuarded`).
   The catalog holds header names only, so there is no server-side credential to
   fall back to.
-- Without `owner_security` (and in `--stdio`, which has no owner routes) the
-  guarded adapter is not installed. The API then accepts only `none` connectors,
+- Without `owner_security` the guarded adapter is not installed.
+  `--stdio`, which never runs the executor, does not load credentialed
+  connectors at all. The API then accepts only `none` connectors,
   and any stored credentialed connector stays locked and never dials. With
   `owner_security`, credentialed connectors are still limited to local-account
   workspaces, since only an account owner can unlock a vault, and to endpoints
@@ -149,7 +150,7 @@ Guarded execution is installed whenever `owner_security` runs; the former
   best-effort copy of both goes to the owner's call history with credential,
   lease and approval attribution; a slow or failed copy never delays dispatch.
 
-`TestGuardedHeaderExecution` (file and PostgreSQL catalogs) drives one
+`TestGuardedHeaderExecution` (SQLite and PostgreSQL) drives one
 connector from creation through locked calls and refused refresh, credential
 save, an owner-activated window, a scope miss, disabling, restart and credential
 deletion against a real SDK upstream. `TestCredentialSaveDuringCallsNeverDials`
@@ -175,7 +176,7 @@ committed. It covers locked listing/calls, owner-only key release, wrong keys,
 revision attribution, completion failure, lost responses, redirect refusal,
 definition changes, revocation, and a real deferred admission commit rejection.
 
-Before live rollout: the live catalog migration; setup/discovery
+Before live rollout: a fresh-start deployment; setup/discovery
 authorization; OAuth refresh; session/resource limits; restart/restore drills;
 and load qualification. Deployment history is recorded in
 [progress](../progress.md); the live deployment does not set `owner_security`.

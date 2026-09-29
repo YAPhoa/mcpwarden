@@ -618,3 +618,61 @@ and approved the removal plan on 2026-09-26. This is PR 1 of that plan.
   root version, wrapper root versions) written as `1e0` is accepted by
   PostgreSQL (jsonb normalizes it to 1) and refused by SQLite. Recorded rather than
   refused: jsonb cannot tell the spellings apart, and every writer uses strings.
+
+## 2026-09-29 — Single database, schema reset and the stdio client (removal plan PR 4)
+
+The removal plan's decisions D1 to D10 were approved on 2026-09-26. This PR
+carries D2, D3, D5, D6, D7 and D9; D10 landed in PR 2 and D8 in PR 3.
+
+- Storage is required (D2). Without a `storage` section the gateway uses
+  SQLite at `/data/mcpwarden.db`. The encrypted catalog file, JSONL history,
+  `pgcatalog` and `mcpwarden-catalog` with its import, cutover and rollback are
+  removed. `audit`, `managed_upstreams` and `owner_security.database_url(_env)`
+  are refused with their replacement. `audit.Encode` accepts schema-2
+  invocation events only; `audit.HashArgs` bytes are unchanged and pinned by a
+  test. `/api/auth/client-token`, the legacy client-token replacement, is gone.
+- The catalog key stays (D3). It seals account records, verifier digests,
+  discovery and connector metadata; it no longer protects upstream
+  credentials, which live only in the vault.
+- Config upstreams stay operator-held and are served to every account and
+  OAuth subject (D5). The guide and the Compose config say to close
+  registration once the owner's account exists.
+- Both schemas are reset to one `001_baseline.sql` at version 1 (D6). The
+  PostgreSQL baseline is the merge of 001 to 006 without catalog state, legacy
+  tombstones, custody or grant columns, the history `source` columns and the
+  `connector.oauth_saved` event type; a `pg_dump` of the new schema matched the
+  old one after those drops except for the auto-named request CHECKs. History
+  is schema version 2 only, with `event_type` and `invocation_id` NOT NULL. A
+  ledger whose version 1 has the pre-reset checksum is refused with
+  `ErrSchemaReset` ("create a new database"); nothing is converted.
+- `--stdio` is a SQLite client (D9). It holds `<path>.lock` shared while it
+  serves and exclusively only to create or migrate, following the plan's lock
+  loop (§4.5): shared check, exclusive create or migrate, a non-atomic
+  conversion done as unlock then shared lock, and a random 50 to 100 ms wait,
+  for up to 10 s. The conversion is done in two explicit steps on both
+  platforms, so a test hook can take the lock in the gap. It never runs the
+  executor; `dbcatalog.NewSnapshot` loads owner `local`'s rows through
+  `catalogdb.Client.LoadOwner`, drops accounts, access records and
+  credentialed connectors, keeps discovery refreshes in memory and refuses
+  every other change. History goes through `dbcatalog.NewHistoryWriter`, one
+  `BEGIN IMMEDIATE` per event with a 5 s busy timeout after an inode check; a
+  replaced file or an unknown commit outcome stops the client. Stdio calls
+  carry actor type `stdio` through a receiving middleware. PostgreSQL is
+  refused before connecting, so no stdio config holds the runtime role.
+- HTTPS for the panel is an opt-in override (D7). nginx's locations moved to
+  one shared `ui/locations.conf` that the HTTP server and the HTTPS server
+  (`ui/nginx-tls.conf`, mounted by `compose.tls.yaml`) both include, so they
+  cannot drift; the API location overwrites `X-Forwarded-Proto` with nginx's
+  own `$scheme` and clears `Forwarded`. The override gives the default network
+  `172.30.87.0/24`, allocates other containers from `172.30.87.128/25`, and
+  pins ui at `172.30.87.2`, the only trusted proxy in the Compose config.
+  Without the override the header says `http`, so owner routes stay refused.
+  The container smoke test runs with the override and checks that owner routes
+  refuse plain HTTP (direct, through nginx, and with a spoofed header) and
+  accept HTTPS through nginx.
+- Compose mounts a new `data` volume at `/data`. The old `audit_data` volume is
+  no longer declared, so `down --volumes` cannot delete it; it stays on disk as
+  the backup. The container smoke test checks that every shipped Compose file
+  publishes ports on 127.0.0.1 only.
+- The owner browser flows run on SQLite in all three engines and on
+  PostgreSQL in Chromium (`OWNER_STORAGE=postgres`).

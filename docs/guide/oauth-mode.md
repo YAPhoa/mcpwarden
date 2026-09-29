@@ -2,7 +2,7 @@
 
 In OAuth mode, mcpwarden acts as an OAuth resource server: an external identity provider signs users in and issues tokens, and mcpwarden validates them. This is how ChatGPT connects, since it reaches remote MCP servers using OAuth 2.1.
 
-OAuth mode is about how clients sign in to mcpwarden, not how mcpwarden signs in to the servers behind it. It cannot be combined with [panel accounts](accounts-and-access.md). The owner vault needs panel accounts, so in OAuth mode users can add only personal connections without authentication; see [Upstreams](upstreams.md).
+OAuth mode is about how clients sign in to mcpwarden, not how mcpwarden signs in to the servers behind it. It cannot be combined with [panel accounts](accounts-and-access.md). Config upstreams are served to every OAuth subject, with the operator's credentials. The owner vault needs panel accounts, so in OAuth mode users can add only personal connections without authentication; see [Upstreams](upstreams.md).
 
 ## Setup
 

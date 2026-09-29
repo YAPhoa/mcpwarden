@@ -394,3 +394,57 @@ func testStaleSessionsEndAtStartup(t *testing.T, db Database) {
 		t.Fatal("ending was not committed")
 	}
 }
+
+// testRepositoryAccessLimits: the hard active limits hold under concurrent
+// mints, the browser and OAuth sessions share one limit, a revocation frees a
+// slot, and another owner cannot revoke.
+func testRepositoryAccessLimits(t *testing.T, db Database) {
+	g := openGateway(t, db, catalogKey())
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	minted := 0
+	for i := range 30 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if g.repo.AddAccess(catalog.AccessRecord{Owner: "alice", Name: fmt.Sprint(i), Kind: "api_key", Role: "client", SecretHash: fmt.Sprint("key", i)}) == nil {
+				mu.Lock()
+				minted++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if minted != catalog.MaxAPIKeys {
+		t.Fatalf("concurrent mints: %d, want %d", minted, catalog.MaxAPIKeys)
+	}
+	first := g.repo.AccessList("alice")[0]
+	if err := g.repo.RevokeAccess("bob", first.ID); err == nil {
+		t.Fatal("another owner revoked the key")
+	}
+	if err := g.repo.RevokeAccess("alice", first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.repo.AddAccess(catalog.AccessRecord{Owner: "alice", Name: "replacement", Kind: "api_key", Role: "admin", SecretHash: "replacement"}); err != nil {
+		t.Fatal("revocation did not free a slot:", err)
+	}
+	for i := range catalog.MaxLoginSessions {
+		if err := g.repo.AddAccess(catalog.AccessRecord{Owner: "alice", Name: "device", Kind: "browser", Role: "admin", SecretHash: fmt.Sprint("browser", i), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.repo.ObserveOAuth("alice", "oauth", "client", time.Now().Add(time.Hour)); err == nil {
+		t.Fatal("OAuth bypassed the shared session limit")
+	}
+	for i := range catalog.MaxMCPSessions {
+		if err := g.repo.AddAccess(catalog.AccessRecord{Owner: "alice", Name: "app", Kind: "mcp", Role: "client", SecretHash: fmt.Sprint("mcp", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.repo.AddAccess(catalog.AccessRecord{Owner: "alice", Name: "extra", Kind: "mcp", Role: "client", SecretHash: "extra"}); err == nil {
+		t.Fatal("MCP session limit bypassed")
+	}
+	if err := g.repo.AddAccess(catalog.AccessRecord{Owner: "bob", Name: "own", Kind: "api_key", Role: "client", SecretHash: "bob"}); err != nil {
+		t.Fatal("alice's limit applied to bob:", err)
+	}
+}

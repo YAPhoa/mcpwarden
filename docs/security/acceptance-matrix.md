@@ -2,18 +2,19 @@
 
 Status of the 68 acceptance cases in
 [SECURITY-DESIGN.md §22](spec-v1.1/SECURITY-DESIGN.md#22-acceptance-tests),
-checked against the repository on 2026-09-28. Test names are Go test functions
+checked against the repository on 2026-09-29. Test names are Go test functions
 unless marked as UI tests (`ui/tests/`). `TestContract/<case>` is the shared
 store contract in `internal/lease/storetest`, run on both SQLite and PostgreSQL.
 Browser flows are steps of
 `ui/tests/owner-flows.mjs`, which drives the owner console against a real
-gateway and PostgreSQL. Update a row when its evidence changes.
+gateway on SQLite, and on PostgreSQL in Chromium. Update a row when its evidence changes.
 
 Status meanings:
 
 - **Live**: enforced by the running gateway and covered by tests.
 - **Opt-in**: served by the running gateway when `owner_security` is configured
-  and covered by PostgreSQL integration tests of the real HTTP routes. With
+  and covered by integration tests of the real HTTP routes on SQLite and
+  PostgreSQL. With
   `owner_security`, tool execution consults leases for every personal connector
   with credentials, from creation (`TestGuardedHeaderExecution`). The live
   deployment does not configure `owner_security`.
@@ -49,13 +50,13 @@ Totals: 3 Live, 33 Opt-in, 6 Library, 17 Partial, 2 Open, 7 Unselected.
 |---|---|---|---|
 | A01 | Opt-in | `TestOwnerActivationReplayAndOwnerIsolation` (keys and other owners see only their own requests, windows and events), `TestCallerExpiryOwnerIsolationAndRequestLimits`, `TestContract/DurabilityAndIsolation`, `TestPostgresPrivileges`; installed with `owner_security` (`TestGuardedHeaderExecution`) | None beyond live rollout |
 | A02 | Opt-in | `TestExactCallerScopeAndMutation`, `TestEncryptedDispatchThroughMCPAndPostgres`; installed with `owner_security` (`TestGuardedHeaderExecution`) | None beyond live rollout |
-| A03 | Live | `TestNamedKeyMintAndAuthenticationPaths`, `TestLegacyAuthenticationHashesDoNotEnterAuditActor`, `TestAccountsWorkspaceIsolationAndClientTokens` | Legacy operator and storeless OAuth modes report actor type only |
+| A03 | Live | `TestNamedKeyMintAndAuthenticationPaths`, `TestLegacyAuthenticationHashesDoNotEnterAuditActor`, `TestAccountsWorkspaceIsolationAndClientKeys` | Legacy operator and storeless OAuth modes report actor type only |
 | A04 | Opt-in | `TestOwnerRoutesRequireInteractiveBrowserSession` (client and admin keys, and a key plus a browser cookie, cannot activate in mode `none`; policy and vault changes need the current password), `TestOwnerActivationAndReplay`, `TestEncryptedDispatchThroughMCPAndPostgres` | Factor enrollment is unselected |
 | A05 | Opt-in | `TestRejectUnsupportedScope`, `TestResourceConstraints`, `FuzzParseScope`; installed with `owner_security` (`TestGuardedHeaderExecution`) | None beyond live rollout |
 | A06 | Opt-in | `TestNoUnionAndCurrentToolPolicy`; installed with `owner_security` (`TestGuardedHeaderExecution`: with a window still active, calls to a disabled connector or a hidden tool are refused without reaching the upstream) | None beyond live rollout |
 | A07 | Opt-in | `TestResourceConstraints` (changed definition), `TestEncryptedDispatchThroughMCPAndPostgres` (definition drift); installed with `owner_security` (`TestGuardedHeaderExecution`) | None beyond live rollout |
 | A08 | Opt-in | `TestNoUnionAndCurrentToolPolicy`, `TestPreparationDoesNotSwitchToAnotherLease`; installed with `owner_security` (`TestGuardedHeaderExecution`) | None beyond live rollout |
-| A09 | Opt-in | `TestOwnerConcurrentMutationsAndKeyRevocation` (key revocation ends its window through the coordinator), `TestStorageLossStopsGateway` (storage loss stops the gateway; revocation is refused rather than reported done), `TestOwnerMutationsRejectRevokedSession`, `TestOwnerCredentialWriteRejectsReplacedSession`, `TestOwnerMutationRechecksSessionAfterDatabaseWait`, `TestAccessCapsRevocationAndMigration`, `TestAccessRolesAndRevocableMCPSessions`, `TestChangePasswordRequiresCurrentAndRevokesOtherBrowsers` | Without `owner_security` there are no windows to end |
+| A09 | Opt-in | `TestOwnerConcurrentMutationsAndKeyRevocation` (key revocation ends its window through the coordinator), `TestStorageLossStopsGateway` (storage loss stops the gateway; revocation is refused rather than reported done), `TestOwnerMutationsRejectRevokedSession`, `TestOwnerCredentialWriteRejectsReplacedSession`, `TestOwnerMutationRechecksSessionAfterDatabaseWait`, `TestContract/RepositoryAccessLimits`, `TestAccessRolesAndRevocableMCPSessions`, `TestChangePasswordRequiresCurrentAndRevokesOtherBrowsers` | Without `owner_security` there are no windows to end |
 | A10 | Partial | UI test "workspace shows server identity and clearly labels shared operator mode" | Owner-specific caller authorization for shared upstreams under leases |
 
 ## 22.3 Cryptography and lifecycle
@@ -94,14 +95,14 @@ Totals: 3 Live, 33 Opt-in, 6 Library, 17 Partial, 2 Open, 7 Unselected.
 
 | ID | Status | Evidence | Remaining gap |
 |---|---|---|---|
-| P01 | Opt-in | `TestContract/DurabilityAndIsolation`, `TestPostgresPrivileges`, `TestContract/VaultCASIsolationAndRetention`, `TestImportPreservesCatalogAndHistory`, `TestContract/RepositoryCommitsAtomically`, `TestContract/RepositoryFailsClosed`, `TestOwnerFlowsOnPostgres` | Live data still on the file catalog |
-| P02 | Live | `TestDispatchAuditFailuresNeverCauseExecutionOrReplay`, `TestAdmissionUnknownUntilCompletionAcrossRestart`, `TestContract/AdmissionCommitFailure` | None for the file-audit path |
+| P01 | Opt-in | `TestContract/DurabilityAndIsolation`, `TestPostgresPrivileges`, `TestContract/VaultCASIsolationAndRetention`, `TestContract/CatalogRows`, `TestContract/RepositoryCommitsAtomically`, `TestContract/RepositoryFailsClosed`, `TestOwnerFlowsOnPostgres` | None |
+| P02 | Live | `TestDispatchAuditFailuresNeverCauseExecutionOrReplay`, `TestContract/HistoryOpenCalls`, `TestStorageOperatorMode` (history survives a restart), `TestContract/AdmissionCommitFailure` | None |
 | P03 | Partial | `TestEncryptedDispatchThroughMCPAndPostgres` (no private data in diagnostics) | Panic paths, SQL diagnostics and support exports |
 | P04 | Partial | `TestLeaseAttributionIsAnAtomicMetadataBundle`, `TestEncryptedDispatchThroughMCPAndPostgres` | Guarded calls carry them (`TestGuardedHeaderExecution`); calls to config upstreams and no-auth connectors have no lease to attribute |
-| P05 | Live | `TestInvocationImportOrderOwnerIsolationAndLegacyPreservation`, `TestStableToolIdentity`, UI test "public key handles disambiguate collisions…" | None |
+| P05 | Live | `TestHistoryBackendEquivalence`, `TestContract/HistoryToolListForwardOnly`, `TestStableToolIdentity`, UI test "public key handles disambiguate collisions…" | None |
 | P06 | Opt-in | Browser flows (an uncertain activation retries with the same Idempotency-Key and yields one window), `TestOwnerActivationReplayAndOwnerIsolation` (identical retry returns the same window; a new operation is refused), `TestOwnerConcurrentMutationsAndKeyRevocation` (parallel activations create one durable window), `TestOwnerActivationAndReplay`, `TestPostgresAmbiguousActivationCommit` | None |
-| P07 | Opt-in | `TestLegacyPublicIDMigrationPreservesCredentialsAndLifecycle`, `TestMigrationV1UpgradeAndRollback`, `TestImportPreservesCatalogAndHistory`, `TestImportResumesWithoutDuplicates`, `TestImportRefusesUnsafeOrChangedSources`, `TestVerificationDetectsTampering`, `TestAbortBeforeCutoverRestoresFileGateway`, `TestMarkerBelongsToItsDatabase`, `TestAbortResumesAfterItsDatabaseCommit` | Not yet run on live data |
-| P08 | Partial | `TestPostgresSnapshotRestartLocksExecution`, `TestStorageLossStopsGateway`, `TestRollbackResumesAndRefusesReplacedFiles`, `TestMarkerGatesTheFileBackend`, `TestMarkerBelongsToItsDatabase`, `TestImportAfterRollbackRequiresTheExport` | Database backup/restore drill (step 9) |
+| P07 | Opt-in | `TestSchemaResetRefused`, `TestLedgerRefusals`, `TestMigrationAtomicAndLedgerChecked`, `TestClientMigratesOnlyAlone`, `TestContract/CatalogRows`, `TestContract/SchemaRules` | No data migration exists: deployments start fresh (2026-09-25), and older databases are refused, not converted |
+| P08 | Partial | `TestPostgresSnapshotRestartLocksExecution`, `TestContract/RestartQuiescesLeases`, `TestStorageLossStopsGateway`, `TestKilledProcessKeepsCommits`, `TestReplacedFilesStopBusyStore` | Database backup/restore drill (step 9) |
 | P09 | Opt-in | `TestStorageLossStopsGateway` (a terminated executor session stops the gateway), `TestContract/RestartQuiescesLeases` (restart suspends the old window), `TestPostgresExclusiveExecutorAndLoss`; installed with `owner_security` (`TestGuardedHeaderExecution`) | None beyond live rollout |
 | P10 | Library | `TestContract/DurabilityAndIsolation`, `TestPostgresPrivileges` | Retention role and procedure |
 | P11 | Partial | `TestBudgetAdmissionAtomicAndConcurrency`, `TestContract/AtomicBudget` | High-concurrency load tests (step 10) |

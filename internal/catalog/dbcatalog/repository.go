@@ -52,7 +52,7 @@ var (
 // takes the owner gate, then the view lock inside the owner transaction, and
 // publishes after commit before releasing the view lock, so readers never see
 // uncommitted state and never miss committed state. Database failures are
-// returned; there is no fallback to the file catalog.
+// returned; there is no fallback.
 type Repository struct {
 	seal   *sealer
 	loader Loader

@@ -1,6 +1,8 @@
 /mcpwarden
-/audit.jsonl
-/managed-upstreams.enc
+/mcpwarden.db
+/mcpwarden.db-*
+/mcpwarden.db.lock
+/tls/
 /config.yaml
 .env
 .env.*

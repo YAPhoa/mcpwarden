@@ -160,3 +160,15 @@ func TestStorageDefaults(t *testing.T) {
 		t.Fatalf("defaults: %+v", *s)
 	}
 }
+
+// The shipped examples load with this build's rules.
+func TestExamplesLoad(t *testing.T) {
+	for _, env := range []string{DefaultKeyEnv, "MCPWARDEN_TOKEN", "MCPWARDEN_INTROSPECTION_CLIENT_ID", "MCPWARDEN_INTROSPECTION_CLIENT_SECRET", "SOME_VAR", "REMOTE_TOKEN"} {
+		t.Setenv(env, "synthetic")
+	}
+	for _, name := range []string{"config.yaml", "compose-config.yaml", "oauth-config.yaml"} {
+		if _, err := Load(filepath.Join("..", "..", "examples", name)); err != nil {
+			t.Error(name, err)
+		}
+	}
+}

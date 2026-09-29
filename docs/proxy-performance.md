@@ -1,6 +1,6 @@
 # Proxy performance
 
-Timing is collected automatically for every routed upstream tool call, for all users, connectors, HTTP/stdio transports and both client/admin MCP access. No diagnostic mode is required. Data persists in audit JSONL and is available in the workspace and per-tool History views.
+Timing is collected automatically for every routed upstream tool call, for all users, connectors, HTTP/stdio transports and both client/admin MCP access. No diagnostic mode is required. Data persists in the call history database and is available in the workspace and per-tool History views.
 
 ## Measurements
 

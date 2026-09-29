@@ -20,9 +20,9 @@ explicit opt-in are absent.
 | Check | What it runs |
 |---|---|
 | Go and PostgreSQL | gofmt; module tidy/verification; original spec and vendored crypto hashes; build; vet; full race suite with PostgreSQL enabled and Node available; CGO-disabled build/JSON/storage tests; two bounded parser fuzz runs. |
-| UI and vault (Chromium, Firefox, WebKit) | Locked development dependencies with lifecycle scripts disabled; UI/crypto tests; npm high/critical advisory check; real worker/KDF/recovery/lock/CSP tests in each browser engine. |
+| UI and vault (Chromium, Firefox, WebKit) | Locked development dependencies with lifecycle scripts disabled; UI/crypto tests; npm high/critical advisory check; real worker/KDF/recovery/lock/CSP tests in each browser engine; the owner console flows against a real gateway on SQLite in each engine, and on PostgreSQL in Chromium. |
 | Security and workflow checks | actionlint (including ShellCheck when present on the runner), reachable Go vulnerability scanning, and redacted full Git history scanning with Gitleaks. |
-| Container build and smoke | Separate gateway/UI images; isolated deployment with generated fixture credentials; health, API authentication/no-store, static assets and worker MIME/CSP checks; fixture volume cleanup. |
+| Container build and smoke | Every shipped Compose file publishes ports on 127.0.0.1 only; separate gateway/UI images; isolated deployment with the HTTPS override, a throwaway certificate and generated fixture credentials; health, API authentication/no-store, static assets and worker MIME/CSP checks over HTTP and HTTPS; owner routes refused over plain HTTP (also with a spoofed forwarding header) and accepted over HTTPS through nginx; fixture volume cleanup. |
 | CodeQL | Additional Go and JavaScript security-extended analysis on public repositories, or private repositories with Code Security enabled and `ENABLE_CODEQL=true`. Separate from the mandatory CI gate. |
 
 Actions use full commit pins with release comments. The workflow token defaults
@@ -65,8 +65,11 @@ ui/node_modules/.bin/playwright install --with-deps chromium firefox webkit
 VAULT_BROWSER=chromium npm --prefix ui run test:browser
 VAULT_BROWSER=firefox npm --prefix ui run test:browser
 VAULT_BROWSER=webkit npm --prefix ui run test:browser
+OWNER_BROWSER=chromium npm --prefix ui run test:flows   # SQLite; also firefox, webkit
+OWNER_BROWSER=chromium OWNER_STORAGE=postgres npm --prefix ui run test:flows
 
-# Builds and removes only its own uniquely named synthetic fixture.
+# Builds and removes only its own uniquely named synthetic fixture, with the
+# HTTPS override on a fixed 127.0.0.1:8443 and a throwaway certificate.
 python3 scripts/ci/containers.py
 
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

@@ -228,7 +228,7 @@ func (x *ownerTx) invocation(r audit.Record) error {
 
 // Complete appends an actual outcome using the admission's identity snapshot.
 // Failure never means the provider failed, and must never trigger a tool retry.
-// This is not the legacy JSONL history reader or a general-purpose audit import.
+// It is not a general-purpose audit import.
 func (s *Store) Complete(ctx context.Context, r audit.Record) error {
 	if r.EventType != audit.DispatchCompleted || audit.ValidateInvocation(r) != nil || r.LeaseID == "" {
 		return lease.ErrDenied

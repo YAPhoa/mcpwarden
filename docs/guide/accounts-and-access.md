@@ -13,8 +13,7 @@ accounts:
   allow_registration: true
 ```
 
-- Accounts require `managed_upstreams`.
-- Set `allow_registration: false` after the intended users register if signup should be closed.
+- Set `allow_registration: false` after the intended users register. On a personal gateway, close it once your own account exists.
 - Accounts cannot be combined with external [OAuth mode](oauth-mode.md).
 - Account registration grants a personal workspace, not global administrator privileges.
 - Shared config upstreams remain available to every account, so use config entries only for intentionally shared services.
@@ -78,4 +77,6 @@ OAuth revocation blocks that observed access token locally at this gateway; it d
 
 Each registered upstream belongs to one gateway user. Operator-token access has one shared user named `local`; registered accounts use separate internal identities. With OAuth mode, the validated access-token `sub` identifies the user for both `/mcp` and `/api`; each user can register a separate endpoint, even under the same upstream name (only connectors without authentication, since the owner vault needs panel accounts). Static YAML upstreams remain available to every user.
 
-By default, the gateway stores personal connections and the last successful tool discovery in an AES-GCM encrypted file under `/data`. Managed state and audit history sit behind separate backend interfaces so a database adapter can be added without changing runtime or authentication logic; a PostgreSQL driver and schema are not bundled for the catalog. See [the catalog storage contract](../catalog-storage.md) and [the history storage contract](../history-storage.md).
+Static YAML upstreams use the operator's credentials for everyone, so close registration (`accounts.allow_registration: false`) once your own account exists on a personal gateway.
+
+Personal connections, the last successful tool discovery, accounts, access records and call history are stored in the gateway's database (SQLite by default, or PostgreSQL), with secret-bearing fields sealed under the catalog key. See [storage](../storage.md).

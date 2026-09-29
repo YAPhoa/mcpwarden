@@ -1609,3 +1609,22 @@ Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
 `historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
 `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
 Chromium owner flows passed.
+
+## 2026-09-29 — Single database (removal plan PR 4)
+
+Storage is required (SQLite by default, PostgreSQL supported); the file
+catalog, JSONL history and `mcpwarden-catalog` are removed; both schemas are
+reset to one baseline and pre-reset databases are refused; `--stdio` is a
+SQLite client that shares the database with other stdio clients, never with a
+gateway; `compose.tls.yaml` adds HTTPS for the panel. See
+[decisions](decisions.md) and [storage](storage.md).
+
+Local validation on the branch head: `gofmt`, `go build ./...`, `go vet ./...`
+(also with the `flowtest` and `historyscale` tags, and for Windows and macOS),
+`go mod tidy -diff`, `integrity.py`, and `go test -race -count=1 ./...` with
+the PostgreSQL fixture enabled all passed, as did the `CGO_ENABLED=0` build and
+SQLite tests. `npm test` in `ui/` passed, and the owner browser flows passed in
+Chromium on SQLite and on PostgreSQL; Firefox and WebKit are not installed in
+this environment and run in CI. `scripts/ci/containers.py` passed against
+images built from this tree with the HTTPS override (the images were built
+from host binaries because the container build cannot download modules here).

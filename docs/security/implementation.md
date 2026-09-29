@@ -63,7 +63,7 @@ New named keys use `mcpw_<32 lowercase hex public-ID characters>_<43 base64url s
 characters>`. The public ID and 32-byte secret are independently random. The full
 token remains SHA-256 verified with constant-time comparison. Both local-account
 and operator/OAuth named-key authentication paths accept the format strictly.
-Legacy `mw_` tokens, including the compatibility replacement endpoint, remain valid.
+Legacy `mw_` tokens remain valid. The compatibility replacement endpoint was removed on 2026-09-29.
 Existing API keys receive independent persisted public IDs without altering their
 verifiers, IDs, roles, ownership, expiry, or lifecycle timestamps. Access names show
 collision-aware public suffixes. Stored header values and token verifiers are not
@@ -259,9 +259,10 @@ after cutover and appends new history. Markers and a database check stop an
 older catalog file from starting. The backend is opt-in
 (`managed_upstreams.backend: postgres`, which requires `owner_security`) and fails
 closed without fallback. The six owner-route suites run unchanged on it after a
-real import and cutover. Live data has not been migrated; the procedure is in
-[catalog migration](../catalog-migration.md) for review. Guarded execution at
-startup is still step 4.
+real import and cutover. Guarded execution at startup is still step 4. On
+2026-09-26 the user replaced the migration with a fresh start, and on
+2026-09-29 the file catalog, JSONL history and the import, cutover and rollback
+tooling were removed (see the last section).
 
 ## Vault-only personal credentials — 2026-09-26
 
@@ -275,3 +276,19 @@ it only `none` connectors can be created. Upstream OAuth for personal connectors
 is removed and returns vault-backed in step 6. Catalogs from older builds are
 refused at load, with no conversion. New credentialed connectors have no tools
 until setup discovery (step 5).
+
+## Single database — 2026-09-29
+
+The user decided on 2026-09-25 that there is no legacy: no backward
+compatibility and no live migration. Storage is required: the catalog, history,
+leases and vault live in one SQLite file (the default) or PostgreSQL database
+([storage](../storage.md)). The encrypted catalog file, JSONL history,
+`mcpwarden-catalog` and its import, cutover and rollback are removed, and the
+removed configuration keys are refused. Both dialects start from one
+`001_baseline.sql` at schema version 1; a database from before the reset is
+refused. `--stdio` is a SQLite client: it shares the database with other stdio
+clients under a shared lock, never with a gateway, serves a read-only catalog
+snapshot without credentialed connectors, and writes only history.
+`compose.tls.yaml` adds HTTPS for the panel, so the owner routes work in Compose
+through the pinned ui proxy. The live deployment still does not run
+`owner_security`; the fresh-start deployment is the user's.
