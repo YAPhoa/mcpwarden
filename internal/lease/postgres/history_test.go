@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -14,19 +13,6 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease"
 )
-
-func historyEvent(owner, id, kind, invocation, toolID, tool string, ns int64) catalogdb.HistoryRow {
-	status := "ok"
-	if kind == "" {
-		kind, invocation = "tool.dispatch.completed", "inv-"+id
-	}
-	if kind == "tool.dispatch.admitted" {
-		status = "unknown"
-	}
-	raw, _ := json.Marshal(map[string]any{"schema_version": 2, "event_id": id, "owner": owner})
-	return catalogdb.HistoryRow{OwnerID: owner, EventID: id, SchemaVersion: 2, EventType: kind, InvocationID: invocation, ToolID: toolID,
-		Tool: tool, Upstream: "up", Status: status, TSNano: ns, HistoryNano: ns, Record: string(raw)}
-}
 
 // A database from a development build before the schema reset is refused,
 // never converted: migration and the runtime both name the reset.
@@ -40,6 +26,14 @@ func TestSchemaResetRefused(t *testing.T) {
 	}
 	if _, err := Open(t.Context(), db.runtimeDSN); !errors.Is(err, ErrSchemaReset) {
 		t.Fatal("runtime open of a pre-reset ledger:", err)
+	}
+	// Pre-reset versions 1 to 4 had no catalog or history tables, which the
+	// runtime's privilege check names; the ledger is read before it.
+	if _, err := db.admin.Exec(t.Context(), "DROP TABLE mcpwarden_security.catalog_connectors CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(t.Context(), db.runtimeDSN); !errors.Is(err, ErrSchemaReset) {
+		t.Fatal("runtime open of a pre-reset ledger without catalog tables:", err)
 	}
 	for version := 2; version <= 6; version++ {
 		if _, err := db.admin.Exec(t.Context(), "INSERT INTO mcpwarden_security.schema_migrations(version,sha256) VALUES ($1,$2)", version, strings.Repeat("0", 64)); err != nil {

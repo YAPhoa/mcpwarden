@@ -37,8 +37,8 @@ func NewAccessToken() (token, publicID string) {
 	return "mcpw_" + publicID + "_" + base64.RawURLEncoding.EncodeToString(secret[:]), publicID
 }
 
-// ParseAccessToken accepts only the canonical new format. Legacy mw_ keys are
-// handled separately by authentication; parsing a public ID never authenticates.
+// ParseAccessToken accepts only the canonical format; parsing a public ID
+// never authenticates.
 func ParseAccessToken(token string) (publicID string, ok bool) {
 	if len(token) != 81 || !strings.HasPrefix(token, "mcpw_") || token[37] != '_' || !ValidPublicID(token[5:37]) {
 		return "", false

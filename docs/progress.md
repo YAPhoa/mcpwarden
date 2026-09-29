@@ -1628,3 +1628,24 @@ Chromium on SQLite and on PostgreSQL; Firefox and WebKit are not installed in
 this environment and run in CI. `scripts/ci/containers.py` passed against
 images built from this tree with the HTTPS override (the images were built
 from host binaries because the container build cannot download modules here).
+
+## 2026-09-29 — PR 4 review round 1
+
+A stdio client now closes its connection whenever its lock loop lets go of the
+lock, records the database file before the serving connection opens and checks
+it after the version check, so a file replaced while it starts is never served
+through the old file. New tests cover that, a replaced lock file, the version
+check after the lock conversion, a failed commit, `runStdio` stopping on a lost
+database, a busy database refusing a stdio call before dispatch, the client's
+refusals of foreign, edited and pre-reset databases, and the removed
+`catalog.Open` and `audit.Open`. The old `mw_` key prefix is no longer
+accepted. The PostgreSQL gateway reads the ledger before its privilege check,
+so every pre-reset version names the reset. Removed configuration keys with no
+value are refused, and the `owner_security` removal message comes before the
+storage checks. The SQLite in-use errors no longer start with "execution is
+locked:". Unused functions and stale docs were removed.
+
+`gofmt`, `go build ./...`, `go vet ./...` (plain, `flowtest`, `historyscale`,
+Windows and macOS), `go mod tidy -diff`, `integrity.py`, `go test -race
+-count=1 ./...` with the PostgreSQL fixture, the `CGO_ENABLED=0` build and
+SQLite tests, `npm test` and the Chromium owner flows on SQLite passed.

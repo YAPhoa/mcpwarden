@@ -31,18 +31,6 @@ const executorLock int64 = 0x4d43505753454331 // MCPWSEC1, shared by migration a
 // Migration holds it too, so it never runs beside a gateway.
 const ExecutorLock = executorLock
 
-// CheckSchema requires the full current schema.
-func CheckSchema(ctx context.Context, db queryer) error {
-	n, err := appliedMigrations(ctx, db)
-	if err != nil {
-		return err
-	}
-	if n != SchemaVersion {
-		return ErrMigration
-	}
-	return nil
-}
-
 // Attributes such as CREATEROLE are not inherited automatically, but membership
 // may still permit SET ROLE. Check the reachable roles, not just current_user.
 const unsafeRole = `(rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
@@ -54,10 +42,6 @@ var (
 	// never converted.
 	ErrSchemaReset = errors.New("storage database was created by a development build before the schema reset; create a new database")
 )
-
-func migrationHash() string {
-	return checksum(migration)
-}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

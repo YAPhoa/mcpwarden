@@ -21,9 +21,9 @@ var errStdioStorage = errors.New("--stdio needs SQLite storage; connect this cli
 // whose history commit had an unknown outcome.
 var errStdioLost = errors.New("storage database changed or failed; the stdio client stopped")
 
-// runStdio serves one downstream client over stdin/stdout as owner local
-// until the client disconnects or the database is lost.
-func runStdio(ctx context.Context, cfg config.Config, pol *policy.Policy, logger *slog.Logger) error {
+// runStdio serves one downstream client over transport (stdin/stdout) as
+// owner local until the client disconnects or the database is lost.
+func runStdio(ctx context.Context, cfg config.Config, pol *policy.Policy, logger *slog.Logger, transport mcp.Transport) error {
 	ctx, fail := context.WithCancelCause(ctx)
 	defer fail(nil)
 	g, err := openStdio(ctx, cfg, pol, logger)
@@ -38,7 +38,7 @@ func runStdio(ctx context.Context, cfg config.Config, pol *policy.Policy, logger
 		case <-ctx.Done():
 		}
 	}()
-	err = g.server.Run(ctx, &mcp.StdioTransport{})
+	err = g.server.Run(ctx, transport)
 	if cause := context.Cause(ctx); errors.Is(cause, errStdioLost) {
 		return cause
 	}

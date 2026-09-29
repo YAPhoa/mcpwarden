@@ -50,7 +50,7 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	ctx, fail := context.WithCancelCause(ctx)
 	defer fail(nil)
 	if stdio {
-		return runStdio(ctx, cfg, pol, logger)
+		return runStdio(ctx, cfg, pol, logger, &mcp.StdioTransport{})
 	}
 	// The executor and its custody caches load before any runtime exists,
 	// so no connector can start without its guard.

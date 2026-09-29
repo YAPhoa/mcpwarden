@@ -8,10 +8,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,5 +167,124 @@ func TestStdioRefusedBesideGateway(t *testing.T) {
 	_, err := openStdio(ctx, cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil || !strings.Contains(err.Error(), "connect over HTTP") {
 		t.Fatal("stdio beside a gateway:", err)
+	}
+}
+
+// A stdio call's admission is committed before the upstream sees the call.
+// A write lock held elsewhere past the busy timeout refuses the call without
+// dispatch, and the client serves again once the lock is released.
+func TestStdioAdmissionDurableAndBusyRefused(t *testing.T) {
+	var calls atomic.Int32
+	var admittedAtDispatch atomic.Int64
+	var dbPath string
+	s := mcp.NewServer(&mcp.Implementation{Name: "count", Version: "1"}, nil)
+	s.AddTool(&mcp.Tool{Name: "count", InputSchema: json.RawMessage(`{"type":"object"}`)}, func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		calls.Add(1)
+		db, err := sql.Open("sqlite", dbPath+"?_pragma=query_only(1)")
+		if err == nil {
+			var n int64
+			if db.QueryRowContext(ctx, "SELECT count(*) FROM history_events WHERE event_type='tool.dispatch.admitted'").Scan(&n) == nil {
+				admittedAtDispatch.Store(n)
+			}
+			db.Close()
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "counted"}}}, nil
+	})
+	srv := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil))
+	t.Cleanup(srv.Close)
+	cfg := config.Config{Upstreams: []config.Upstream{{Name: "cfgup", Transport: "http", URL: srv.URL, Timeout: 5 * time.Second}}}
+	testStorage(t, &cfg).close()
+	dbPath = cfg.Storage.Path
+	pol, _ := policy.New(config.Policy{Default: "allow"})
+	g, err := openStdio(t.Context(), cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(g.close)
+	cs := stdioSession(t, g)
+	call := func() (*mcp.CallToolResult, error) {
+		return cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "cfgup__count", Arguments: map[string]any{}})
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res, err := call()
+		if err == nil && !res.IsError {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first call:", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if admittedAtDispatch.Load() != 1 {
+		t.Fatal("admission not committed before dispatch:", admittedAtDispatch.Load())
+	}
+
+	holder, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	conn, err := holder.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	before := calls.Load()
+	res, err := call()
+	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "No upstream action was executed") {
+		t.Fatal("call under a held write lock:", err, res)
+	}
+	if calls.Load() != before {
+		t.Fatal("dispatched without an admission")
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if res, err := call(); err != nil || res.IsError {
+		t.Fatal("call after release:", err, res)
+	}
+}
+
+// runStdio stops once its client stops trusting the database.
+func TestStdioStopsWhenDatabaseLost(t *testing.T) {
+	_, upstreamHTTP := upstreamForUser(t, "echo")
+	t.Cleanup(upstreamHTTP.Close)
+	cfg := config.Config{Upstreams: []config.Upstream{{Name: "cfgup", Transport: "http", URL: upstreamHTTP.URL, Timeout: 5 * time.Second}}}
+	testStorage(t, &cfg).close()
+	pol, _ := policy.New(config.Policy{Default: "allow"})
+	ct, st := mcp.NewInMemoryTransports()
+	done := make(chan error, 1)
+	go func() {
+		done <- runStdio(t.Context(), cfg, pol, slog.New(slog.NewTextHandler(io.Discard, nil)), st)
+	}()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "stdio-test", Version: "1"}, nil).Connect(t.Context(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	if err := os.Rename(cfg.Storage.Path, cfg.Storage.Path+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	// The next history write finds the file replaced. Discovery may still
+	// be running, so call until one call reaches the admission write.
+	go func() {
+		for range 200 {
+			if _, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "cfgup__echo", Arguments: map[string]any{}}); err == nil {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errStdioLost) {
+			t.Fatal("runStdio:", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runStdio kept serving")
 	}
 }

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -275,5 +276,121 @@ func TestReplacedFileStopsClient(t *testing.T) {
 	case <-c.Lost():
 	default:
 		t.Fatal("client not stopped")
+	}
+}
+
+// replaceFile swaps path for a byte copy of itself, as a restore would.
+func replaceFile(t *testing.T, path string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".copy", b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".copy", path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A database file replaced while OpenClient runs is never served through a
+// connection to the old file: the client serves the file at the path, and
+// its admissions survive a checkpoint.
+func TestReplacedWhileOpening(t *testing.T) {
+	for _, when := range []string{"conversion gap", "connection open"} {
+		t.Run(when, func(t *testing.T) {
+			path := tempPath(t)
+			if when == "conversion gap" {
+				convertHook = func() { convertHook = nil; replaceFile(t, path) }
+			} else {
+				s := openStore(t, path)
+				if err := s.Close(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				inspectHook = func() { inspectHook = nil; replaceFile(t, path) }
+			}
+			t.Cleanup(func() { convertHook, inspectHook = nil, nil })
+			c := openClient(t, path)
+			for _, id := range []string{"e1", "e2", "e3"} {
+				if err := c.InsertHistory(t.Context(), clientEvent("local", id, "tool.dispatch.admitted")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := c.db.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+				t.Fatal(err)
+			}
+			if n := count(t, path, "history_events"); n != 3 {
+				t.Fatal("admissions at the path", n)
+			}
+		})
+	}
+}
+
+// A replaced lock file stops the client before its next write, as a
+// replaced database file does.
+func TestReplacedLockFileStopsClient(t *testing.T) {
+	path := tempPath(t)
+	c := openClient(t, path)
+	if err := os.WriteFile(path+".lock.new", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".lock.new", path+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.InsertHistory(t.Context(), clientEvent("local", "e1", "tool.dispatch.admitted")); !errors.Is(err, lease.ErrLocked) {
+		t.Fatal("write after replacement:", err)
+	}
+	select {
+	case <-c.Lost():
+	default:
+		t.Fatal("client not stopped")
+	}
+}
+
+// The version is checked again under the shared lock the client keeps: a
+// database that became newer in the conversion gap is refused.
+func TestVersionCheckedAfterConversion(t *testing.T) {
+	path := tempPath(t)
+	convertHook = func() {
+		convertHook = nil
+		db := raw(t, path)
+		defer db.Close()
+		for _, stmt := range []string{"DROP TRIGGER schema_migrations_append_only", "INSERT INTO schema_migrations VALUES (2, '" + strings.Repeat("a", 64) + "', 0)", "PRAGMA user_version = 2"} {
+			if _, err := db.ExecContext(t.Context(), stmt); err != nil {
+				t.Fatal(stmt, err)
+			}
+		}
+	}
+	t.Cleanup(func() { convertHook = nil })
+	if _, err := OpenClient(t.Context(), path, Options{}); !errors.Is(err, ErrNewer) {
+		t.Fatal("newer after conversion:", err)
+	}
+}
+
+// A commit with an unknown outcome stops the client: the write fails and so
+// does every later one.
+func TestFailedCommitStopsClient(t *testing.T) {
+	path := tempPath(t)
+	c := openClient(t, path)
+	commitTx = func(tx *sql.Tx) error {
+		_ = tx.Rollback()
+		return errors.New("commit failed")
+	}
+	t.Cleanup(func() { commitTx = (*sql.Tx).Commit })
+	if err := c.InsertHistory(t.Context(), clientEvent("local", "e1", "tool.dispatch.admitted")); !errors.Is(err, catalogdb.ErrStorage) {
+		t.Fatal("failed commit:", err)
+	}
+	select {
+	case <-c.Lost():
+	default:
+		t.Fatal("client not stopped")
+	}
+	commitTx = (*sql.Tx).Commit
+	if err := c.InsertHistory(t.Context(), clientEvent("local", "e2", "tool.dispatch.admitted")); !errors.Is(err, lease.ErrLocked) {
+		t.Fatal("write after a failed commit:", err)
+	}
+	if n := count(t, path, "history_events"); n != 0 {
+		t.Fatal("rows", n)
 	}
 }

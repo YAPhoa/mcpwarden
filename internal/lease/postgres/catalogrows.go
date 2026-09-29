@@ -65,13 +65,6 @@ func classify(err error) error {
 	return catalogdb.ErrStorage
 }
 
-func EnsureOwner(ctx context.Context, db DB, owner string) error {
-	if _, err := db.Exec(ctx, "INSERT INTO mcpwarden_security.owners(owner_id) VALUES ($1) ON CONFLICT DO NOTHING", owner); err != nil {
-		return classify(err)
-	}
-	return nil
-}
-
 // PutAccount inserts or updates an account. The username never changes.
 func PutAccount(ctx context.Context, db DB, a catalogdb.Account) error {
 	return one(db.Exec(ctx, `INSERT INTO mcpwarden_security.catalog_accounts(owner_id,username,created_at,updated_at,sealed)

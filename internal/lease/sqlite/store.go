@@ -25,7 +25,14 @@ import (
 
 // ErrInUse is returned by Open when another mcpwarden process holds the
 // database.
-var ErrInUse = fmt.Errorf("%w: database in use by another mcpwarden process (a gateway, or --stdio clients); stop it, or give this gateway its own storage.path", lease.ErrLocked)
+var ErrInUse error = lockedError("database in use by another mcpwarden process (a gateway, or --stdio clients); stop it, or give this gateway its own storage.path")
+
+// lockedError matches lease.ErrLocked, so callers treat it as locked
+// execution, but prints only its own advice.
+type lockedError string
+
+func (e lockedError) Error() string        { return string(e) }
+func (e lockedError) Is(target error) bool { return target == lease.ErrLocked }
 
 // Store deadlines. A statement that reaches one is a real stall, so the store
 // fails. The executor's busy timeout is below the owner deadline: SQLite's

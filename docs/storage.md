@@ -207,6 +207,12 @@ database, and only while no other mcpwarden process is attached:
    gap; the client then checks again, or goes to step 3 if it holds no lock.
 3. It waits 50 to 100 ms and goes back to step 1.
 
+Each time it lets go of the lock it also closes its connection, and it records
+the database file's identity before the serving connection opens and checks it
+again after the version check. A file replaced while the client starts is
+never served through a connection to the old file: the client goes round the
+loop and serves the file at the path.
+
 After 10 seconds without serving it refuses with "database in use by a gateway,
 or needs a migration while other mcpwarden clients use it; connect over HTTP,
 or close the other clients". Clients that start together on a missing database
@@ -221,7 +227,9 @@ change the catalog; use the panel". It writes only history: each event, its
 `history_tools` update and its `history_open` change in one `BEGIN IMMEDIATE`
 transaction, after checking that the database and lock paths still name the
 files it opened. A write that cannot get the database within the busy timeout
-fails, as any failed admission does. Stdio calls are recorded for owner
+fails, as any failed admission does, and the call is not dispatched. A
+replaced database or lock file, or a commit with an unknown outcome, stops the
+client: the process exits and the MCP client can start it again. Stdio calls are recorded for owner
 `local`, which the panel shows only in operator mode (a bearer token, or no
 downstream auth on loopback).
 
@@ -265,7 +273,9 @@ lock file, unsafe paths, the settings, the migration ledger, a killed process,
 busy and replaced files, fatal codes, forbidden conflict clauses, the history
 index plans, and the stdio client: shared use, the exclusion of gateway and
 clients in both directions, creation by clients that start together, the
-conversion gap, migration only when alone, and replaced files.
+conversion gap, migration only when alone, the version check after the
+conversion, refusals without waiting, files replaced while starting or
+serving, a failed commit, and a busy database refusing a call before dispatch.
 `TestHistoryScale` (tag `historyscale`) holds pages to 500 ms at 1,000,000
 calls on each store. The gateway's tests run on SQLite, and its owner flows
 also on PostgreSQL under `TestOwnerFlowsOnPostgres`.

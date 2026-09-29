@@ -60,7 +60,7 @@ The local binary runs only the server; connect an MCP client to `http://127.0.0.
 
 ### Stdio clients
 
-`--stdio` serves one MCP client over stdin and stdout. It needs SQLite storage (the default) and cannot use a database a running gateway holds: give the stdio config its own `storage.path`, or connect the client to a gateway over HTTP. Several stdio clients with the same config can share one database, on the same host and OS user; this rules out the Compose volume and a Docker Desktop bind mount. Stdio serves config upstreams and connectors without authentication; connectors that need the vault work over HTTP only. The stdio config must set the catalog key variable, so keep that config file private.
+`--stdio` serves one MCP client over stdin and stdout. It needs SQLite storage (the default) and cannot use a database a running gateway holds: give the stdio config its own `storage.path`, or connect the client to a gateway over HTTP. Several stdio clients with the same config can share one database, on the same host and OS user; this rules out the Compose volume and a Docker Desktop bind mount. Stdio serves config upstreams and owner `local`'s connectors that need no credentials; connectors that need the vault work over HTTP only. Use an absolute `storage.path` in a stdio config: MCP clients choose the working directory, so a relative path can name a different file on each launch. The stdio config must set the catalog key variable, so keep that config file private.
 
 To use it from Claude Desktop, add this to `claude_desktop_config.json` with absolute paths:
 

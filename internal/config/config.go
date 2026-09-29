@@ -28,9 +28,10 @@ type Config struct {
 	Storage        *Storage       `yaml:"storage"`
 	OwnerSecurity  *OwnerSecurity `yaml:"owner_security"`
 	Token          string         `yaml:"-"`
-	// Removed keys, parsed only to refuse them with their replacement.
-	Audit   any `yaml:"audit"`
-	Managed any `yaml:"managed_upstreams"`
+	// Removed keys, parsed only to refuse them with their replacement. A
+	// node tells a key present with no value from a missing one.
+	Audit   yaml.Node `yaml:"audit"`
+	Managed yaml.Node `yaml:"managed_upstreams"`
 }
 
 // DefaultStoragePath and DefaultKeyEnv apply when the storage section leaves
@@ -64,8 +65,8 @@ type OwnerSecurity struct {
 	TrustedProxies        []string `yaml:"trusted_proxies"`
 	AllowInsecureLoopback bool     `yaml:"allow_insecure_loopback"`
 	// Removed keys, parsed only to refuse them with their replacement.
-	DatabaseURLEnv any `yaml:"database_url_env"`
-	DatabaseURL    any `yaml:"database_url"`
+	DatabaseURLEnv yaml.Node `yaml:"database_url_env"`
+	DatabaseURL    yaml.Node `yaml:"database_url"`
 }
 
 // ProxyPrefixes accepts explicit, canonical IP networks, never hostnames or a
@@ -144,11 +145,14 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) ResolveAndValidate() error {
-	if c.Managed != nil {
+	if c.Managed.Kind != 0 {
 		return fmt.Errorf("managed_upstreams was replaced by storage; see docs/storage.md")
 	}
-	if c.Audit != nil {
+	if c.Audit.Kind != 0 {
 		return fmt.Errorf("audit was removed: tool-call history is in the storage database; see docs/storage.md")
+	}
+	if c.OwnerSecurity != nil && (c.OwnerSecurity.DatabaseURLEnv.Kind != 0 || c.OwnerSecurity.DatabaseURL.Kind != 0) {
+		return fmt.Errorf("owner_security.database_url_env and database_url were replaced by storage.database_url_env with storage.driver postgres; see docs/storage.md")
 	}
 	if c.Accounts != nil && c.OAuth != nil {
 		return fmt.Errorf("accounts cannot be combined with oauth mode")
@@ -160,9 +164,6 @@ func (c *Config) ResolveAndValidate() error {
 		return err
 	}
 	if c.OwnerSecurity != nil {
-		if c.OwnerSecurity.DatabaseURLEnv != nil || c.OwnerSecurity.DatabaseURL != nil {
-			return fmt.Errorf("owner_security.database_url_env and database_url were replaced by storage.database_url_env with storage.driver postgres; see docs/storage.md")
-		}
 		// Only local-account browser sessions can prove an interactive owner.
 		// Operator bearer and external OAuth modes cannot distinguish a human.
 		if c.Accounts == nil {

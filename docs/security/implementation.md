@@ -63,9 +63,8 @@ New named keys use `mcpw_<32 lowercase hex public-ID characters>_<43 base64url s
 characters>`. The public ID and 32-byte secret are independently random. The full
 token remains SHA-256 verified with constant-time comparison. Both local-account
 and operator/OAuth named-key authentication paths accept the format strictly.
-Legacy `mw_` tokens remain valid. The compatibility replacement endpoint was removed on 2026-09-29.
-Existing API keys receive independent persisted public IDs without altering their
-verifiers, IDs, roles, ownership, expiry, or lifecycle timestamps. Access names show
+The old `mw_` format and the compatibility replacement endpoint were removed on
+2026-09-29; a fresh database cannot hold such keys. Access names show
 collision-aware public suffixes. Stored header values and token verifiers are not
 exposed. Cross-owner `AccessByID` misses now return an empty value as well as false.
 

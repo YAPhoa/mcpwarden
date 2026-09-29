@@ -197,6 +197,14 @@ func TestLedgerRefusals(t *testing.T) {
 			if _, err := Open(t.Context(), path, Options{}); !errors.Is(err, c.want) {
 				t.Fatalf("got %v, want %v", err, c.want)
 			}
+			// A stdio client refuses it with the same error, at once.
+			start := time.Now()
+			if _, err := OpenClient(t.Context(), path, Options{}); !errors.Is(err, c.want) {
+				t.Fatalf("client: got %v, want %v", err, c.want)
+			}
+			if time.Since(start) > 2*time.Second {
+				t.Fatal("client refusal waited")
+			}
 		})
 	}
 	// An empty file, as a crash between create and migrate leaves, is new.

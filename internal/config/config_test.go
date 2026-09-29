@@ -84,6 +84,11 @@ func TestRemovedKeys(t *testing.T) {
 		"accounts: {}\nowner_security:\n  database_url_env: DSN\n":        "replaced by storage.database_url_env",
 		"accounts: {}\nowner_security:\n  database_url: postgres://x/y\n": "replaced by storage.database_url_env",
 		"accounts: {}\nowner_security:\n  custody_mode: legacy_managed\n": "field custody_mode not found",
+		// Present with no value still names the replacement.
+		"audit:\n":             "audit was removed",
+		"audit: null\n":        "audit was removed",
+		"managed_upstreams:\n": "managed_upstreams was replaced by storage",
+		"accounts: {}\nowner_security:\n  database_url_env:\n": "replaced by storage.database_url_env",
 	} {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
@@ -92,6 +97,15 @@ func TestRemovedKeys(t *testing.T) {
 		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: got %v, want containing %q", yaml, err, want)
 		}
+	}
+	// The removal message comes before storage's own checks.
+	t.Setenv(DefaultKeyEnv, "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("accounts: {}\nowner_security:\n  database_url_env: DSN\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "replaced by storage.database_url_env") {
+		t.Errorf("removal hidden by the storage key check: %v", err)
 	}
 }
 

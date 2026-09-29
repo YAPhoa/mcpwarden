@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"math/rand/v2"
 	"os"
 	"strconv"
@@ -17,7 +16,7 @@ import (
 
 // ErrClientBusy is returned by OpenClient when it could not start serving
 // within its wait.
-var ErrClientBusy = fmt.Errorf("%w: database in use by a gateway, or needs a migration while other mcpwarden clients use it; connect over HTTP, or close the other clients", lease.ErrLocked)
+var ErrClientBusy error = lockedError("database in use by a gateway, or needs a migration while other mcpwarden clients use it; connect over HTTP, or close the other clients")
 
 // clientWait bounds OpenClient's lock loop. clientBusyTimeout is the busy
 // wait of each history write: clients share the file only with each other.
@@ -28,9 +27,15 @@ const (
 	clientDeadline    = 5 * time.Second
 )
 
-// convertHook runs in the gap of the exclusive-to-shared conversion, where
-// another process can take the lock. Tests only.
-var convertHook func()
+// Test hooks: convertHook runs in the gap of the exclusive-to-shared
+// conversion, where another process can take the lock; inspectHook runs
+// once inspect's connection is open; commitTx commits a history
+// transaction.
+var (
+	convertHook func()
+	inspectHook func()
+	commitTx    = (*sql.Tx).Commit
+)
 
 // Client is a --stdio process's view of the database. It holds the lock file
 // shared for its whole life, so any number of clients can use the file
@@ -58,6 +63,7 @@ const (
 	dbReady dbState = iota
 	dbCreate
 	dbMigrate
+	dbReplaced // the file changed while it was opened
 )
 
 // OpenClient takes the lock file shared and checks that the database is at
@@ -101,51 +107,45 @@ func OpenClient(ctx context.Context, path string, opt Options) (*Client, error) 
 	if c.lockInfo, err = c.lock.stat(); err != nil || !sameFile(c.lockPath, c.lockInfo) || safeFile(c.lockInfo) != nil {
 		return nil, errors.New("storage lock file is not a private regular file")
 	}
-	if c.file, err = os.Lstat(abs); err != nil {
-		return nil, errors.New("storage database could not be read")
-	}
-	if err := safeFile(c.file); err != nil {
-		return nil, err
-	}
 	ok = true
 	return c, nil
 }
 
 // attempt is one pass of the lock loop. It reports true when the client
-// holds the lock shared on a database at this build's schema; false means
-// the lock was not free and the caller waits and tries again.
+// holds the lock shared on a database at this build's schema, served by a
+// connection opened in this pass; false means the lock was not free, or the
+// file was replaced while the pass opened it, and the caller waits and tries
+// again. Whenever the pass lets go of the lock it also closes the pool, so
+// no connection outlives the lock it was opened under.
 func (c *Client) attempt(ctx context.Context) (bool, error) {
 	if err := c.lock.try(false); err != nil {
-		if errors.Is(err, errBusy) {
-			return false, nil
-		}
-		return false, errors.New("storage lock file could not be locked")
+		return false, lockErr(err)
 	}
 	state, err := c.inspect(ctx)
-	if err != nil || state == dbReady {
-		if err != nil {
-			_ = c.lock.unlock()
+	if err == nil && state == dbReady {
+		return true, nil
+	}
+	if err != nil || state == dbReplaced {
+		if rerr := c.release(); err == nil {
+			err = rerr
 		}
-		return err == nil, err
+		return false, err
 	}
 	// Creating or migrating needs every other client gone.
-	if err := c.lock.unlock(); err != nil {
-		return false, errors.New("storage lock file could not be unlocked")
+	if err := c.release(); err != nil {
+		return false, err
 	}
 	if err := c.lock.try(true); err != nil {
-		if errors.Is(err, errBusy) {
-			return false, nil
-		}
-		return false, errors.New("storage lock file could not be locked")
+		return false, lockErr(err)
 	}
-	if state, err = c.inspect(ctx); err == nil && state != dbReady {
+	if state, err = c.inspect(ctx); err == nil && (state == dbCreate || state == dbMigrate) {
 		err = c.create(ctx)
 	}
 	// The conversion is not atomic on either platform, so it is done in two
 	// steps; another process may take the lock in between.
-	if uerr := c.lock.unlock(); err != nil || uerr != nil {
+	if rerr := c.release(); err != nil || rerr != nil {
 		if err == nil {
-			err = errors.New("storage lock file could not be unlocked")
+			err = rerr
 		}
 		return false, err
 	}
@@ -153,20 +153,40 @@ func (c *Client) attempt(ctx context.Context) (bool, error) {
 		convertHook()
 	}
 	if err := c.lock.try(false); err != nil {
-		if errors.Is(err, errBusy) {
-			return false, nil
-		}
-		return false, errors.New("storage lock file could not be locked")
+		return false, lockErr(err)
 	}
 	if state, err = c.inspect(ctx); err != nil || state != dbReady {
-		_ = c.lock.unlock()
+		_ = c.release()
 		return false, err
 	}
 	return true, nil
 }
 
+// lockErr maps a failed try: a held lock means wait and try again.
+func lockErr(err error) error {
+	if errors.Is(err, errBusy) {
+		return nil
+	}
+	return errors.New("storage lock file could not be locked")
+}
+
+// release closes the pool and unlocks the lock file.
+func (c *Client) release() error {
+	if c.db != nil {
+		c.db.Close()
+		c.db = nil
+	}
+	if err := c.lock.unlock(); err != nil {
+		return errors.New("storage lock file could not be unlocked")
+	}
+	return nil
+}
+
 // inspect reports what the database needs without creating it. The caller
-// holds the lock.
+// holds the lock and the pool is closed. The file's identity is recorded
+// before the connection opens and checked again after the ledger read, as
+// the gateway's Open does, so a ready database is the file the connection
+// reads and the file every later write checks against.
 func (c *Client) inspect(ctx context.Context) (dbState, error) {
 	info, err := os.Lstat(c.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -186,17 +206,23 @@ func (c *Client) inspect(ctx context.Context) (dbState, error) {
 		return 0, err
 	}
 	defer conn.Close()
+	if inspectHook != nil {
+		inspectHook()
+	}
 	n, err := ledger(ctx, conn)
 	switch {
 	case errors.Is(err, ErrMigration), errors.Is(err, ErrNewer), errors.Is(err, ErrForeign), errors.Is(err, ErrSchemaReset):
 		return 0, err
 	case err != nil:
 		return 0, errors.New("storage database could not be read")
+	case !sameFile(c.path, info):
+		return dbReplaced, nil
 	case n == 0:
 		return dbCreate, nil
 	case n < len(migrations):
 		return dbMigrate, nil
 	}
+	c.file = info
 	return dbReady, nil
 }
 
@@ -293,7 +319,7 @@ func (c *Client) transaction(ctx context.Context, fn func(*tx) error) error {
 		}
 		return err
 	}
-	if err := sqlTx.Commit(); err != nil {
+	if err := commitTx(sqlTx); err != nil {
 		end, cancel := context.WithTimeout(context.Background(), time.Second)
 		_, _ = conn.ExecContext(end, "ROLLBACK")
 		cancel()

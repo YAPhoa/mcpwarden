@@ -12,11 +12,11 @@ Start from [the example config](../../examples/config.yaml) for a local binary (
 
 ## Storage
 
-The catalog, tool-call history and the owner vault live in one database, set by the `storage` section: a SQLite file (the default, `/data/mcpwarden.db` in Compose) or PostgreSQL. `storage.key_env` names the catalog key, base64-encoded 32 bytes. The gateway refuses to start if the database is unavailable and stops if it is lost; it never falls back. See [storage](../storage.md) for both drivers, backups and the threat model.
+The catalog, tool-call history and the owner vault live in one database, set by the `storage` section: a SQLite file (the default, `/data/mcpwarden.db` in Compose) or PostgreSQL. `storage.key_env` names the catalog key, base64-encoded 32 bytes; with `driver: postgres`, `storage.database_url_env` names the variable holding the runtime role's URL. The gateway refuses to start if the database is unavailable and stops if it is lost; it never falls back. See [storage](../storage.md) for both drivers, backups and the threat model.
 
 In Compose, the key comes from `MCPWARDEN_CREDENTIAL_KEY` in `.env`. Keep it stable across restarts; losing it makes saved connections unreadable.
 
-The keys `audit`, `managed_upstreams` and `owner_security.database_url_env` were removed and are refused at startup, with their replacement in the message. A database created by a development build before the schema reset is refused too; start with a new one.
+The keys `audit`, `managed_upstreams`, `owner_security.database_url_env` and `owner_security.database_url` were removed and are refused at startup, with their replacement in the message. A database created by a development build before the schema reset is refused too; start with a new one.
 
 ## Config and personal upstreams
 
@@ -50,7 +50,7 @@ The sample `npx` upstream requires Node.js at runtime; the gateway and its tests
 
 ## Stdio clients
 
-`--stdio` serves one MCP client over stdin and stdout. It needs SQLite storage and cannot share the database with a running gateway: give the gateway and the stdio clients separate `storage.path` values, or connect the clients over HTTP. Several stdio clients with the same config can share one database. They serve config upstreams and owner `local`'s connectors without authentication, and record their calls for owner `local`. See [stdio clients](../storage.md#stdio-clients).
+`--stdio` serves one MCP client over stdin and stdout. It needs SQLite storage and cannot share the database with a running gateway: give the gateway and the stdio clients separate `storage.path` values, or connect the clients over HTTP. Several stdio clients with the same config can share one database. Use an absolute `storage.path` there, since the MCP client chooses the working directory. They serve config upstreams and owner `local`'s connectors that need no credentials, and record their calls for owner `local`. See [stdio clients](../storage.md#stdio-clients).
 
 ## Call history
 

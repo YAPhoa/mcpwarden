@@ -42,8 +42,7 @@ func (r Record) Admission() Record {
 	return r
 }
 
-// ValidateInvocation applies the same event contract to transactional stores.
-// Legacy records retain their existing separate import/reader path.
+// ValidateInvocation applies the event contract to the history stores.
 func ValidateInvocation(r Record) error {
 	if r.SchemaVersion != 2 {
 		return fmt.Errorf("invalid audit invocation event")

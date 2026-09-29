@@ -38,7 +38,7 @@ policy:
 # gateway: give each its own path, or connect the client over HTTP.
 storage:
   driver: sqlite            # sqlite (default) or postgres
-  path: ./mcpwarden.db      # sqlite only; a local filesystem, not a network share
+  path: ./mcpwarden.db      # sqlite only; a local filesystem, not a network share; absolute for --stdio
   # database_url_env: MCPWARDEN_DATABASE_URL  # postgres only: the runtime role DSN
   key_env: MCPWARDEN_CREDENTIAL_KEY
 

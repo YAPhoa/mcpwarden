@@ -302,22 +302,16 @@ func (a *accessManager) keys(next http.Handler, management bool, fallback http.H
 }
 
 func isAPIKeyAuthorization(value string) bool {
-	return strings.HasPrefix(value, "Bearer mw_") || strings.HasPrefix(value, "Bearer mcpw_")
+	return strings.HasPrefix(value, "Bearer mcpw_")
 }
 
 func authenticateAPIKey(store catalog.Repository, token string) (catalog.AccessRecord, bool) {
-	var publicID string
-	if strings.HasPrefix(token, "mcpw_") {
-		var ok bool
-		publicID, ok = identity.ParseAccessToken(token)
-		if !ok {
-			return catalog.AccessRecord{}, false
-		}
-	} else if !strings.HasPrefix(token, "mw_") {
+	publicID, ok := identity.ParseAccessToken(token)
+	if !ok {
 		return catalog.AccessRecord{}, false
 	}
 	record, ok := store.AuthenticateAccess(tokenHash(token), "api_key")
-	if !ok || publicID != "" && record.PublicID != publicID {
+	if !ok || record.PublicID != publicID {
 		return catalog.AccessRecord{}, false
 	}
 	return record, true
