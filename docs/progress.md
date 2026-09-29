@@ -1609,3 +1609,43 @@ Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
 `historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
 `go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
 Chromium owner flows passed.
+
+## 2026-09-29 — Single database (removal plan PR 4)
+
+Storage is required (SQLite by default, PostgreSQL supported); the file
+catalog, JSONL history and `mcpwarden-catalog` are removed; both schemas are
+reset to one baseline and pre-reset databases are refused; `--stdio` is a
+SQLite client that shares the database with other stdio clients, never with a
+gateway; `compose.tls.yaml` adds HTTPS for the panel. See
+[decisions](decisions.md) and [storage](storage.md).
+
+Local validation on the branch head: `gofmt`, `go build ./...`, `go vet ./...`
+(also with the `flowtest` and `historyscale` tags, and for Windows and macOS),
+`go mod tidy -diff`, `integrity.py`, and `go test -race -count=1 ./...` with
+the PostgreSQL fixture enabled all passed, as did the `CGO_ENABLED=0` build and
+SQLite tests. `npm test` in `ui/` passed, and the owner browser flows passed in
+Chromium on SQLite and on PostgreSQL; Firefox and WebKit are not installed in
+this environment and run in CI. `scripts/ci/containers.py` passed against
+images built from this tree with the HTTPS override (the images were built
+from host binaries because the container build cannot download modules here).
+
+## 2026-09-29 — PR 4 review round 1
+
+A stdio client now closes its connection whenever its lock loop lets go of the
+lock, records the database file before the serving connection opens and checks
+it after the version check, so a file replaced while it starts is never served
+through the old file. New tests cover that, a replaced lock file, the version
+check after the lock conversion, a failed commit, `runStdio` stopping on a lost
+database, a busy database refusing a stdio call before dispatch, the client's
+refusals of foreign, edited and pre-reset databases, and the removed
+`catalog.Open` and `audit.Open`. The old `mw_` key prefix is no longer
+accepted. The PostgreSQL gateway reads the ledger before its privilege check,
+so every pre-reset version names the reset. Removed configuration keys with no
+value are refused, and the `owner_security` removal message comes before the
+storage checks. The SQLite in-use errors no longer start with "execution is
+locked:". Unused functions and stale docs were removed.
+
+`gofmt`, `go build ./...`, `go vet ./...` (plain, `flowtest`, `historyscale`,
+Windows and macOS), `go mod tidy -diff`, `integrity.py`, `go test -race
+-count=1 ./...` with the PostgreSQL fixture, the `CGO_ENABLED=0` build and
+SQLite tests, `npm test` and the Chromium owner flows on SQLite passed.

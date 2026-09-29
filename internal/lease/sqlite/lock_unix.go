@@ -34,6 +34,9 @@ func (l *lockFile) try(exclusive bool) error {
 	return err
 }
 
+// unlock releases the lock and keeps the descriptor open.
+func (l *lockFile) unlock() error { return syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN) }
+
 func (l *lockFile) close() error { return l.f.Close() }
 
 func (l *lockFile) stat() (os.FileInfo, error) { return l.f.Stat() }

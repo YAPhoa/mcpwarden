@@ -85,7 +85,7 @@ func (s *sealer) open(aad string, data []byte, v any) error {
 		return errSealed
 	}
 	defer clear(plain)
-	// The file catalog decodes with encoding/json; keep the same decoder.
+	// Sealed records decode with encoding/json.
 	if json.Unmarshal(plain, v) != nil {
 		return errSealed
 	}

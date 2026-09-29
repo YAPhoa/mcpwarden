@@ -1,12 +1,13 @@
 # Browser vault primitives and encrypted storage
 
 This document covers the spec's root/credential wrapping formats, browser
-cryptographic primitives, and PostgreSQL ciphertext storage. The owner HTTP API
-(`docs/security/owner-api.md`) and the owner console's setup, recovery, unlock,
-credential and access-window screens (`/vault`, see `ui/DESIGN.md`) now use them
-when `owner_security` is enabled. The application custody switch is still
-pending: ordinary tool calls keep using the legacy encrypted file, and merely
-serving these assets does not activate client-release custody.
+cryptographic primitives, and ciphertext storage on PostgreSQL or SQLite. The
+owner HTTP API (`docs/security/owner-api.md`) and the owner console's setup,
+recovery, unlock, credential and access-window screens (`/vault`, see
+`ui/DESIGN.md`) use them when `owner_security` is enabled. Vault custody is the
+only custody: personal connectors with credentials run only through access
+windows, and merely serving these assets does not activate client-release
+custody.
 
 ## Browser boundary
 
@@ -60,11 +61,13 @@ recovery confirmation and accessible owner screens remain integration work.
 
 ## PostgreSQL contract
 
-Migration `002_vault.sql` extends the unchanged v1 migration. The migrator verifies
+The vault tables are part of the `001_baseline.sql` schema. The migrator verifies
 an exact contiguous prefix of the pinned SHA-256 ledger, applies missing versions
 atomically, and reapplies least-privilege grants. Empty, edited, gapped and unknown
-ledgers fail closed. The executor requires the entire current schema (v3, which adds approval policies), and
+ledgers fail closed. The executor requires the entire current schema, and
 migration still excludes an active executor through the shared advisory lock.
+SQLite keeps the same tables, checks and guard triggers
+([storage](../storage.md#sqlite)).
 
 The database stores only public context and ciphertext: current root pointers,
 immutable pairs of passphrase/recovery wrappers, credential heads/tombstones,
@@ -79,8 +82,8 @@ Writes require expected current revisions. Creation starts at epoch/revision 1;
 same-epoch writes increment revision exactly once and keep wrapping/destination
 metadata fixed. Rotation increments epoch once and starts revision 1 with a fresh
 CEK wrapper. Deletion retains the current pointer and all historical rows, and
-cannot resurrect that credential ID. The catalog must retain a required-custody
-tombstone so deletion never falls through to legacy dispatch.
+cannot resurrect that credential ID. The catalog keeps a credential-free
+connector tombstone, and a deleted connector never dials.
 
 Uniqueness constraints reject repeated nonces within a credential epoch and
 across all credential-key wraps under the same root wrapping key. SQL checks bind

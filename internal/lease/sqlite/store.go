@@ -25,7 +25,14 @@ import (
 
 // ErrInUse is returned by Open when another mcpwarden process holds the
 // database.
-var ErrInUse = fmt.Errorf("%w: database in use by another mcpwarden process (a gateway, or --stdio clients); stop it, or give this gateway its own storage.path", lease.ErrLocked)
+var ErrInUse error = lockedError("database in use by another mcpwarden process (a gateway, or --stdio clients); stop it, or give this gateway its own storage.path")
+
+// lockedError matches lease.ErrLocked, so callers treat it as locked
+// execution, but prints only its own advice.
+type lockedError string
+
+func (e lockedError) Error() string        { return string(e) }
+func (e lockedError) Is(target error) bool { return target == lease.ErrLocked }
 
 // Store deadlines. A statement that reaches one is a real stall, so the store
 // fails. The executor's busy timeout is below the owner deadline: SQLite's
@@ -120,7 +127,7 @@ func Open(ctx context.Context, path string, opt Options) (*Store, error) {
 		return nil, err
 	}
 	if err := migrate(openCtx, s.conn); err != nil {
-		if errors.Is(err, ErrMigration) || errors.Is(err, ErrNewer) || errors.Is(err, ErrForeign) {
+		if errors.Is(err, ErrMigration) || errors.Is(err, ErrNewer) || errors.Is(err, ErrForeign) || errors.Is(err, ErrSchemaReset) {
 			return nil, err
 		}
 		return nil, errors.New("storage database could not be migrated")

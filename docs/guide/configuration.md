@@ -1,6 +1,6 @@
 # Configuration and operations
 
-Start from [the example config](../../examples/config.yaml) for a local binary or [the Compose config](../../examples/compose-config.yaml) for Docker. `${VAR}` placeholders must be set in the process environment.
+Start from [the example config](../../examples/config.yaml) for a local binary (listening on `127.0.0.1:8787`) or [the Compose config](../../examples/compose-config.yaml) for Docker (listening on `0.0.0.0:8787` inside the container, published on 127.0.0.1 only). `${VAR}` placeholders must be set in the process environment.
 
 ## Listening and downstream auth
 
@@ -10,13 +10,32 @@ Start from [the example config](../../examples/config.yaml) for a local binary o
 - Set `allowed_origins` for non-loopback browser origins; requests with no Origin and loopback origins are accepted.
 - Upstream HTTP headers are configured independently and never inherit a downstream token.
 
-## Managed upstreams
+## Storage
 
-Panel registration requires `managed_upstreams.path` and `managed_upstreams.key_env` in YAML; the key must be base64-encoded 32 bytes. Remote URLs must use HTTPS, except loopback HTTP for local testing.
-
-Personal connectors store header names only. Their credentials live in the owner vault, which needs `owner_security` in accounts mode; without it, only connectors without authentication can be added. `owner_security.custody_mode` no longer exists, and a config that still sets it fails to load. A catalog written by an older build (with stored header values or upstream OAuth settings) is refused with "created by an older build; start with a new catalog"; there is no conversion.
+The catalog, tool-call history and the owner vault live in one database, set by the `storage` section: a SQLite file (the default, `/data/mcpwarden.db` in Compose) or PostgreSQL. `storage.key_env` names the catalog key, base64-encoded 32 bytes; with `driver: postgres`, `storage.database_url_env` names the variable holding the runtime role's URL. The gateway refuses to start if the database is unavailable and stops if it is lost; it never falls back. See [storage](../storage.md) for both drivers, backups and the threat model.
 
 In Compose, the key comes from `MCPWARDEN_CREDENTIAL_KEY` in `.env`. Keep it stable across restarts; losing it makes saved connections unreadable.
+
+The keys `audit`, `managed_upstreams`, `owner_security.database_url_env` and `owner_security.database_url` were removed and are refused at startup, with their replacement in the message. A database created by a development build before the schema reset is refused too; start with a new one.
+
+## Config and personal upstreams
+
+Upstreams in YAML are served to every account and OAuth subject, with the operator's credentials. On a personal gateway, set `accounts.allow_registration: false` once your own account exists, before adding a credentialed config upstream.
+
+Personal connectors are added in the panel. Remote URLs must use HTTPS, except loopback HTTP for local testing. They store header names only; their credentials live in the owner vault, which needs `owner_security` in accounts mode. Without it, only connectors without authentication can be added.
+
+## HTTPS for the panel
+
+The owner vault routes refuse plain HTTP. In Compose, start with the HTTPS override:
+
+```sh
+mkdir -p tls && mkcert -cert-file tls/cert.pem -key-file tls/key.pem localhost 127.0.0.1
+docker compose -f compose.yaml -f compose.tls.yaml up -d
+```
+
+The panel is then at `https://localhost:8443/`, published on 127.0.0.1 like the other ports. `MCPWARDEN_TLS_DIR` selects another certificate directory. The override gives the Compose network the fixed subnet `172.30.87.0/24` and pins the ui container at `172.30.87.2`, the address `owner_security.trusted_proxies` names in the Compose config; if that subnet is taken on your host, change both. nginx overwrites `X-Forwarded-Proto` with its own scheme, so the gateway accepts owner routes only through the HTTPS server. Without the override the panel works over HTTP, but the vault stays closed.
+
+A gateway run directly on the host can use a TLS reverse proxy listed in `trusted_proxies`, or `allow_insecure_loopback: true` for development on loopback.
 
 ## Stdio upstreams
 
@@ -29,11 +48,13 @@ The sample `npx` upstream requires Node.js at runtime; the gateway and its tests
 - `/healthz` reports process liveness.
 - `/readyz` reports ready when at least one active upstream is healthy. Its public body shows only static or local upstream status, so personal provider names are not disclosed.
 
-## Audit log
+## Stdio clients
 
-Audit records contain workspace owner, stable tool ID, tool name, upstream, decision, status, duration, response item count, structured-response presence, session ID, and a SHA-256 hash of canonical JSON arguments. Raw arguments and results are never written to the audit file.
+`--stdio` serves one MCP client over stdin and stdout. It needs SQLite storage and cannot share the database with a running gateway: give the gateway and the stdio clients separate `storage.path` values, or connect the clients over HTTP. Several stdio clients with the same config can share one database. Use an absolute `storage.path` there, since the MCP client chooses the working directory. They serve config upstreams and owner `local`'s connectors that need no credentials, and record their calls for owner `local`. See [stdio clients](../storage.md#stdio-clients).
 
-Tool dispatch requires a file-backed `audit.path` (the Compose default); stdout (`-`) is rejected at startup. See [Tool call history](call-history.md) for how records are written and read.
+## Call history
+
+History records contain workspace owner, stable tool ID, tool name, upstream, decision, status, duration, response item count, structured-response presence, caller, and a SHA-256 hash of canonical JSON arguments. Raw arguments and results are never stored. Each call's admission is committed before dispatch. See [Tool call history](call-history.md).
 
 ## Smoke test
 

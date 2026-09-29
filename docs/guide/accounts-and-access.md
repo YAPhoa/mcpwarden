@@ -13,8 +13,7 @@ accounts:
   allow_registration: true
 ```
 
-- Accounts require `managed_upstreams`.
-- Set `allow_registration: false` after the intended users register if signup should be closed.
+- Set `allow_registration: false` after the intended users register. On a personal gateway, close it once your own account exists: config upstreams use the operator's credentials for every account.
 - Accounts cannot be combined with external [OAuth mode](oauth-mode.md).
 - Account registration grants a personal workspace, not global administrator privileges.
 - Shared config upstreams remain available to every account, so use config entries only for intentionally shared services.
@@ -32,7 +31,7 @@ accounts:
 
 ## Passwords and browser sessions
 
-- The existing encrypted catalog stores salted PBKDF2-SHA256 password hashes (600,000 iterations).
+- The database stores salted PBKDF2-SHA256 password hashes (600,000 iterations).
 - Browser sessions use HttpOnly, SameSite=Strict cookies, expire after 12 hours, and persist across gateway restarts.
 - Cookies require HTTPS outside loopback; serve the public panel over HTTPS.
 - JSON requests with a custom header and origin checks protect session mutations.
@@ -48,7 +47,6 @@ Use **Access** after sign-in to create a named, expiring API key for `/mcp`. Key
 | **Client** | Enabled upstream tools and the per-provider refresh endpoint. No other management API. |
 | **Admin** | Client tools plus provider listing, addition, removal, enable/disable, and tool visibility management. |
 
-- Existing single client tokens migrate to client-only keys.
 - Browser session cookies are not accepted for MCP connections.
 - The shared operator token remains usable through **Use an access token**; existing operator connections stay in that separate shared workspace.
 
@@ -56,7 +54,6 @@ Use **Access** after sign-in to create a named, expiring API key for `/mcp`. Key
 
 - New named keys use `mcpw_<public ID>_<secret>`.
 - Access pages display a short public-ID suffix, lengthened on collisions, and the full public ID in details.
-- Existing `mw_` keys retain their tokens and verifier hashes and receive independent public IDs on catalog load.
 - Call history keeps the exact authenticated access ID and label snapshot across renames and reconnects; `GET /api/history?actor_access_id=...` filters that owner's calls for one access record.
 - Public handles do not grant authentication or approval authority.
 
@@ -72,10 +69,10 @@ Server-enforced limits per workspace:
 
 Revocation and expiry free capacity. New keys expire after 1–365 days. MCP sessions expire with their credential and have a 30-minute idle timeout; process restart ends old MCP connections. Revoking a key closes its MCP connections; revoking an MCP connection leaves its key usable. Session IDs are bound to the exact credential and role, not just the account.
 
-OAuth revocation blocks that observed access token locally at this gateway; it does not revoke the identity provider's grant or future tokens. The configured operator bootstrap token is managed in configuration and is outside the minted-key list and limit. Encrypted lifecycle records retain creation, update, last-use, end/revocation and deletion times where applicable; provider deletion retains a credential-free UUID tombstone.
+OAuth revocation blocks that observed access token locally at this gateway; it does not revoke the identity provider's grant or future tokens. The configured operator bootstrap token is managed in configuration and is outside the minted-key list and limit. Sealed lifecycle records retain creation, update, last-use, end/revocation and deletion times where applicable; provider deletion retains a credential-free UUID tombstone.
 
 ## Workspaces and storage
 
 Each registered upstream belongs to one gateway user. Operator-token access has one shared user named `local`; registered accounts use separate internal identities. With OAuth mode, the validated access-token `sub` identifies the user for both `/mcp` and `/api`; each user can register a separate endpoint, even under the same upstream name (only connectors without authentication, since the owner vault needs panel accounts). Static YAML upstreams remain available to every user.
 
-By default, the gateway stores personal connections and the last successful tool discovery in an AES-GCM encrypted file under `/data`. Managed state and audit history sit behind separate backend interfaces so a database adapter can be added without changing runtime or authentication logic; a PostgreSQL driver and schema are not bundled for the catalog. See [the catalog storage contract](../catalog-storage.md) and [the history storage contract](../history-storage.md).
+Personal connections, the last successful tool discovery, accounts, access records and call history are stored in the gateway's database (SQLite by default, or PostgreSQL), with secret-bearing fields sealed under the catalog key. See [storage](../storage.md).

@@ -29,13 +29,27 @@ var _ audit.Store = (*History)(nil)
 
 func NewHistory(db HistoryDB) *History { return &History{db: db} }
 
+// HistoryWriter writes history rows without reading them.
+type HistoryWriter interface {
+	InsertHistory(context.Context, catalogdb.HistoryRow) error
+}
+
+// NewHistoryWriter is the history of a --stdio process: it writes through
+// the client and reads nothing, since pages are served over HTTP.
+func NewHistoryWriter(db HistoryWriter) *History { return &History{db: writeOnly{db}} }
+
+type writeOnly struct{ HistoryWriter }
+
+func (writeOnly) QueryHistory(context.Context, catalogdb.HistoryQuery) (catalogdb.HistoryResult, error) {
+	return catalogdb.HistoryResult{}, catalogdb.ErrStorage
+}
+
 func (h *History) Write(r audit.Record) error {
 	r, raw, err := audit.Encode(r)
 	if err != nil {
 		return err
 	}
 	row := historyRow(r, string(raw))
-	row.Source = "live"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := h.db.InsertHistory(ctx, row); err != nil {
@@ -45,7 +59,7 @@ func (h *History) Write(r audit.Record) error {
 }
 
 // historyRow derives the indexed columns. r must be the normalized record
-// (audit.Encode or audit.ParseLine).
+// (audit.Encode).
 func historyRow(r audit.Record, raw string) catalogdb.HistoryRow {
 	row := catalogdb.HistoryRow{OwnerID: r.Owner, EventID: r.EventID, SchemaVersion: r.SchemaVersion, EventType: r.EventType,
 		InvocationID: r.InvocationID, ToolID: r.ToolID, Tool: r.Tool, Upstream: r.Upstream, Status: r.Status,
@@ -58,18 +72,13 @@ func historyRow(r audit.Record, raw string) catalogdb.HistoryRow {
 	return row
 }
 
-// decodeHistory restores a stored record as the JSONL reader returns it,
-// including the derived fields of v0 records.
+// decodeHistory restores a stored record and checks it against its row.
 func decodeHistory(row catalogdb.HistoryRow) (audit.Record, error) {
 	var r audit.Record
 	if err := json.Unmarshal([]byte(row.Record), &r); err != nil {
 		return r, fmt.Errorf("stored history record is invalid")
 	}
-	if r.SchemaVersion == 0 {
-		r.EventID = row.EventID
-		r.CompletedAt = r.TS.Add(time.Duration(r.DurationMS) * time.Millisecond)
-	}
-	if r.EventID != row.EventID || r.Owner != row.OwnerID {
+	if r.SchemaVersion != 2 || r.EventID != row.EventID || r.Owner != row.OwnerID {
 		return r, fmt.Errorf("stored history record is invalid")
 	}
 	return r, nil

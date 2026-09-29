@@ -6,7 +6,6 @@ The admin panel talks to the gateway through this authenticated HTTP API. Respon
 | --- | --- |
 | `GET /api/auth/options` | Public sign-in mode and registration availability. |
 | `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout` | Basic local account registration and browser sessions. |
-| `POST /api/auth/client-token` | Legacy compatibility: replace the legacy client-only key from a browser session. |
 | `GET/POST /api/access` | List access records or mint a named admin/client API key (admin only). |
 | `PATCH/DELETE /api/access/{id}` | Rename or revoke an owned key/session (admin only). |
 | `GET /api/status` | Readiness and validated workspace identity (no credentials). The session includes `vault: true` when this workspace can hold credentialed connectors: `owner_security` is on and the caller is signed in to a local account. |

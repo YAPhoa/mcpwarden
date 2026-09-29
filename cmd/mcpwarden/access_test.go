@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,35 +23,26 @@ import (
 func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	store, err := catalog.Open(t.TempDir()+"/store", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := config.Config{Accounts: &config.Accounts{}}
+	db := testStorage(t, &cfg)
+	store := db.repo
 	for _, owner := range []string{"alice", "bob"} {
 		if err := store.AddAccount(catalog.Account{ID: owner, Username: owner}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	clientToken, clientPublicID := identity.NewAccessToken()
-	keys := []struct{ id, owner, role, token string }{{"admin", "alice", "admin", "mw_admin"}, {"client", "alice", "client", clientToken}, {"bob", "bob", "client", "mw_bob"}}
-	for _, k := range keys {
-		publicID := ""
-		if k.token == clientToken {
-			publicID = clientPublicID
-		}
-		if err := store.AddAccess(catalog.AccessRecord{ID: k.id, PublicID: publicID, Owner: k.owner, Role: k.role, Name: k.id, Kind: "api_key", SecretHash: tokenHash(k.token), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	addKey := func(id, owner, role string) string {
+		token, publicID := identity.NewAccessToken()
+		if err := store.AddAccess(catalog.AccessRecord{ID: id, PublicID: publicID, Owner: owner, Role: role, Name: id, Kind: "api_key", SecretHash: tokenHash(token), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
+		return token
 	}
-	cfg := config.Config{Accounts: &config.Accounts{}}
-	account := newAccountAuth(store, cfg)
+	adminToken, clientToken, bobToken := addKey("admin", "alice", "admin"), addKey("client", "alice", "client"), addKey("bob", "bob", "client")
+	clientPublicID, _ := identity.ParseAccessToken(clientToken)
+	account := db.accounts
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	log, err := audit.Open(t.TempDir() + "/audit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
-	rs := newRuntimes(ctx, cfg, pol, log, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rs := newRuntimes(ctx, cfg, pol, db.history, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rs.close()
 	_, remote := upstreamForUser(t, "echo")
 	defer func() { rs.close(); remote.Close() }()
@@ -119,14 +109,14 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 		t.Cleanup(func() { s.Close() })
 		return s
 	}
-	admin, client := connect("Admin app", "mw_admin"), connect("Laptop client", clientToken)
+	admin, client := connect("Admin app", adminToken), connect("Laptop client", clientToken)
 	// The workspace cap applies across credentials, not separately per key.
 	var extra []*mcp.ClientSession
 	for i := 0; i < catalog.MaxMCPSessions-2; i++ {
 		extra = append(extra, connect("Additional device", clientToken))
 	}
 	overflowClient := mcp.NewClient(&mcp.Implementation{Name: "Overflow", Version: "1"}, nil)
-	if overflow, err := overflowClient.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL + "/mcp", HTTPClient: privateClient("mw_admin")}, nil); err == nil {
+	if overflow, err := overflowClient.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL + "/mcp", HTTPClient: privateClient(adminToken)}, nil); err == nil {
 		overflow.Close()
 		t.Fatal("eleventh MCP connection was accepted")
 	}
@@ -170,7 +160,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 		t.Fatal("client invoked management tool")
 	}
 	// Same-account privilege changes and cross-owner reuse must both fail.
-	for _, key := range []string{clientToken, "mw_bob"} {
+	for _, key := range []string{clientToken, bobToken} {
 		res := request("POST", "/mcp", key, `{"jsonrpc":"2.0","id":90,"method":"tools/list","params":{}}`, admin.ID())
 		res.Body.Close()
 		if res.StatusCode != 403 {
@@ -190,21 +180,18 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 		t.Fatal("upstream call failed")
 	}
 	entry, _ := rs.get("alice").proxy.Registry.Lookup("remote__echo")
-	history := request("GET", "/api/history?tool_id="+entry.ID, "mw_admin", "", "")
+	history := request("GET", "/api/history?tool_id="+entry.ID, adminToken, "", "")
 	content, _ := io.ReadAll(history.Body)
 	history.Body.Close()
 	if history.StatusCode != 200 || !strings.Contains(string(content), `"total":1`) || strings.Contains(string(content), "args_sha256") || strings.Contains(string(content), `"owner"`) || strings.Contains(string(content), `"session"`) {
 		t.Fatalf("unsafe or missing history: %s", content)
 	}
-	if err := store.AddAccess(catalog.AccessRecord{ID: "bob-admin", Owner: "bob", Role: "admin", Name: "bob-admin", Kind: "api_key", SecretHash: tokenHash("mw_bob_admin")}); err != nil {
-		t.Fatal(err)
-	}
-	history = request("GET", "/api/history?tool_id="+entry.ID, "mw_bob_admin", "", "")
+	history = request("GET", "/api/history?tool_id="+entry.ID, addKey("bob-admin", "bob", "admin"), "", "")
 	content, _ = io.ReadAll(history.Body)
 	history.Body.Close()
 
 	for _, query := range []string{"status=invalid", "from=bad", "from=2026-09-22T00:00:00Z&to=2026-09-21T00:00:00Z", "page=-1"} {
-		invalid := request("GET", "/api/history?"+query, "mw_admin", "", "")
+		invalid := request("GET", "/api/history?"+query, adminToken, "", "")
 		invalid.Body.Close()
 		if invalid.StatusCode != 400 {
 			t.Fatalf("invalid filter accepted: %s", query)
@@ -213,7 +200,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if !strings.Contains(string(content), `"total":0`) {
 		t.Fatal("cross-user history exposed")
 	}
-	rows, total, err := log.History("alice", entry.ID, 1, 25)
+	rows, total, err := historyPage(db.history, "alice", entry.ID)
 	if err != nil || total != 1 || len(rows) != 1 || rows[0].ActorAccessID != "client" || rows[0].ActorPublicID != clientPublicID || rows[0].ActorLabel != "client" {
 		t.Fatal("MCP arguments or clientInfo replaced the authenticated caller")
 	}
@@ -231,11 +218,11 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if call(admin, "remote__echo", map[string]any{}).IsError {
 		t.Fatal("second caller failed")
 	}
-	rows, total, err = log.History("alice", entry.ID, 1, 25)
+	rows, total, err = historyPage(db.history, "alice", entry.ID)
 	if err != nil || total != 4 || len(rows) != 4 || rows[0].ActorAccessID != "admin" || rows[1].ActorAccessID != "client" || rows[1].ActorLabel != "Renamed caller" || rows[2].ActorLabel != "Renamed caller" || rows[3].ActorLabel != "client" {
 		t.Fatal("caller identity or historical label changed across requests/reconnects")
 	}
-	filtered := request("GET", "/api/history?actor_access_id=client&tool_id="+entry.ID, "mw_admin", "", "")
+	filtered := request("GET", "/api/history?actor_access_id=client&tool_id="+entry.ID, adminToken, "", "")
 	filteredBody, _ := io.ReadAll(filtered.Body)
 	filtered.Body.Close()
 	if filtered.StatusCode != 200 || !strings.Contains(string(filteredBody), `"total":3`) || strings.Contains(string(filteredBody), clientToken) || strings.Contains(string(filteredBody), tokenHash(clientToken)) {
@@ -274,7 +261,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if recordID == "" {
 		t.Fatal("MCP session not recorded")
 	}
-	res = request("DELETE", "/api/access/"+recordID, "mw_admin", "", "")
+	res = request("DELETE", "/api/access/"+recordID, adminToken, "", "")
 	res.Body.Close()
 	if res.StatusCode != 204 {
 		t.Fatal("session not revoked")
@@ -288,7 +275,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	}
 	// Revoking a connection leaves its key usable for a new connection.
 	client = connect("Reconnected client", clientToken)
-	res = request("DELETE", "/api/access/client", "mw_admin", "", "")
+	res = request("DELETE", "/api/access/client", adminToken, "", "")
 	res.Body.Close()
 	if res.StatusCode != 204 {
 		t.Fatal("key not revoked")
@@ -305,16 +292,16 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if res.StatusCode != 401 {
 		t.Fatal("revoked key accepted")
 	}
-	res = request("GET", "/api/access", "mw_admin", "", "")
+	res = request("GET", "/api/access", adminToken, "", "")
 	if res.Header.Get("Cache-Control") != "no-store" {
 		t.Fatal("access response can be cached")
 	}
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
-	if strings.Contains(string(raw), "secret_hash") || strings.Contains(string(raw), "mw_admin") {
+	if strings.Contains(string(raw), "secret_hash") || strings.Contains(string(raw), adminToken) {
 		t.Fatal("credential leaked")
 	}
-	rs.audit = rejectAdmissionStore{log}
+	rs.audit = rejectAdmissionStore{db.history}
 	if !call(admin, "warden_remove_provider", map[string]any{"provider": "remote"}).IsError {
 		t.Fatal("management action ignored admission failure")
 	}
@@ -343,20 +330,20 @@ func (s rejectAdmissionStore) Write(r audit.Record) error {
 }
 
 func TestNamedKeyMintAndAuthenticationPaths(t *testing.T) {
-	store, err := catalog.Open(t.TempDir()+"/store", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := config.Config{Accounts: &config.Accounts{}}
+	db := testStorage(t, &cfg)
+	store := db.repo
 	if err := store.AddAccount(catalog.Account{ID: "alice", Username: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddAccess(catalog.AccessRecord{ID: "bootstrap", Owner: "alice", Name: "Bootstrap", Kind: "api_key", Role: "admin", SecretHash: tokenHash("mw_bootstrap")}); err != nil {
+	bootstrap, bootstrapID := identity.NewAccessToken()
+	if err := store.AddAccess(catalog.AccessRecord{ID: "bootstrap", PublicID: bootstrapID, Owner: "alice", Name: "Bootstrap", Kind: "api_key", Role: "admin", SecretHash: tokenHash(bootstrap)}); err != nil {
 		t.Fatal(err)
 	}
 	manager := newAccessManager(store)
-	accounts := newAccountAuth(store, config.Config{Accounts: &config.Accounts{}})
+	accounts := db.accounts
 	req := httptest.NewRequest("POST", "http://localhost/api/access", strings.NewReader(`{"name":"Laptop", "role":"client", "expires_days":1}`))
-	req.Header.Set("Authorization", "Bearer mw_bootstrap")
+	req.Header.Set("Authorization", "Bearer "+bootstrap)
 	out := httptest.NewRecorder()
 	accounts.protect(http.HandlerFunc(manager.handler), true).ServeHTTP(out, req)
 	var minted struct {

@@ -42,24 +42,6 @@ type accountAuth struct {
 	attempts int
 	hashing  chan struct{}
 	onRevoke func(string)
-	// guard routes API-key revocation through the owner lease coordinator.
-	guard accessGuard
-	// sessionGuard serializes session/password revocation without ending leases.
-	sessionGuard accessGuard
-}
-
-// accessGuard runs a mutation that can revoke an API key. With owner security
-// enabled it first ends that owner's access windows; otherwise it just runs.
-type accessGuard func(ctx context.Context, owner string, mutation func() error) error
-
-func (g accessGuard) run(ctx context.Context, owner string, mutation func() error) error {
-	if g == nil {
-		return mutation()
-	}
-	return g(ctx, owner, mutation)
-}
-func (a *accountAuth) change(ctx context.Context, owner string, mutation func() error) error {
-	return a.guard.run(ctx, owner, mutation)
 }
 
 func newAccountAuth(store catalog.Repository, cfg config.Config) *accountAuth {
@@ -144,7 +126,7 @@ func (a *accountAuth) startSession(w http.ResponseWriter, r *http.Request, user 
 	now := time.Now()
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		if old, ok := a.store.AuthenticateAccess(tokenHash(cookie.Value), "browser"); ok {
-			if err := a.sessionGuard.run(r.Context(), old.Owner, func() error { return a.store.RevokeAccess(old.Owner, old.ID) }); err != nil {
+			if err := a.store.RevokeAccess(old.Owner, old.ID); err != nil {
 				http.Error(w, "could not rotate session", 500)
 				return
 			}
@@ -189,7 +171,7 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/auth/logout" {
 		if current, ok := a.session(r); ok {
-			if err := a.sessionGuard.run(r.Context(), current.Owner, func() error { return a.store.RevokeAccess(current.Owner, current.AccessID) }); err != nil {
+			if err := a.store.RevokeAccess(current.Owner, current.AccessID); err != nil {
 				http.Error(w, "could not revoke session", 500)
 				return
 			}
@@ -204,20 +186,6 @@ func (a *accountAuth) authHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		a.setCookie(w, r, "", -1)
 		w.WriteHeader(204)
-		return
-	}
-	if r.URL.Path == "/api/auth/client-token" {
-		identity, ok := a.session(r)
-		if !ok {
-			http.Error(w, "sign in required", 401)
-			return
-		}
-		token := "mw_" + randomToken()
-		if err := a.change(r.Context(), identity.Owner, func() error { return a.store.SetClientToken(identity.Username, tokenHash(token)) }); err != nil {
-			http.Error(w, "token could not be saved", 500)
-			return
-		}
-		jsonResponse(w, 200, map[string]string{"token": token})
 		return
 	}
 	if r.URL.Path != "/api/auth/register" && r.URL.Path != "/api/auth/login" && r.URL.Path != "/api/auth/password" {
@@ -381,17 +349,13 @@ func (a *accountAuth) changePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "password update failed", 500)
 		return
 	}
+	// Logout or session replacement may have completed while hashing.
 	var ids []string
-	err = a.sessionGuard.run(r.Context(), current.Owner, func() error {
-		// Logout or session replacement may have completed while hashing.
-		again, ok := a.session(r)
-		if !ok || again.Owner != current.Owner || again.AccessID != current.AccessID {
-			return errors.New("browser session no longer active")
-		}
-		var err error
+	if again, ok := a.session(r); !ok || again.Owner != current.Owner || again.AccessID != current.AccessID {
+		err = errors.New("browser session no longer active")
+	} else {
 		ids, err = a.store.ChangePassword(current.Username, account.PasswordHash, salt, hash, passwordIterations, current.AccessID)
-		return err
-	})
+	}
 	if err != nil {
 		http.Error(w, "password update failed", 409)
 		return

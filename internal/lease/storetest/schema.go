@@ -69,7 +69,7 @@ func testSchemaRules(t *testing.T, db Database) {
 		t.Fatal(err)
 	}
 	if err := s.InsertHistory(t.Context(), catalogdb.HistoryRow{OwnerID: "alice", EventID: "h1", SchemaVersion: 2, EventType: "tool.dispatch.admitted", InvocationID: "inv-1",
-		ToolID: "tool-1", Tool: "x", Upstream: "u", Status: "unknown", TSNano: 1, HistoryNano: 1, Record: `{"schema_version":2}`, Source: "live"}); err != nil {
+		ToolID: "tool-1", Tool: "x", Upstream: "u", Status: "unknown", TSNano: 1, HistoryNano: 1, Record: `{"schema_version":2}`}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,9 +146,9 @@ func testSchemaRules(t *testing.T, db Database) {
 		return pick(db, postgres+" ", "CHECK constraint failed: "+sqlite)
 	}
 	historyColumns := "owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded," +
-		"handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record" + pick(db, ",source", "")
+		"handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record"
 	historyRest := "tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded," +
-		"handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record" + pick(db, ",source", "")
+		"handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record"
 	copyHistory := func(values string) string {
 		return "INSERT INTO history_events (" + historyColumns + ") SELECT " + values + "," + historyRest + " FROM history_events WHERE event_id='h1'"
 	}
@@ -318,9 +318,9 @@ func testSchemaRules(t *testing.T, db Database) {
 			rule(t, db, want, sql, args...)
 		}},
 		{"history schema version", func(t *testing.T) {
-			want := check("history_events_check1", "(schema_version = 2) = (event_type IS NOT NULL AND invocation_id IS NOT NULL)")
-			rule(t, db, want, copyHistory("owner_id,'h-v1',1,event_type,'inv-v1'"))
-			rule(t, db, want, copyHistory("owner_id,'h-v2',2,NULL,NULL"))
+			rule(t, db, check("history_events_schema_version_check", "schema_version = 2"), copyHistory("owner_id,'h-v1',1,event_type,'inv-v1'"))
+			rule(t, db, pick(db, "23502", "NOT NULL constraint failed: history_events.event_type"), copyHistory("owner_id,'h-v2',2,NULL,'inv-v2'"))
+			rule(t, db, pick(db, "23502", "NOT NULL constraint failed: history_events.invocation_id"), copyHistory("owner_id,'h-v2',2,event_type,NULL"))
 		}},
 		{"history events unique", func(t *testing.T) {
 			rule(t, db, pick(db, "history_events_owner_id_invocation_id_event_type_key",

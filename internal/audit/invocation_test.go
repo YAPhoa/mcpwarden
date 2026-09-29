@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -31,108 +29,8 @@ func completeFixture(r Record) Record {
 	return r
 }
 
-func TestAdmissionUnknownUntilCompletionAcrossRestart(t *testing.T) {
-	path := t.TempDir() + "/audit"
-	w, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := invocationFixture("alice", "key-a")
-	admitted := r.Admission()
-	if err := w.Write(admitted); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	w, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
-	rows, total, _, stats, err := w.QueryHistoryPerformance(HistoryFilter{Owner: "alice", ActorAccessID: "key-a", Status: "unknown", Page: 1, Size: 25})
-	if err != nil || total != 1 || len(rows) != 1 || stats.TimedCalls != 0 {
-		t.Fatalf("unknown history: %d %v", total, err)
-	}
-	got := rows[0]
-	if got.EventType != DispatchAdmitted || got.InvocationID != r.InvocationID || got.EventID != admitted.EventID || !got.CompletedAt.IsZero() || got.ActorLabel != "Original key label" || got.ArgsSHA256 != r.ArgsSHA256 {
-		t.Fatal("admission lost identity or fabricated completion")
-	}
-	r = completeFixture(r)
-	if err := w.Write(r); err != nil {
-		t.Fatal(err)
-	}
-	rows, total, _, stats, err = w.QueryHistoryPerformance(HistoryFilter{Owner: "alice", Page: 1, Size: 25})
-	if err != nil || total != 1 || len(rows) != 1 || rows[0].EventID != r.EventID || stats.TimedCalls != 1 {
-		t.Fatalf("completion counted incorrectly: %d %v", total, err)
-	}
-	_, total, _ = w.History("bob", "", 1, 25)
-	if total != 0 {
-		t.Fatal("cross-owner history")
-	}
-	_, total, _, _ = w.QueryHistory(HistoryFilter{Owner: "alice", Status: "unknown", Page: 1, Size: 25})
-	if total != 0 {
-		t.Fatal("completed invocation remained unknown")
-	}
-	data, _ := os.ReadFile(path)
-	if len(bytesSplitLines(data)) != 2 {
-		t.Fatal("completion rewrote or removed the admission")
-	}
-}
-
-func TestInvocationImportOrderOwnerIsolationAndLegacyPreservation(t *testing.T) {
-	for _, reverse := range []bool{false, true} {
-		path := t.TempDir() + "/audit"
-		legacy := "{\"owner\":\"alice\",\"ts\":\"2026-09-21T00:00:00Z\",\"duration_ms\":5}\n"
-		if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
-			t.Fatal(err)
-		}
-		w, err := Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r := invocationFixture("alice", "key-a")
-		admitted, completed := r.Admission(), completeFixture(r)
-		events := []Record{admitted, completed}
-		if reverse {
-			events[0], events[1] = events[1], events[0]
-		}
-		for _, event := range events {
-			if err := w.Write(event); err != nil {
-				t.Fatal(err)
-			}
-		}
-		unresolved := invocationFixture("alice", "key-b").Admission()
-		if err := w.Write(unresolved); err != nil {
-			t.Fatal(err)
-		}
-		other := completeFixture(invocationFixture("bob", "key-b"))
-		other.InvocationID = unresolved.InvocationID
-		if err := w.Write(other); err != nil {
-			t.Fatal(err)
-		}
-		rows, total, _, _, err := w.QueryHistoryPerformance(HistoryFilter{Owner: "alice", ActorAccessID: "key-b", Page: 1, Size: 25})
-		if err != nil || total != 1 || len(rows) != 1 || rows[0].Status != "unknown" {
-			t.Fatal("another owner's completion matched the admission")
-		}
-		_, total, _ = w.History("alice", "", 1, 25)
-		if total != 3 {
-			t.Fatal("import order changed call count")
-		}
-		w.Close()
-		data, _ := os.ReadFile(path)
-		if !strings.HasPrefix(string(data), legacy) {
-			t.Fatal("legacy history rewritten")
-		}
-	}
-}
-
-func TestAdmissionRequiresDurableSinkAndValidEvent(t *testing.T) {
+func TestAdmissionRequiresValidEvent(t *testing.T) {
 	r := invocationFixture("alice", "key-a").Admission()
-	w := &Writer{out: io.Discard}
-	if err := w.Write(r); err == nil {
-		t.Fatal("discard sink authorized dispatch")
-	}
 	for _, mutate := range []func(*Record){
 		func(r *Record) { r.EventType = "unknown.event" },
 		func(r *Record) { r.CompletedAt = time.Now().UTC() },

@@ -1,7 +1,9 @@
 // End-to-end owner console flows against a real gateway, an isolated
-// PostgreSQL database and a synthetic upstream. Run with
-// MCPWARDEN_TEST_DATABASE_URL pointing at the local test fixture and
-// OWNER_BROWSER set to chromium, firefox or webkit. All data is synthetic.
+// database and a synthetic upstream. Run with OWNER_BROWSER set to chromium,
+// firefox or webkit. The database is a scratch SQLite file; OWNER_STORAGE=
+// postgres uses a scratch PostgreSQL database instead, which needs
+// MCPWARDEN_TEST_DATABASE_URL pointing at the local test fixture. All data is
+// synthetic.
 import assert from 'node:assert/strict';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';

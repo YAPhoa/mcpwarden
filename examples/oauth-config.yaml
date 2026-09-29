@@ -17,11 +17,11 @@ oauth:
   scopes: ["mcp:tools"]
   manage_scope: mcp:manage
 
+# Config upstreams are served to every OAuth subject.
 upstreams: []
-managed_upstreams:
-  path: /data/managed-upstreams.enc
-  key_env: MCPWARDEN_CREDENTIAL_KEY
 policy:
   default: allow
-audit:
-  path: /data/audit.jsonl
+storage:
+  driver: sqlite
+  path: /data/mcpwarden.db
+  key_env: MCPWARDEN_CREDENTIAL_KEY

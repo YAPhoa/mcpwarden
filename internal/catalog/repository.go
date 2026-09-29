@@ -41,7 +41,6 @@ type Repository interface {
 	AccountOwner(owner string) (Account, bool)
 	AccountForToken(hash string) (Account, bool)
 	AddAccount(Account) error
-	SetClientToken(username, hash string) error
 	ChangePassword(username string, expected, salt, hash []byte, iterations int, keepSession string) ([]string, error)
 
 	AddAccess(AccessRecord) error
@@ -53,5 +52,3 @@ type Repository interface {
 	UpdateAccess(owner, id, name string, end bool) error
 	TouchAccess(owner, id string) error
 }
-
-var _ Repository = (*Store)(nil)

@@ -1,5 +1,5 @@
-// Package postgres persists lease metadata, ciphertext and append-only events.
-// It is deliberately separate from the legacy catalog and credential custody.
+// Package postgres persists lease metadata, vault ciphertext, the gateway
+// catalog and append-only events and history.
 package postgres
 
 import (
@@ -14,53 +14,34 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/lease"
 )
 
-//go:embed migrations/001_leases.sql
+//go:embed migrations/001_baseline.sql
 var migration string
 
-//go:embed migrations/002_vault.sql
-var vaultMigration string
+var migrations = []string{migration}
 
-//go:embed migrations/003_owner_api.sql
-var ownerMigration string
+const SchemaVersion = 1
 
-//go:embed migrations/004_catalog.sql
-var catalogMigration string
-
-//go:embed migrations/005_history_index.sql
-var historyMigration string
-
-//go:embed migrations/006_request_checks.sql
-var requestChecksMigration string
-
-var migrations = []string{migration, vaultMigration, ownerMigration, catalogMigration, historyMigration, requestChecksMigration}
-
-const SchemaVersion = 6
+// preResetBaseline is the checksum of version 1 in ledgers written by
+// development builds before the schema reset.
+const preResetBaseline = "039ccca01d9b766e0e8cab875874016d24ac5739afb29ab2b4a6825eb50389cc"
 
 const executorLock int64 = 0x4d43505753454331 // MCPWSEC1, shared by migration and executor
 
-// ExecutorLock is the session advisory lock the gateway executor holds. Catalog
-// import, cutover and rollback hold it too, so they never run beside a gateway.
+// ExecutorLock is the session advisory lock the gateway executor holds.
+// Migration holds it too, so it never runs beside a gateway.
 const ExecutorLock = executorLock
-
-// CheckSchema requires the full current schema.
-func CheckSchema(ctx context.Context, db queryer) error {
-	n, err := appliedMigrations(ctx, db)
-	if err != nil || n != SchemaVersion {
-		return ErrMigration
-	}
-	return nil
-}
 
 // Attributes such as CREATEROLE are not inherited automatically, but membership
 // may still permit SET ROLE. Check the reachable roles, not just current_user.
 const unsafeRole = `(rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
     OR rolname IN ('pg_execute_server_program','pg_write_server_files','pg_read_server_files','pg_signal_backend','pg_read_all_data','pg_write_all_data'))`
 
-var ErrMigration = errors.New("security schema migration failed")
-
-func migrationHash() string {
-	return checksum(migration)
-}
+var (
+	ErrMigration = errors.New("security schema migration failed")
+	// ErrSchemaReset is a database created before the schema reset. It is
+	// never converted.
+	ErrSchemaReset = errors.New("storage database was created by a development build before the schema reset; create a new database")
+)
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
@@ -83,7 +64,13 @@ func appliedMigrations(ctx context.Context, db queryer) (int, error) {
 	for rows.Next() {
 		var version int
 		var hash string
-		if rows.Scan(&version, &hash) != nil || n >= len(migrations) || version != n+1 || hash != checksum(migrations[n]) {
+		if rows.Scan(&version, &hash) != nil {
+			return 0, ErrMigration
+		}
+		if version == 1 && hash == preResetBaseline {
+			return 0, ErrSchemaReset
+		}
+		if n >= len(migrations) || version != n+1 || hash != checksum(migrations[n]) {
 			return 0, ErrMigration
 		}
 		n++
@@ -97,7 +84,8 @@ func appliedMigrations(ctx context.Context, db queryer) (int, error) {
 // Migrate uses a deployment/migration connection, never the runtime role. The
 // runtime role must already exist and must not own this schema or inherit its
 // owner. Passwords and DSNs are never returned in errors. Version/checksum drift
-// fails closed; this migration does not convert the legacy encrypted catalog.
+// fails closed, and a database from before the schema reset is refused with
+// ErrSchemaReset.
 func Migrate(ctx context.Context, conn *pgx.Conn, runtimeRole string) error {
 	if runtimeRole == "" {
 		return ErrMigration
@@ -133,6 +121,9 @@ func Migrate(ctx context.Context, conn *pgx.Conn, runtimeRole string) error {
 	applied := 0
 	if present {
 		if applied, err = appliedMigrations(ctx, tx); err != nil {
+			if errors.Is(err, ErrSchemaReset) {
+				return err
+			}
 			return ErrMigration
 		}
 	}

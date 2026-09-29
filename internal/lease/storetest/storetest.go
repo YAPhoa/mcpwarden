@@ -112,6 +112,7 @@ func Run(t *testing.T, open func(t *testing.T) Database) {
 		{"UncertainCommitStopsCatalog", testUncertainCommitStopsCatalog},
 		{"ProviderChangesMoveRevision", testProviderChangesMoveRevision},
 		{"StaleSessionsEndAtStartup", testStaleSessionsEndAtStartup},
+		{"RepositoryAccessLimits", testRepositoryAccessLimits},
 	} {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, open(t)) })
 	}

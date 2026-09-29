@@ -16,8 +16,6 @@ type HistoryRow struct {
 	HandlerBucket, GatewayBucket     int
 	UpstreamBucket                   int
 	Record                           string
-	Source                           string // legacy or live
-	SourceLine                       int64
 }
 
 // HistoryWindow is the most events a history query reads: the newest this

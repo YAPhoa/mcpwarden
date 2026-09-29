@@ -28,12 +28,8 @@ func openLock(path string) (*lockFile, error) {
 }
 
 func (l *lockFile) try(exclusive bool) error {
-	if l.held {
-		// LockFileEx does not convert a lock; release it first.
-		ol := new(windows.Overlapped)
-		_ = windows.UnlockFileEx(windows.Handle(l.f.Fd()), 0, 1, 0, ol)
-		l.held = false
-	}
+	// LockFileEx does not convert a lock; release it first.
+	_ = l.unlock()
 	flags := uint32(windows.LOCKFILE_FAIL_IMMEDIATELY)
 	if exclusive {
 		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
@@ -47,6 +43,15 @@ func (l *lockFile) try(exclusive bool) error {
 		l.held = true
 	}
 	return err
+}
+
+// unlock releases the lock and keeps the handle open.
+func (l *lockFile) unlock() error {
+	if !l.held {
+		return nil
+	}
+	l.held = false
+	return windows.UnlockFileEx(windows.Handle(l.f.Fd()), 0, 1, 0, new(windows.Overlapped))
 }
 
 func (l *lockFile) close() error { return l.f.Close() }

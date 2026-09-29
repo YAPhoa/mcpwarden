@@ -63,7 +63,7 @@ type securityAPI struct {
 // here on and closes it on failure. The executor coordinates every catalog
 // change in each HTTP mode; its owner routes are registered only with
 // owner_security, whose transport settings it reads here.
-func startSecurity(ctx context.Context, cfg config.Config, db storageDB, store catalog.Repository, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
+func startSecurity(ctx context.Context, cfg config.Config, db storageDB, store custody.Catalog, tools *policy.Policy, accounts *accountAuth, logger *slog.Logger) (*securityAPI, error) {
 	var trustedProxies []netip.Prefix
 	var allowInsecureLoopback bool
 	if cfg.OwnerSecurity != nil {
@@ -121,18 +121,6 @@ func (api *securityAPI) register(mux *http.ServeMux) {
 	mux.Handle("/api/approvals/", api.owner(api.approval))
 	mux.Handle("/api/leases", api.caller(api.leases))
 	mux.Handle("/api/leases/", api.caller(api.revokeLease))
-}
-
-// guardAccess routes API-key revocation through the lease coordinator so that
-// the key's windows end before the catalog write. When the executor is already
-// locked or its storage is lost, no window can admit work and revocation must
-// never be blocked by that outage.
-func (api *securityAPI) guardAccess(ctx context.Context, owner string, mutation func() error) error {
-	err := api.service.Change(ctx, owner, mutation)
-	if errors.Is(err, lease.ErrLocked) || errors.Is(err, lease.ErrStorage) {
-		return mutation()
-	}
-	return err
 }
 
 type securityHandler func(http.ResponseWriter, *http.Request, catalog.AccessRecord)

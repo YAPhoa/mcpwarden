@@ -11,13 +11,12 @@ import (
 )
 
 func event(owner, id, kind, invocation, toolID, tool, upstream, status string, ns int64) catalogdb.HistoryRow {
-	version := 1
-	if kind != "" {
-		version = 2
+	if kind == "" {
+		kind, invocation = "tool.dispatch.completed", "inv-"+id
 	}
-	raw, _ := json.Marshal(map[string]any{"schema_version": version, "event_id": id, "owner": owner})
-	return catalogdb.HistoryRow{OwnerID: owner, EventID: id, SchemaVersion: version, EventType: kind, InvocationID: invocation, ToolID: toolID, Tool: tool,
-		Upstream: upstream, Status: status, TSNano: ns, HistoryNano: ns, Record: string(raw), Source: "live"}
+	raw, _ := json.Marshal(map[string]any{"schema_version": 2, "event_id": id, "owner": owner})
+	return catalogdb.HistoryRow{OwnerID: owner, EventID: id, SchemaVersion: 2, EventType: kind, InvocationID: invocation, ToolID: toolID, Tool: tool,
+		Upstream: upstream, Status: status, TSNano: ns, HistoryNano: ns, Record: string(raw)}
 }
 
 func insert(t *testing.T, s Store, rows ...catalogdb.HistoryRow) {

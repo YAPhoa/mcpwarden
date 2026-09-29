@@ -235,9 +235,8 @@ func TestGuardedHeaderExecution(t *testing.T) {
 	}
 
 	// A disabled connector's tools leave tools/list, and a direct call is
-	// refused without reaching the upstream. On the file catalog the window is
-	// still active here, so this is the current-policy check (A06); the
-	// PostgreSQL catalog also ends the window in the same commit.
+	// refused without reaching the upstream. The catalog ends the window in the
+	// same commit, and the current-policy check (A06) refuses it anyway.
 	calls = upstream.calls.Load()
 	if err := f.store.SetProviderEnabled(alice, "remote", false); err != nil {
 		t.Fatal(err)

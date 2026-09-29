@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,13 +12,13 @@ func TestResolveAndValidate(t *testing.T) {
 	t.Setenv("TEST_REMOTE_TOKEN", "fake-token")
 	t.Setenv("TEST_OAUTH_ID", "id")
 	t.Setenv("TEST_OAUTH_SECRET", "secret")
+	t.Setenv(DefaultKeyEnv, "key")
 	tests := []struct {
 		name string
 		cfg  Config
 		want string
 	}{
 		{"defaults", Config{Upstreams: []Upstream{{Name: "fs", Transport: "stdio", Command: "test"}}}, ""},
-		{"nondurable audit", Config{Audit: Audit{Path: "-"}}, "durable dispatch admission"},
 		{"duplicate", Config{Upstreams: []Upstream{{Name: "fs", Transport: "stdio", Command: "test"}, {Name: "fs", Transport: "stdio", Command: "test"}}}, "duplicate"},
 		{"invalid name", Config{Upstreams: []Upstream{{Name: "bad_name", Transport: "stdio", Command: "test"}}}, "invalid"},
 		{"missing env", Config{Upstreams: []Upstream{{Name: "remote", Transport: "http", URL: "https://example.test/mcp", Headers: map[string]string{"Authorization": "Bearer ${MISSING_MCPWARDEN_TEST}"}}}}, "unset"},
@@ -41,29 +43,26 @@ func TestResolveAndValidate(t *testing.T) {
 	}
 }
 
-func TestAccountsRequireEncryptedStorageAndExcludeOAuth(t *testing.T) {
-	for _, cfg := range []Config{
-		{Accounts: &Accounts{}},
-		{Accounts: &Accounts{}, Managed: &Managed{}, OAuth: &OAuth{}},
-	} {
-		if err := cfg.ResolveAndValidate(); err == nil {
-			t.Fatal("invalid accounts configuration accepted")
-		}
+func TestAccountsExcludeOAuth(t *testing.T) {
+	t.Setenv(DefaultKeyEnv, "key")
+	cfg := Config{Accounts: &Accounts{}, OAuth: &OAuth{}}
+	if err := cfg.ResolveAndValidate(); err == nil || !strings.Contains(err.Error(), "cannot be combined with oauth") {
+		t.Fatal("accounts with oauth accepted:", err)
+	}
+	cfg = Config{Accounts: &Accounts{}}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatal("accounts on default storage refused:", err)
 	}
 }
 
-func TestOwnerSecurityRequiresAccountsAndStorage(t *testing.T) {
-	t.Setenv("TEST_STORAGE_KEY", "key")
-	t.Setenv("TEST_MANAGED_KEY", "key")
-	storage := func() *Storage { return &Storage{Path: "data/mcpwarden.db", KeyEnv: "TEST_STORAGE_KEY"} }
+func TestOwnerSecurityRequiresAccounts(t *testing.T) {
+	t.Setenv(DefaultKeyEnv, "key")
 	for name, tt := range map[string]struct {
 		cfg  Config
 		want string
 	}{
-		"operator mode": {Config{Storage: storage(), OwnerSecurity: &OwnerSecurity{}}, "requires accounts"},
-		"file catalog":  {Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}, OwnerSecurity: &OwnerSecurity{}}, "requires the storage section"},
-		"old database":  {Config{Accounts: &Accounts{}, Storage: storage(), OwnerSecurity: &OwnerSecurity{DatabaseURLEnv: "TEST_SECURITY_DSN"}}, "replaced by storage.database_url_env"},
-		"accounts":      {Config{Accounts: &Accounts{}, Storage: storage(), OwnerSecurity: &OwnerSecurity{}}, ""},
+		"operator mode": {Config{OwnerSecurity: &OwnerSecurity{}}, "requires accounts"},
+		"accounts":      {Config{Accounts: &Accounts{}, OwnerSecurity: &OwnerSecurity{}}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := tt.cfg.ResolveAndValidate()
@@ -71,6 +70,42 @@ func TestOwnerSecurityRequiresAccountsAndStorage(t *testing.T) {
 				t.Fatalf("got error %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+// Removed keys fail with their replacement, not the generic unknown-field
+// error.
+func TestRemovedKeys(t *testing.T) {
+	t.Setenv(DefaultKeyEnv, "key")
+	for yaml, want := range map[string]string{
+		"managed_upstreams:\n  path: catalog.enc\n  key_env: KEY\n":       "managed_upstreams was replaced by storage",
+		"managed_upstreams:\n  backend: postgres\n":                       "managed_upstreams was replaced by storage",
+		"audit:\n  path: audit.jsonl\n":                                   "audit was removed",
+		"accounts: {}\nowner_security:\n  database_url_env: DSN\n":        "replaced by storage.database_url_env",
+		"accounts: {}\nowner_security:\n  database_url: postgres://x/y\n": "replaced by storage.database_url_env",
+		"accounts: {}\nowner_security:\n  custody_mode: legacy_managed\n": "field custody_mode not found",
+		// Present with no value still names the replacement.
+		"audit:\n":             "audit was removed",
+		"audit: null\n":        "audit was removed",
+		"managed_upstreams:\n": "managed_upstreams was replaced by storage",
+		"accounts: {}\nowner_security:\n  database_url_env:\n": "replaced by storage.database_url_env",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: got %v, want containing %q", yaml, err, want)
+		}
+	}
+	// The removal message comes before storage's own checks.
+	t.Setenv(DefaultKeyEnv, "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("accounts: {}\nowner_security:\n  database_url_env: DSN\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "replaced by storage.database_url_env") {
+		t.Errorf("removal hidden by the storage key check: %v", err)
 	}
 }
 
@@ -93,26 +128,20 @@ func TestOwnerSecurityTrustedProxyConfiguration(t *testing.T) {
 func TestStorage(t *testing.T) {
 	t.Setenv("TEST_STORAGE_KEY", "key")
 	t.Setenv("TEST_STORAGE_DSN", "postgres://runtime@127.0.0.1/db")
-	t.Setenv("TEST_MANAGED_KEY", "key")
 	for name, tt := range map[string]struct {
 		cfg  Config
 		want string
 	}{
-		"sqlite default":     {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
+		"sqlite":             {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
 		"sqlite accounts":    {Config{Accounts: &Accounts{}, Storage: &Storage{Driver: "sqlite", Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
 		"postgres":           {Config{Storage: &Storage{Driver: "postgres", DatabaseURLEnv: "TEST_STORAGE_DSN", KeyEnv: "TEST_STORAGE_KEY"}}, ""},
-		"sqlite no path":     {Config{Storage: &Storage{KeyEnv: "TEST_STORAGE_KEY"}}, "storage.path is required"},
 		"sqlite with url":    {Config{Storage: &Storage{Path: "x.db", DatabaseURLEnv: "TEST_STORAGE_DSN", KeyEnv: "TEST_STORAGE_KEY"}}, "only for storage.driver postgres"},
 		"postgres no url":    {Config{Storage: &Storage{Driver: "postgres", KeyEnv: "TEST_STORAGE_KEY"}}, "database_url_env is required"},
 		"postgres with path": {Config{Storage: &Storage{Driver: "postgres", Path: "x.db", DatabaseURLEnv: "TEST_STORAGE_DSN", KeyEnv: "TEST_STORAGE_KEY"}}, "only for storage.driver sqlite"},
 		"postgres unset url": {Config{Storage: &Storage{Driver: "postgres", DatabaseURLEnv: "MISSING_MCPWARDEN_TEST", KeyEnv: "TEST_STORAGE_KEY"}}, "unset"},
 		"unknown driver":     {Config{Storage: &Storage{Driver: "mysql", KeyEnv: "TEST_STORAGE_KEY"}}, "sqlite or postgres"},
-		"no key":             {Config{Storage: &Storage{Path: "x.db"}}, "key_env is required"},
 		"unset key":          {Config{Storage: &Storage{Path: "x.db", KeyEnv: "MISSING_MCPWARDEN_TEST"}}, "unset"},
-		"with audit":         {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}, Audit: Audit{Path: "audit.jsonl"}}, "audit.path must be unset"},
-		"with managed":       {Config{Storage: &Storage{Path: "x.db", KeyEnv: "TEST_STORAGE_KEY"}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}}, "cannot be combined with storage"},
-		"managed backend":    {Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY", Backend: "postgres"}}, "replaced by the storage section"},
-		"file mode":          {Config{Accounts: &Accounts{}, Managed: &Managed{Path: "catalog.enc", KeyEnv: "TEST_MANAGED_KEY"}}, ""},
+		"default key unset":  {Config{}, DefaultKeyEnv + " is unset"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := tt.cfg
@@ -123,21 +152,37 @@ func TestStorage(t *testing.T) {
 			if tt.want != "" {
 				return
 			}
-			if c.Storage == nil {
-				if c.Audit.Path != "./audit.jsonl" {
-					t.Fatal("file mode lost its audit default:", c.Audit.Path)
-				}
-				return
-			}
-			if c.Audit.Path != "" || c.Storage.Key != "key" {
-				t.Fatal("storage resolved:", c.Audit.Path, c.Storage.Key)
+			if c.Storage.Key != "key" {
+				t.Fatal("storage key not resolved")
 			}
 			if c.Storage.Driver == "postgres" && c.Storage.DatabaseURL != "postgres://runtime@127.0.0.1/db" {
 				t.Fatal("database URL not resolved")
 			}
-			if name == "sqlite default" && c.Storage.Driver != "sqlite" {
-				t.Fatal("default driver:", c.Storage.Driver)
-			}
 		})
+	}
+}
+
+// Without a storage section the gateway uses SQLite at the default path with
+// the default key variable.
+func TestStorageDefaults(t *testing.T) {
+	t.Setenv(DefaultKeyEnv, "key")
+	var c Config
+	if err := c.ResolveAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if s := c.Storage; s.Driver != "sqlite" || s.Path != DefaultStoragePath || s.KeyEnv != DefaultKeyEnv || s.Key != "key" {
+		t.Fatalf("defaults: %+v", *s)
+	}
+}
+
+// The shipped examples load with this build's rules.
+func TestExamplesLoad(t *testing.T) {
+	for _, env := range []string{DefaultKeyEnv, "MCPWARDEN_TOKEN", "MCPWARDEN_INTROSPECTION_CLIENT_ID", "MCPWARDEN_INTROSPECTION_CLIENT_SECRET", "SOME_VAR", "REMOTE_TOKEN"} {
+		t.Setenv(env, "synthetic")
+	}
+	for _, name := range []string{"config.yaml", "compose-config.yaml", "oauth-config.yaml"} {
+		if _, err := Load(filepath.Join("..", "..", "examples", name)); err != nil {
+			t.Error(name, err)
+		}
 	}
 }

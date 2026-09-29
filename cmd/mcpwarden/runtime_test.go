@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -14,7 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/yaphoa/mcpwarden/internal/audit"
+	"github.com/yaphoa/mcpwarden/internal/audit/audittest"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/policy"
@@ -41,14 +40,9 @@ func TestRuntimeUsesRepositoryBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditLog, err := audit.Open(t.TempDir() + "/audit.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auditLog.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rs := newRuntimes(ctx, config.Config{}, pol, auditLog, repository, logger)
+	rs := newRuntimes(ctx, config.Config{}, pol, &audittest.Memory{}, repository, logger)
 	defer rs.close()
 	rs.get("alice")
 	if !repository.listed {
@@ -79,35 +73,18 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 	defer aliceHTTP.Close()
 	_, bobHTTP := upstreamForUser(t, "bob_only")
 	defer bobHTTP.Close()
-	path := t.TempDir() + "/connections.enc"
-	store, err := catalog.Open(path, base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	var cfg config.Config
+	db := testStorage(t, &cfg)
+	store := db.repo
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pol, err := policy.New(config.Policy{Default: "allow"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditLog, err := audit.Open(t.TempDir() + "/audit.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auditLog.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rs := newRuntimes(ctx, config.Config{}, pol, auditLog, store, logger)
+	rs := newRuntimes(ctx, cfg, pol, db.history, store, logger)
 	defer rs.close()
-	// With owner security the file catalog ends the owner's windows first, but
-	// only for a change that alters what a caller can use.
-	guarded := 0
-	rs.providerGuard = func(_ context.Context, owner string, mutation func() error) error {
-		if owner != "alice" {
-			t.Error("provider guard for another owner", owner)
-		}
-		guarded++
-		return mutation()
-	}
 	for _, e := range []catalog.Entry{
 		{Owner: "alice", Name: "remote", URL: aliceHTTP.URL, CallTimeout: "1s"},
 		{Owner: "bob", Name: "remote", URL: bobHTTP.URL, CallTimeout: "1s"},
@@ -116,6 +93,10 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A change that alters what a caller can use moves the connector's
+	// security revision, which ends its windows in the same commit.
+	revision := func() string { return store.ConnectorSecurityRevision("alice", store.List("alice")[0].ID) }
+	initial := revision()
 	verifier := func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		if token != "alice" && token != "bob" {
 			return nil, auth.ErrInvalidToken
@@ -213,8 +194,9 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	visibilityResponse.Body.Close()
-	if visibilityResponse.StatusCode != http.StatusOK || guarded != 1 {
-		t.Fatalf("set visibility: %d, guarded %d", visibilityResponse.StatusCode, guarded)
+	afterVisibility := revision()
+	if visibilityResponse.StatusCode != http.StatusOK || afterVisibility == initial {
+		t.Fatalf("set visibility: %d, revision %s", visibilityResponse.StatusCode, afterVisibility)
 	}
 	select {
 	case <-listChanged:
@@ -256,11 +238,11 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 		}
 	}
 	setEnabled(true)
-	if guarded != 1 {
+	if revision() != afterVisibility {
 		t.Fatal("unchanged availability ended windows")
 	}
 	setEnabled(false)
-	if guarded != 2 {
+	if revision() == afterVisibility {
 		t.Fatal("disabling did not end windows")
 	}
 	disabledList, err := listUpstreamTools(ctx, clients["alice"])
@@ -292,11 +274,9 @@ func TestPersonalUpstreamsAndStoredDiscovery(t *testing.T) {
 	setEnabled(false)
 	rs.close()
 	aliceHTTP.Close()
-	reopened, err := catalog.Open(path, base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cacheOnly := newRuntimes(ctx, config.Config{}, pol, auditLog, reopened, logger)
+	db.close()
+	reopened := testStorage(t, &cfg)
+	cacheOnly := newRuntimes(ctx, cfg, pol, reopened.history, reopened.repo, logger)
 	defer cacheOnly.close()
 	if cacheOnly.get("alice").manager.States()[0].Enabled {
 		t.Fatal("disabled provider restarted")
@@ -344,17 +324,11 @@ func listUpstreamTools(ctx context.Context, session *mcp.ClientSession) (*mcp.Li
 // settings from older clients are refused, and without the owner vault only
 // no-auth connectors can be created.
 func TestConnectionsAPIHeaderNamesOnly(t *testing.T) {
-	store, err := catalog.Open(t.TempDir()+"/connections.enc", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	var cfg config.Config
+	db := testStorage(t, &cfg)
+	store := db.repo
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	auditLog, err := audit.Open(t.TempDir() + "/audit.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auditLog.Close()
-	rs := newRuntimes(t.Context(), config.Config{}, pol, auditLog, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rs := newRuntimes(t.Context(), cfg, pol, db.history, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rs.close()
 	post := func(body string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()

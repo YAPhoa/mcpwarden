@@ -12,7 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/approval"
-	"github.com/yaphoa/mcpwarden/internal/audit"
+	"github.com/yaphoa/mcpwarden/internal/audit/audittest"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/policy"
 	"github.com/yaphoa/mcpwarden/internal/registry"
@@ -30,11 +30,7 @@ func TestGatewayIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auditLog, err := audit.Open(t.TempDir() + "/audit.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auditLog.Close()
+	auditLog := &audittest.Memory{}
 	p := New(registry.New(), pol, approval.None{}, auditLog, logger)
 	p.Owner = "timing-test"
 	m := upstream.New([]config.Upstream{{Name: "a", Transport: "http", URL: a.HTTP.URL, Timeout: 50 * time.Millisecond}, {Name: "b", Transport: "http", URL: b.HTTP.URL, Timeout: time.Second}}, logger, p.Changed)
@@ -97,10 +93,7 @@ func TestGatewayIntegration(t *testing.T) {
 	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "timed out") {
 		t.Fatalf("timeout: %v, %v", res, err)
 	}
-	rows, _, err := auditLog.History("timing-test", "", 1, 25)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rows := auditLog.History("timing-test")
 	seen := map[string]bool{}
 	for _, row := range rows {
 		if row.SchemaVersion != 2 || row.InvocationID == "" || row.EventID == "" || row.UpstreamID == "" || row.CompletedAt.Before(row.TS) {

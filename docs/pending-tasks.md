@@ -1,10 +1,11 @@
 # Pending work
 
-Current boundary: the running gateway still uses the encrypted file catalog.
-The lease engine, browser crypto primitives, PostgreSQL ciphertext adapter,
-owner security API, owner vault console and PostgreSQL catalog backend are
-implemented and tested. The owner API, console and PostgreSQL catalog are
-opt-in, and live data has not been migrated. Personal connectors store header
+Current boundary: storage is a required SQLite or PostgreSQL database holding
+the catalog, history, leases and vault; the file catalog and JSONL history are
+gone, and the live gateway needs the fresh-start deployment. The lease engine,
+browser crypto primitives, ciphertext storage, owner security API and owner
+vault console are implemented and tested. The owner API and console are opt-in
+(`owner_security`) and need HTTPS, which `compose.tls.yaml` adds in Compose. Personal connectors store header
 names only; a connector with credentials is in vault custody from creation and
 needs `owner_security`, and upstream OAuth is removed until step 6. The original
 acceptance checklist remains in [spec v1.1](security/spec-v1.1/IMPLEMENTATION-CHECKLIST.md);
@@ -21,35 +22,27 @@ per-case coverage of the 68 acceptance tests is in the
    mutation audit. Session authority is rechecked inside owner transactions;
    revocation and password changes share the owner gate. Approval
    `none` still requires explicit owner CEK release; MCP keys cannot activate.
-   Accounts, sessions and keys stay in the file catalog until step 3.
 2. **Vault and lease UI.** Implemented at `/vault` for the opt-in API; see
    [UI design](../ui/DESIGN.md#vault-and-access-windows-2026-09-24). It covers
    setup with a verified recovery key, passphrase or recovery unlock, passphrase
    changes, browser-encrypted credential entry and replacement for existing
    header-authenticated HTTP connectors, request review, explicit activation and
    renewal, fixed countdowns, and the separate browser lock, stop access and
-   lock-all controls. Real-browser flows run against a gateway and PostgreSQL in
-   Chromium, Firefox and WebKit in CI. nginx sends the same strict page CSP the
+   lock-all controls. Real-browser flows run against a gateway on SQLite in
+   Chromium, Firefox and WebKit in CI, and on PostgreSQL in Chromium. nginx sends the same strict page CSP the
    flows use (a unit test keeps them equal), the console can remove a vault
    credential (a permanent tombstone for that connector), and the flows check
    layouts at 390, 720 (200% zoom on a 1440 px screen) and 1280 px. A
    screen-reader review by a person is still open.
-3. **Full PostgreSQL catalog and authority coordination.** Implemented behind
-   the [`storage`](storage.md) section (PostgreSQL or SQLite); see
-   [catalog storage](catalog-storage.md) and [history storage](history-storage.md).
-   Accounts, password verifiers, keys, sessions, connectors, tombstones,
-   discovery, visibility and indexed call history live in PostgreSQL. Account
-   secrets stay sealed under the existing catalog key; connector credentials
-   are only in the vault. Every
-   catalog change commits with its security event and any lease revocation in
-   one owner transaction and publishes after commit; storage failure stops the
-   gateway without falling back to the file. `mcpwarden-catalog` imports from a
-   protected snapshot with checkpointed, field-by-field verification, then cuts
-   over. Its rollback reconciles revocations, suspends windows and keeps new
-   history; its reauthorization list is always empty now that connectors hold
-   no OAuth grants. The
-   [cutover procedure](catalog-migration.md) awaits review before live data
-   moves; a second import after a rollback is not supported yet.
+3. **Database catalog and authority coordination.** Implemented; see
+   [storage](storage.md). Accounts, password verifiers, keys, sessions,
+   connectors, tombstones, discovery, visibility and indexed call history live
+   in SQLite or PostgreSQL. Account secrets are sealed under the catalog key;
+   connector credentials are only in the vault. Every catalog change commits
+   with its security event and any lease revocation in one owner transaction
+   and publishes after commit; storage failure stops the gateway without
+   fallback. The file catalog, JSONL history and the import, cutover and
+   rollback tooling were removed on 2026-09-29 (no legacy, fresh start).
 4. **Startup and guarded execution integration.** Implemented; guarded
    execution is installed whenever `owner_security` runs (the `custody_mode`
    setting is gone). See
@@ -62,7 +55,8 @@ per-case coverage of the 68 acceptance tests is in the
    connector locked. Only local-account workspaces on a gateway with
    `owner_security` can create credentialed connectors, and only for endpoints
    the vault destination accepts; everyone else gets no-auth connectors. Catalogs from older builds (header values, OAuth settings, grant
-   IDs) are refused at load; there is no conversion.
+   IDs) are refused at load; there is no conversion. `--stdio` serves only
+   connectors without authentication.
 5. **Initial setup/discovery authorization.** Implement a bounded owner-only
    discovery capability for new providers before their tool catalog exists.
    Until then a new credentialed connector has no tools and cannot be used;
@@ -84,10 +78,9 @@ per-case coverage of the 68 acceptance tests is in the
    SSRF/redirect protection, permitted private-network selection and stdio
    process isolation. Stdio commands already receive only an allowlisted
    environment. Keep all credential use bounded by authority.
-9. **Migration, restore and rollout.** The file-to-PostgreSQL catalog and
-   history migration, its verification and its rollback are done (step 3).
-   Still open: the live cutover itself, a full application backup and database
-   restore drill, and restart-locked recovery after a restore.
+9. **Restore and rollout.** The live deployment is a fresh start (no
+   migration). Still open: a full application backup and database restore
+   drill, and restart-locked recovery after a restore.
 10. **Release qualification.** Run complete spec acceptance families (track them
     in the [acceptance matrix](security/acceptance-matrix.md)), actual owner
     UI/device tests, Argon2/WASM review, mobile KDF measurements, load/failure tests,

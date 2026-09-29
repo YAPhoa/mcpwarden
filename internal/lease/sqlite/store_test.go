@@ -167,6 +167,7 @@ func TestLedgerRefusals(t *testing.T) {
 		"newer user version":    {[]string{"PRAGMA user_version = 99"}, ErrNewer},
 		"newer ledger":          {[]string{"DROP TRIGGER schema_migrations_append_only", "INSERT INTO schema_migrations VALUES (2, '" + strings.Repeat("a", 64) + "', 0)", "PRAGMA user_version = 2"}, ErrNewer},
 		"edited migration":      {[]string{"DROP TRIGGER schema_migrations_append_only", "UPDATE schema_migrations SET sha256 = '" + strings.Repeat("e", 64) + "'"}, ErrMigration},
+		"before schema reset":   {[]string{"DROP TRIGGER schema_migrations_append_only", "UPDATE schema_migrations SET sha256 = '" + preResetBaseline + "'"}, ErrSchemaReset},
 		"missing ledger":        {[]string{"DROP TRIGGER schema_migrations_no_delete", "DELETE FROM schema_migrations"}, ErrMigration},
 		"user version mismatch": {[]string{"PRAGMA user_version = 0"}, ErrMigration},
 	}
@@ -195,6 +196,14 @@ func TestLedgerRefusals(t *testing.T) {
 			}
 			if _, err := Open(t.Context(), path, Options{}); !errors.Is(err, c.want) {
 				t.Fatalf("got %v, want %v", err, c.want)
+			}
+			// A stdio client refuses it with the same error, at once.
+			start := time.Now()
+			if _, err := OpenClient(t.Context(), path, Options{}); !errors.Is(err, c.want) {
+				t.Fatalf("client: got %v, want %v", err, c.want)
+			}
+			if time.Since(start) > 2*time.Second {
+				t.Fatal("client refusal waited")
 			}
 		})
 	}
@@ -436,9 +445,9 @@ func bulkHistory(t *testing.T, db *sql.DB, owner string, n int) {
 	t.Helper()
 	_, err := db.ExecContext(t.Context(), `WITH RECURSIVE g(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM g WHERE i < $2)
         INSERT INTO history_events
-        (owner_id,event_id,schema_version,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
+        (owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
          handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record)
-        SELECT $1, 'e'||printf('%07d',i), 1, 'tool-'||(i%4), 'tool '||(i%4), 'up-'||(i%3), CASE WHEN i%5=0 THEN 'timeout' ELSE 'ok' END,
+        SELECT $1, 'e'||printf('%07d',i), 2, 'tool.dispatch.completed', 'inv-'||'e'||printf('%07d',i), 'tool-'||(i%4), 'tool '||(i%4), 'up-'||(i%3), CASE WHEN i%5=0 THEN 'timeout' ELSE 'ok' END,
          'actor-'||(i%7), i, i, 1, i%5=0, 1, 100, 10, 90, 6, 3, 6, '{}'
         FROM g`, owner, n)
 	if err != nil {
@@ -531,9 +540,9 @@ func TestSlowHistoryPageDoesNotStopStore(t *testing.T) {
 	db := raw(t, path)
 	if _, err := db.ExecContext(t.Context(), `WITH RECURSIVE g(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM g WHERE i < 300000)
         INSERT INTO history_events
-        (owner_id,event_id,schema_version,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
+        (owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
          handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record)
-        SELECT 'alice', 'e'||i, 1, 'tool-'||(i%2), 'tool', 'up', 'ok', 'actor-'||(i%2), i, i, 1, 0, 1, 100, 10, 90, 6, 3, 6, '{}' FROM g`); err != nil {
+        SELECT 'alice', 'e'||i, 2, 'tool.dispatch.completed', 'inv-'||'e'||i, 'tool-'||(i%2), 'tool', 'up', 'ok', 'actor-'||(i%2), i, i, 1, 0, 1, 100, 10, 90, 6, 3, 6, '{}' FROM g`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(t.Context(), "ANALYZE"); err != nil {
@@ -565,7 +574,7 @@ func TestSlowHistoryPageDoesNotStopStore(t *testing.T) {
 	if got, err := s.QueryHistory(t.Context(), catalogdb.HistoryQuery{Owner: "alice", Limit: 25}); err != nil || len(got.Records) != 25 {
 		t.Fatal("next page:", err)
 	}
-	if err := s.InsertHistory(t.Context(), catalogdb.HistoryRow{OwnerID: "alice", EventID: "after", SchemaVersion: 1, ToolID: "t", Tool: "x", Upstream: "u", Status: "ok", Record: "{}"}); err != nil {
+	if err := s.InsertHistory(t.Context(), catalogdb.HistoryRow{OwnerID: "alice", EventID: "after", SchemaVersion: 2, EventType: "tool.dispatch.completed", InvocationID: "inv-after", ToolID: "t", Tool: "x", Upstream: "u", Status: "ok", Record: "{}"}); err != nil {
 		t.Fatal("write after a slow page:", err)
 	}
 }

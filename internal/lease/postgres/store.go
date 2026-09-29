@@ -60,6 +60,12 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
 			_ = conn.Close(closeCtx)
 		}
 	}()
+	// The ledger is read first: a pre-reset database lacks tables the
+	// privilege check names, and must be refused by name.
+	count, err := appliedMigrations(ctx, conn)
+	if errors.Is(err, ErrSchemaReset) {
+		return nil, err
+	}
 	var safe bool
 	err = conn.QueryRow(ctx, `SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
         AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE `+unsafeRole+` AND pg_has_role(current_user,oid,'MEMBER'))
@@ -77,8 +83,6 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
         AND NOT has_table_privilege(current_user,'mcpwarden_security.credential_epochs','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.vault_roots','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.approval_policies','DELETE,TRUNCATE')
-        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_state','INSERT,UPDATE,DELETE,TRUNCATE')
-        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_legacy_tombstones','INSERT,UPDATE,DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_accounts','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_access','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_connectors','DELETE,TRUNCATE')
@@ -89,7 +93,6 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
 	if err != nil || !safe {
 		return nil, lease.ErrStorage
 	}
-	count, err := appliedMigrations(ctx, conn)
 	if err != nil || count != SchemaVersion {
 		return nil, lease.ErrStorage
 	}

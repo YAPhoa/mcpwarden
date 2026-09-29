@@ -43,19 +43,11 @@ func (c catalogRows) DeleteVisibility(owner, provider string) error {
 }
 
 // LoadCatalog reads every catalog row in one transaction under the startup
-// deadline. A database with no catalog_state row is a fresh catalog; one
-// whose import never cut over, or was rolled back, is refused with
-// catalogdb.ErrNotActive.
+// deadline.
 func (s *Store) LoadCatalog(ctx context.Context) (catalogdb.Rows, error) {
 	var rows catalogdb.Rows
 	err := s.run(ctx, loadDeadline, func(ctx context.Context, db DB) error {
-		cs, ok, err := ReadState(ctx, db, false)
-		if err != nil {
-			return err
-		}
-		if ok && cs.State != "active" {
-			return catalogdb.ErrNotActive
-		}
+		var err error
 		rows, err = Load(ctx, db)
 		return err
 	})

@@ -199,9 +199,6 @@ func normalize(r catalogdb.Rows) catalogdb.Rows {
 		utc(&r.Visibility[i].CreatedAt)
 		utc(&r.Visibility[i].UpdatedAt)
 	}
-	if len(r.Tombstones) == 0 {
-		r.Tombstones = nil
-	}
 	return r
 }
 
@@ -209,7 +206,7 @@ func normalize(r catalogdb.Rows) catalogdb.Rows {
 // store running; a lease write the database refuses is a store failure.
 func testErrorMapping(t *testing.T, db Database) {
 	s := started(t, db)
-	row := catalogdb.HistoryRow{OwnerID: "alice", EventID: "e1", SchemaVersion: 1, ToolID: "t", Tool: "x", Upstream: "u", Status: "ok", TSNano: 1, HistoryNano: 1, Record: `{"schema_version":1}`, Source: "live"}
+	row := catalogdb.HistoryRow{OwnerID: "alice", EventID: "e1", SchemaVersion: 2, EventType: "tool.dispatch.completed", InvocationID: "inv-e1", ToolID: "t", Tool: "x", Upstream: "u", Status: "ok", TSNano: 1, HistoryNano: 1, Record: `{"schema_version":2}`}
 	if err := s.InsertHistory(t.Context(), row); err != nil {
 		t.Fatal(err)
 	}

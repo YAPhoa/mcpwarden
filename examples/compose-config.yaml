@@ -1,20 +1,30 @@
+# In the container. compose.yaml publishes it on 127.0.0.1 only; the ui
+# container reaches it over the Compose network.
 listen: 0.0.0.0:8787
 downstream_auth:
   bearer_token_env: MCPWARDEN_TOKEN
 
-# Add stdio or HTTP upstreams here. The gateway stays up with an empty list.
+# Config upstreams are served to every account. Add stdio or HTTP upstreams
+# here; the gateway stays up with an empty list.
 upstreams: []
-
-managed_upstreams:
-  path: /data/managed-upstreams.enc
-  key_env: MCPWARDEN_CREDENTIAL_KEY
 
 policy:
   default: allow
 
-audit:
-  path: /data/audit.jsonl
+# The catalog, tool-call history and the owner vault. The data volume holds
+# the SQLite file.
+storage:
+  driver: sqlite
+  path: /data/mcpwarden.db
+  key_env: MCPWARDEN_CREDENTIAL_KEY
 
-# Basic panel accounts. Close registration after creating the intended users.
+# Panel accounts. Set allow_registration to false and restart once your own
+# account exists.
 accounts:
   allow_registration: true
+
+# Vault and access windows. The owner routes need HTTPS: start with
+# compose.tls.yaml, which pins the ui container at this address. Over plain
+# HTTP the panel works but the vault stays closed.
+owner_security:
+  trusted_proxies: ["172.30.87.2/32"]

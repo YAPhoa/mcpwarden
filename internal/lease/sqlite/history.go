@@ -62,7 +62,7 @@ func insertHistory(t *tx, h catalogdb.HistoryRow) error {
 
 // settled matches every event except admissions. The filter indexes are
 // partial on this exact predicate, which SQLite matches term by term.
-const settled = `(h.event_type IS NULL OR h.event_type <> 'tool.dispatch.admitted')`
+const settled = `h.event_type <> 'tool.dispatch.admitted'`
 
 // window builds the newest HistoryWindow+1 matching visible events with their
 // position in history order, as the PostgreSQL store does: settled events

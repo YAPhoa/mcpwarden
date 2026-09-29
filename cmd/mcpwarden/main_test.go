@@ -1,10 +1,11 @@
 package main
 
 import (
-	"github.com/yaphoa/mcpwarden/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/yaphoa/mcpwarden/internal/config"
 )
 
 func TestOriginValidation(t *testing.T) {

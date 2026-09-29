@@ -30,31 +30,24 @@ policy:
     - match: "remote__*"
       action: allow
 
-audit:
-  path: ./audit.jsonl # Persistent file required: admission is synced before dispatch.
+# The catalog, tool-call history and the owner vault live in one SQLite file
+# (the default) or PostgreSQL database (docs/storage.md). Without this
+# section the gateway uses SQLite at /data/mcpwarden.db, the container path. The
+# gateway refuses to start if the database is unavailable and stops if it is
+# lost. --stdio needs SQLite, and cannot share the file with a running
+# gateway: give each its own path, or connect the client over HTTP.
+storage:
+  driver: sqlite            # sqlite (default) or postgres
+  path: ./mcpwarden.db      # sqlite only; a local filesystem, not a network share; absolute for --stdio
+  # database_url_env: MCPWARDEN_DATABASE_URL  # postgres only: the runtime role DSN
+  key_env: MCPWARDEN_CREDENTIAL_KEY
 
-# Optional user-registered remote upstreams, stored in an encrypted file:
-# managed_upstreams:
-#   path: ./managed-upstreams.enc
-#   key_env: MCPWARDEN_CREDENTIAL_KEY
-
-# Optional database storage (docs/storage.md), replacing managed_upstreams and
-# audit.path: the catalog, tool-call history and the owner vault live in one
-# SQLite file or PostgreSQL database. With it, remove managed_upstreams and
-# audit.path. The gateway refuses to start if the database is unavailable and
-# stops if it is lost; it never falls back to the files. --stdio is refused.
-# storage:
-#   driver: sqlite            # sqlite (default) or postgres
-#   path: ./mcpwarden.db      # sqlite only; a local filesystem, not a network share
-#   # database_url_env: MCPWARDEN_DATABASE_URL  # postgres only: runtime role DSN
-#   key_env: MCPWARDEN_CREDENTIAL_KEY
-
-# Optional local panel accounts (requires managed_upstreams or storage,
-# incompatible with oauth):
+# Optional local panel accounts (incompatible with oauth). Config upstreams
+# are served to every account, so close registration once yours exists:
 # accounts:
 #   allow_registration: true
 
-# Optional owner security API (requires accounts and storage). Adds vault,
+# Optional owner security API (requires accounts). Adds vault,
 # access-request, approval and lease routes. Personal connectors with
 # credentials (bearer, API key, custom headers) need it: their credentials
 # live only in the owner's vault and each call runs inside an owner-activated

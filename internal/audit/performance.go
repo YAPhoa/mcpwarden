@@ -12,17 +12,6 @@ type Latency struct {
 	buckets    [32]int64
 }
 
-func (s *Latency) observe(us int64) {
-	s.Count++
-	s.MeanUS += (float64(us) - s.MeanUS) / float64(s.Count)
-	if us > s.MaxUS {
-		s.MaxUS = us
-	}
-	s.buckets[Bucket(us)]++
-	s.P50UpperUS = s.percentile(50)
-	s.P95UpperUS = s.percentile(95)
-}
-
 // Bucket is the fixed logarithmic bucket for a duration in microseconds.
 func Bucket(us int64) int {
 	i := 0
@@ -69,19 +58,4 @@ type Performance struct {
 	// Capped reports that more calls match than an indexed store reads; the
 	// total and these timings then cover the newest ones only.
 	Capped bool `json:"-"`
-}
-
-func (s *Performance) observe(r Record) {
-	if r.Timing == nil {
-		return
-	}
-	s.TimedCalls++
-	if r.Status != "ok" {
-		s.FailedCalls++
-	}
-	s.Handler.observe(r.Timing.HandlerUS)
-	s.Gateway.observe(r.Timing.GatewayUS)
-	if r.Timing.Forwarded {
-		s.Upstream.observe(r.Timing.UpstreamUS)
-	}
 }

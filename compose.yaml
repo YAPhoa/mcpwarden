@@ -11,7 +11,7 @@ services:
       MCPWARDEN_INTROSPECTION_CLIENT_SECRET: ${MCPWARDEN_INTROSPECTION_CLIENT_SECRET:-}
     volumes:
       - ./config.yaml:/config/config.yaml:ro
-      - audit_data:/data
+      - data:/data
     ports:
       - "127.0.0.1:8787:8787"
     restart: unless-stopped
@@ -25,5 +25,8 @@ services:
       - "127.0.0.1:8788:80"
     restart: unless-stopped
 
+# Builds before the database-only release used the audit_data volume. It is
+# no longer declared, so nothing reads it and "down --volumes" leaves it on
+# disk as the backup.
 volumes:
-  audit_data:
+  data:

@@ -1,0 +1,28 @@
+# Optional HTTPS for the panel. The owner vault (/vault) needs it: the
+# gateway refuses owner routes over plain HTTP. Start with
+#   docker compose -f compose.yaml -f compose.tls.yaml up -d
+# after putting cert.pem and key.pem in MCPWARDEN_TLS_DIR (default ./tls),
+# for example from mkcert for localhost. The panel is then
+# https://localhost:8443. See docs/guide/configuration.md.
+#
+# The gateway trusts X-Forwarded-Proto only from the ui container, so the
+# network gets a fixed subnet and the ui container a pinned address, which
+# owner_security.trusted_proxies names. Other containers get addresses from
+# ip_range, which excludes it.
+services:
+  ui:
+    volumes:
+      - ./ui/nginx-tls.conf:/etc/nginx/conf.d/tls.conf:ro
+      - ${MCPWARDEN_TLS_DIR:-./tls}:/etc/nginx/tls:ro
+    ports:
+      - "127.0.0.1:8443:443"
+    networks:
+      default:
+        ipv4_address: 172.30.87.2
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.87.0/24
+          ip_range: 172.30.87.128/25

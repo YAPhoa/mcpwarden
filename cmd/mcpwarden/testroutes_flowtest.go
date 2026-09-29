@@ -20,7 +20,7 @@ func init() {
 		mux.Handle("/api/test/discovery/", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			name := strings.TrimPrefix(r.URL.Path, "/api/test/discovery/")
 			var tools []*mcp.Tool
-			if r.Method != http.MethodPut || rs.store == nil || json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&tools) != nil {
+			if r.Method != http.MethodPut || json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&tools) != nil {
 				http.Error(w, "invalid test discovery", http.StatusBadRequest)
 				return
 			}

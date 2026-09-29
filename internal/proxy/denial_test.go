@@ -2,10 +2,8 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/approval"
 	"github.com/yaphoa/mcpwarden/internal/audit"
+	"github.com/yaphoa/mcpwarden/internal/audit/audittest"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/policy"
 	"github.com/yaphoa/mcpwarden/internal/registry"
@@ -20,7 +19,7 @@ import (
 )
 
 // guardedDenialCall runs one call against an unreachable upstream
-// and returns its result and the JSONL audit records it wrote.
+// and returns its result and the audit records it wrote.
 func guardedDenialCall(t *testing.T, u config.Upstream, security *LeasedExecution) (*mcp.CallToolResult, []audit.Record) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -28,12 +27,7 @@ func guardedDenialCall(t *testing.T, u config.Upstream, security *LeasedExecutio
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := t.TempDir() + "/audit.jsonl"
-	log, err := audit.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
+	log := &audittest.Memory{}
 	p := New(registry.New(), pol, approval.None{}, log, logger)
 	p.Owner = "owner"
 	p.Security = security
@@ -52,19 +46,8 @@ func guardedDenialCall(t *testing.T, u config.Upstream, security *LeasedExecutio
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var records []audit.Record
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		var r audit.Record
-		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			t.Fatal(err)
-		}
-		records = append(records, r)
-	}
-	return res, records
+	m.Close() // Join the call before reading its records.
+	return res, log.Records()
 }
 
 func assertGuardedDenial(t *testing.T, res *mcp.CallToolResult, records []audit.Record) {

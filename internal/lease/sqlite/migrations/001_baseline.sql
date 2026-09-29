@@ -402,9 +402,9 @@ CREATE TABLE history_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_id TEXT NOT NULL,
     event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 1 AND 200),
-    schema_version INTEGER NOT NULL CHECK (schema_version BETWEEN 0 AND 2),
-    event_type TEXT CHECK (event_type IN ('tool.dispatch.admitted','tool.dispatch.completed','tool.dispatch.denied')),
-    invocation_id TEXT,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+    event_type TEXT NOT NULL CHECK (event_type IN ('tool.dispatch.admitted','tool.dispatch.completed','tool.dispatch.denied')),
+    invocation_id TEXT NOT NULL CHECK (length(invocation_id) BETWEEN 1 AND 200),
     tool_id TEXT NOT NULL,
     tool TEXT NOT NULL,
     upstream TEXT NOT NULL,
@@ -424,7 +424,6 @@ CREATE TABLE history_events (
     gateway_bucket INTEGER NOT NULL CHECK (gateway_bucket BETWEEN 0 AND 31),
     upstream_bucket INTEGER NOT NULL CHECK (upstream_bucket BETWEEN 0 AND 31),
     record TEXT NOT NULL,
-    CHECK ((schema_version = 2) = (event_type IS NOT NULL AND invocation_id IS NOT NULL)),
     UNIQUE (owner_id, event_id),
     UNIQUE (owner_id, invocation_id, event_type)
 ) STRICT;
@@ -437,16 +436,15 @@ BEGIN SELECT RAISE(ABORT, 'append-only history'); END;
 -- filter, in history order, and open admissions from history_open. The index
 -- predicate matches the query's `settled` expression exactly.
 CREATE INDEX history_owner_recent ON history_events(owner_id, history_ns DESC, event_id DESC)
-    WHERE (event_type IS NULL OR event_type <> 'tool.dispatch.admitted');
+    WHERE event_type <> 'tool.dispatch.admitted';
 CREATE INDEX history_owner_tool ON history_events(owner_id, tool_id, history_ns DESC, event_id DESC)
-    WHERE (event_type IS NULL OR event_type <> 'tool.dispatch.admitted');
+    WHERE event_type <> 'tool.dispatch.admitted';
 CREATE INDEX history_owner_upstream ON history_events(owner_id, upstream, history_ns DESC, event_id DESC)
-    WHERE (event_type IS NULL OR event_type <> 'tool.dispatch.admitted');
+    WHERE event_type <> 'tool.dispatch.admitted';
 CREATE INDEX history_owner_status ON history_events(owner_id, status, history_ns DESC, event_id DESC)
-    WHERE (event_type IS NULL OR event_type <> 'tool.dispatch.admitted');
+    WHERE event_type <> 'tool.dispatch.admitted';
 CREATE INDEX history_owner_actor ON history_events(owner_id, actor_access_id, history_ns DESC, event_id DESC)
-    WHERE (event_type IS NULL OR event_type <> 'tool.dispatch.admitted');
-CREATE INDEX history_owner_invocation ON history_events(owner_id, invocation_id) WHERE invocation_id IS NOT NULL;
+    WHERE event_type <> 'tool.dispatch.admitted';
 
 -- The latest name snapshot of each tool, for the tool filter. Each insert
 -- moves it forward only.

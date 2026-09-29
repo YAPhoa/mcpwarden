@@ -17,9 +17,9 @@ import (
 )
 
 // errCatalogFailed stops the gateway when a catalog or history commit has an
-// unknown outcome or the database session is lost. It never falls back to
-// the file catalog; restart after the database is healthy.
-var errCatalogFailed = errors.New("catalog storage failed; the gateway stopped without falling back to the file catalog")
+// unknown outcome or the database session is lost. Restart after the
+// database is healthy.
+var errCatalogFailed = errors.New("catalog storage failed; the gateway stopped")
 
 // storageDB is what the gateway needs from a store: the lease executor,
 // custody, the catalog and indexed history.
@@ -51,6 +51,9 @@ func openDatabase(ctx context.Context, s *config.Storage, logger *slog.Logger) (
 	switch s.Driver {
 	case "postgres":
 		db, err := postgres.Open(ctx, s.DatabaseURL)
+		if errors.Is(err, postgres.ErrSchemaReset) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, errors.New("PostgreSQL storage unavailable")
 		}
@@ -92,9 +95,6 @@ func openStorage(ctx context.Context, cfg config.Config, pol *policy.Policy, log
 	}
 	if err := repo.Load(ctx); err != nil {
 		security.close()
-		if errors.Is(err, catalogdb.ErrNotActive) {
-			return nil, err
-		}
 		return nil, errors.New("catalog could not be loaded from storage")
 	}
 	repo.Attach(security.service)

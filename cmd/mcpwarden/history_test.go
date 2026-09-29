@@ -8,14 +8,12 @@ import (
 
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/config"
 )
 
 func TestUnknownHistoryOmitsCompletionMetadata(t *testing.T) {
-	log, err := audit.Open(t.TempDir() + "/audit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
+	var cfg config.Config
+	log := testStorage(t, &cfg).history
 	r := audit.NewInvocation(context.Background(), "alice")
 	r.ToolID, r.Tool, r.ArgsSHA256 = "tool-id", "remote__echo", audit.HashArgs(json.RawMessage(`{}`))
 	if err := log.Write(r.Admission()); err != nil {

@@ -1,7 +1,6 @@
 package dbcatalog
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"encoding/json"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
-	"github.com/yaphoa/mcpwarden/internal/identity"
 )
 
 // state is the decoded catalog. Payloads are authoritative; plain columns
@@ -18,9 +16,7 @@ type state struct {
 	accounts   map[string]catalog.Account      // by username
 	access     map[string]catalog.AccessRecord // by ID
 	entries    map[string]catalog.Entry        // by connector ID
-	grants     map[string]int64                // connector ID: OAuth grant revision
 	tombstones map[string]tombstone            // connector ID
-	legacy     map[string]catalog.Lifecycle    // file tombstones without an owner
 	discovery  map[catalog.ProviderKey]catalog.Discovery
 	visibility map[catalog.ProviderKey]catalog.Visibility
 	revisions  map[catalog.ProviderKey]int64 // provider security revision
@@ -28,8 +24,7 @@ type state struct {
 
 // visibilityRecord is the sealed visibility payload. Revision counts changes to
 // a provider's availability and visible tools; access scopes bind it as the
-// connector security revision. The file catalog keeps no counter, so an import
-// starts at zero and a rollback export drops it.
+// connector security revision.
 type visibilityRecord struct {
 	catalog.Visibility
 	Revision int64 `json:"security_revision,omitempty"`
@@ -42,8 +37,8 @@ type tombstone struct {
 
 func newState() *state {
 	return &state{accounts: map[string]catalog.Account{}, access: map[string]catalog.AccessRecord{}, entries: map[string]catalog.Entry{},
-		grants: map[string]int64{}, tombstones: map[string]tombstone{}, legacy: map[string]catalog.Lifecycle{},
-		discovery: map[catalog.ProviderKey]catalog.Discovery{}, visibility: map[catalog.ProviderKey]catalog.Visibility{}, revisions: map[catalog.ProviderKey]int64{}}
+		tombstones: map[string]tombstone{},
+		discovery:  map[catalog.ProviderKey]catalog.Discovery{}, visibility: map[catalog.ProviderKey]catalog.Visibility{}, revisions: map[catalog.ProviderKey]int64{}}
 }
 
 // sameTime compares a payload time with its column, which both stores keep at
@@ -78,7 +73,7 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 		if err := s.open(accountAAD(row.OwnerID), row.Sealed, &a); err != nil {
 			return nil, err
 		}
-		if a.ID != row.OwnerID || a.Username != row.Username || !sameTime(a.CreatedAt, row.CreatedAt) || !sameTime(a.UpdatedAt, row.UpdatedAt) || a.ClientTokenHash != "" {
+		if a.ID != row.OwnerID || a.Username != row.Username || !sameTime(a.CreatedAt, row.CreatedAt) || !sameTime(a.UpdatedAt, row.UpdatedAt) {
 			return nil, bad("account")
 		}
 		if _, dup := st.accounts[a.Username]; dup {
@@ -105,7 +100,7 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 			if err := s.open(connectorAAD(row.ID), row.Sealed, &life); err != nil {
 				return nil, err
 			}
-			if row.Name != "" || row.GrantID != "" || !sameTime(life.DeletedAt, row.DeletedAt) || !sameTime(life.CreatedAt, row.CreatedAt) || !sameTime(life.UpdatedAt, row.UpdatedAt) {
+			if row.Name != "" || !sameTime(life.DeletedAt, row.DeletedAt) || !sameTime(life.CreatedAt, row.CreatedAt) || !sameTime(life.UpdatedAt, row.UpdatedAt) {
 				return nil, bad("connector tombstone")
 			}
 			st.tombstones[row.ID] = tombstone{owner: row.OwnerID, life: life}
@@ -115,7 +110,7 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 		if err := s.open(connectorAAD(row.ID), row.Sealed, &stored); err != nil {
 			return nil, err
 		}
-		if stored.old() || row.GrantID != "" {
+		if stored.old() {
 			return nil, fmt.Errorf("stored connector was %w", catalog.ErrOldFormat)
 		}
 		e := stored.Entry
@@ -127,20 +122,6 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 			return nil, bad("connector")
 		}
 		st.entries[e.ID] = e
-		st.grants[e.ID] = row.GrantRevision
-	}
-	for _, row := range rows.Tombstones {
-		var life catalog.Lifecycle
-		if err := s.open("tombstone/"+row.ConnectorID, row.Sealed, &life); err != nil {
-			return nil, err
-		}
-		if !sameTime(life.DeletedAt, row.DeletedAt) {
-			return nil, bad("connector tombstone")
-		}
-		if _, dup := st.tombstones[row.ConnectorID]; dup {
-			return nil, bad("connector tombstone")
-		}
-		st.legacy[row.ConnectorID] = life
 	}
 	for _, row := range rows.Discovery {
 		var d catalog.Discovery
@@ -169,34 +150,6 @@ func (s *sealer) decode(rows catalogdb.Rows) (*state, error) {
 	return st, nil
 }
 
-// snapshot converts the decoded state to the file catalog's shape. Tombstones
-// with an owner lose it, since the file never recorded one.
-func (st *state) snapshot() catalog.Snapshot {
-	snap := catalog.Snapshot{Deleted: map[string]catalog.Lifecycle{}, Discovery: map[catalog.ProviderKey]catalog.Discovery{}, Visibility: map[catalog.ProviderKey]catalog.Visibility{}}
-	for _, a := range st.accounts {
-		snap.Accounts = append(snap.Accounts, a)
-	}
-	for _, r := range st.access {
-		snap.Access = append(snap.Access, r)
-	}
-	for _, e := range st.entries {
-		snap.Entries = append(snap.Entries, e)
-	}
-	for id, l := range st.legacy {
-		snap.Deleted[id] = l
-	}
-	for id, t := range st.tombstones {
-		snap.Deleted[id] = t.life
-	}
-	for k, d := range st.discovery {
-		snap.Discovery[k] = d
-	}
-	for k, v := range st.visibility {
-		snap.Visibility[k] = v
-	}
-	return snap
-}
-
 // Row builders. Each seals the full record bound to its row identity.
 
 func (s *sealer) accountRow(a catalog.Account) (catalogdb.Account, error) {
@@ -211,23 +164,15 @@ func (s *sealer) accessRow(r catalog.AccessRecord) (catalogdb.Access, error) {
 		RevokedAt: r.RevokedAt, DeletedAt: r.DeletedAt, Sealed: sealed}, err
 }
 
-func (s *sealer) connectorRow(e catalog.Entry, revision int64) (catalogdb.Connector, error) {
+func (s *sealer) connectorRow(e catalog.Entry) (catalogdb.Connector, error) {
 	sealed, err := s.seal(connectorAAD(e.ID), e)
-	return catalogdb.Connector{ID: e.ID, OwnerID: e.Owner, Name: e.Name, AuthType: e.AuthType, GrantRevision: revision,
+	return catalogdb.Connector{ID: e.ID, OwnerID: e.Owner, Name: e.Name, AuthType: e.AuthType,
 		CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, Sealed: sealed}, err
 }
 
 func (s *sealer) tombstoneRow(id, owner string, life catalog.Lifecycle) (catalogdb.Connector, error) {
 	sealed, err := s.seal(connectorAAD(id), life)
 	return catalogdb.Connector{ID: id, OwnerID: owner, AuthType: "", CreatedAt: life.CreatedAt, UpdatedAt: life.UpdatedAt, DeletedAt: life.DeletedAt, Sealed: sealed}, err
-}
-
-func (s *sealer) legacyTombstoneRow(id string, life catalog.Lifecycle) (catalogdb.Tombstone, error) {
-	if !identity.Valid(id) || life.DeletedAt.IsZero() {
-		return catalogdb.Tombstone{}, fmt.Errorf("invalid stored connector tombstone")
-	}
-	sealed, err := s.seal("tombstone/"+id, life)
-	return catalogdb.Tombstone{ConnectorID: id, DeletedAt: life.DeletedAt, Sealed: sealed}, err
 }
 
 func (s *sealer) discoveryRow(k catalog.ProviderKey, d catalog.Discovery) (catalogdb.Discovery, error) {
@@ -238,19 +183,4 @@ func (s *sealer) discoveryRow(k catalog.ProviderKey, d catalog.Discovery) (catal
 func (s *sealer) visibilityRow(k catalog.ProviderKey, v catalog.Visibility, revision int64) (catalogdb.Visibility, error) {
 	sealed, err := s.seal(visibilityAAD(k.Owner, k.Provider), visibilityRecord{Visibility: v, Revision: revision})
 	return catalogdb.Visibility{OwnerID: k.Owner, Provider: k.Provider, Mode: v.Mode, Disabled: v.Disabled, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt, Sealed: sealed}, err
-}
-
-// sameSnapshot compares every field, secrets included, without exposing them.
-func sameSnapshot(a, b catalog.Snapshot) (bool, error) {
-	x, err := a.Canonical()
-	if err != nil {
-		return false, err
-	}
-	defer clear(x)
-	y, err := b.Canonical()
-	if err != nil {
-		return false, err
-	}
-	defer clear(y)
-	return bytes.Equal(x, y), nil
 }

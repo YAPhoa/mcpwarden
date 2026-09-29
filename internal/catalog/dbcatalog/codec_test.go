@@ -17,8 +17,8 @@ type rowsLoader struct{ rows catalogdb.Rows }
 
 func (l rowsLoader) LoadCatalog(context.Context) (catalogdb.Rows, error) { return l.rows, nil }
 
-// A connector sealed by an older build (header values, OAuth settings or a
-// grant) is refused at load. An older no-auth connector (empty header map,
+// A connector sealed by an older build (header values or OAuth settings) is
+// refused at load. An older no-auth connector (empty header map,
 // null OAuth) still loads.
 func TestOldFormatRefusedOnLoad(t *testing.T) {
 	raw := make([]byte, 32)
@@ -30,25 +30,19 @@ func TestOldFormatRefusedOnLoad(t *testing.T) {
 	}
 	at := time.Now().UTC().Truncate(time.Microsecond)
 	for name, tc := range map[string]struct {
-		mutate  func(p map[string]any) (grant bool)
+		mutate  func(p map[string]any)
 		refused bool
 	}{
-		"header values": {func(p map[string]any) bool {
-			p["headers"] = map[string]string{"Authorization": "Bearer synthetic"}
-			return false
-		}, true},
-		"oauth":         {func(p map[string]any) bool { p["oauth"] = map[string]any{"scopes": []string{"read"}}; return false }, true},
-		"grant id":      {func(p map[string]any) bool { return true }, true},
-		"empty headers": {func(p map[string]any) bool { p["headers"] = map[string]string{}; p["oauth"] = nil; return false }, false},
+		"header values": {func(p map[string]any) { p["headers"] = map[string]string{"Authorization": "Bearer synthetic"} }, true},
+		"oauth":         {func(p map[string]any) { p["oauth"] = map[string]any{"scopes": []string{"read"}} }, true},
+		"empty headers": {func(p map[string]any) { p["headers"] = map[string]string{}; p["oauth"] = nil }, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			id := identity.New()
 			p := map[string]any{"id": id, "owner": "alice", "name": "svc", "url": "https://example.test/mcp", "call_timeout": "30s",
 				"created_at": at, "updated_at": at}
 			row := catalogdb.Connector{ID: id, OwnerID: "alice", Name: "svc", CreatedAt: at, UpdatedAt: at}
-			if tc.mutate(p) {
-				row.GrantID = "g1"
-			}
+			tc.mutate(p)
 			if row.Sealed, err = s.seal(connectorAAD(id), p); err != nil {
 				t.Fatal(err)
 			}
