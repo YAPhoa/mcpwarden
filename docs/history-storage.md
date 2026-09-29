@@ -102,8 +102,8 @@ remain required. Its leased-invocation table is not yet an `audit.Store` reader.
 
 ## PostgreSQL history
 
-With `managed_upstreams.backend: postgres`, `pgcatalog.History` is the
-`audit.Store`. Each record is one row in `history_events` that keeps the exact
+With the [`storage`](storage.md) section, `dbcatalog.History` is the
+`audit.Store` on PostgreSQL or SQLite. Each record is one row in `history_events` that keeps the exact
 JSONL bytes the file writer would have written, plus indexed columns derived
 from them: owner, event and invocation IDs, schema version, event type, tool ID
 and name, upstream, status, actor, start and ordering times in nanoseconds,

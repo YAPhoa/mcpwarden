@@ -43,7 +43,7 @@ imported. See
   byte offset and hash state). A rerun after an interruption continues from the
   last checkpoint. A rerun after success only re-verifies and never adds rows.
   Event and invocation IDs are unique per owner, so a duplicate fails the batch.
-- **No fallback.** With `backend: postgres` the gateway never reads the catalog
+- **No fallback.** With `storage.driver: postgres` the gateway never reads the catalog
   file. It refuses to start unless PostgreSQL is the active catalog. If a
   commit outcome is unknown or the database session is lost, it fails closed:
   authentication stops, changes fail, and the process exits with `PostgreSQL
@@ -52,10 +52,8 @@ imported. See
   says `importing`, `active` or `rolling_back`, the file backend refuses to
   start. After a rollback it says `rolled_back` and admits only the file the
   rollback wrote. An older backup is refused because it could revive revoked
-  access. A file gateway with `owner_security` also checks the database and
-  refuses unless the catalog there is absent or rolled back. Do not delete the
-  marker. It is the only guard for a file gateway that runs without
-  `owner_security`.
+  access. Do not delete the marker. It is the only guard for a file gateway,
+  which never connects to the database (`owner_security` now needs `storage`).
 - **A marker belongs to one database.** Every step checks the marker under the
   file lock before replacing it. It must be absent or carry the import (and
   rollback) ID recorded in the database the step runs against. A marker from
@@ -83,8 +81,7 @@ changing which of its tools are visible, is a connector security change: the
 same commit ends that connector's pending requests and windows (other
 connectors keep theirs) and moves its security revision, which access scopes
 bind, so undoing the change revives neither. Repeating the current setting
-changes nothing. With the file catalog and `owner_security`, such a change
-ends all of the owner's windows before the file is written. The
+changes nothing. The
 in-memory view changes only after the commit succeeds. Hard limits on active
 keys and sessions are checked in memory and again by a count inside the
 transaction.
@@ -121,14 +118,15 @@ Tool-call history rows commit before the call is dispatched, as before.
 5. **Cut over:** `mcpwarden-catalog -config /config/config.yaml cutover`. This
    re-verifies everything against the snapshot, marks PostgreSQL active, then
    writes the `active` marker.
-6. **Switch the config** to `managed_upstreams.backend: postgres` and start the
-   gateway. Startup takes the executor lock, makes old requests stale, suspends
+6. **Switch the config** to a [`storage`](storage.md) section with
+   `driver: postgres` and the runtime role's URL, remove `managed_upstreams`
+   and `audit.path`, and start the gateway. Startup takes the executor lock, makes old requests stale, suspends
    old windows, then loads and checks the catalog.
 7. **Check:** sign in, list access keys, open call history, list connectors and
    make one tool call. `mcpwarden-catalog status` should show `active`.
 
 **Failure before cutover.** Before step 5 the file is still authoritative and
-unchanged. Run `mcpwarden-catalog abort`, keep `backend: file` and start the
+unchanged. Run `mcpwarden-catalog abort`, keep the file configuration and start the
 gateway. Abort deletes the imported rows and marks the state `aborting` in one
 commit, then removes its marker or restores the `rolled_back` marker the import
 replaced, and only then deletes the state. If it stops partway, the file
@@ -160,8 +158,10 @@ passwords changed since. Rollback exports the current PostgreSQL state instead.
    rollback with `a catalog or history file changed after cutover`: move that
    file aside and run it again. If the rollback stops partway, run it again; a
    finished one only rewrites the marker.
-3. **Switch the config** back to `backend: file` and start the gateway. With
-   owner security it starts with a new boot, and suspended windows stay ended.
+3. **Switch the config** back to the file catalog: remove the `storage`
+   section, set `managed_upstreams` and `audit.path` to the exported files, and
+   remove `owner_security`, which needs `storage`. The file gateway has no
+   access windows; the suspended ones stay ended in the database.
 
 The manifest's `reauthorize_connectors` list is always empty: connectors hold no
 upstream OAuth grants.
@@ -169,9 +169,11 @@ upstream OAuth grants.
 Access windows never survive the rollback. An approved call that was running
 keeps its admission record. If its completion was never written, history shows
 it as unknown, and the call is never replayed. Tested by
-`testPostgresCatalogLossAndRollback` (a real approved window, key revocation,
-password change and new history, then database loss, rollback
-and a file restart) and `TestRollbackResumesAndRefusesReplacedFiles`.
+`TestStorageLossStopsGateway` (a real approved window, key revocation, password
+change and new history, then database loss) and
+`TestRollbackResumesAndRefusesReplacedFiles` (an open window suspended under the
+rollback ID, key revocation and new history carried into the export, and a
+database that refuses to load once rolled back).
 
 **Forward fixes.** A database snapshot or rollback cannot undo changes made
 outside the gateway. If a provider rotated or revoked a credential, save the new
@@ -183,8 +185,7 @@ as usual. Credentials copied elsewhere must be rotated at the provider.
 - One gateway process per catalog. There is no active-active mode.
 - A second import after a rollback is not supported yet. It needs a fresh
   database, or the catalog rows removed by hand.
-- The PostgreSQL backend requires accounts mode with owner security. It does
-  not support external OAuth mode or `--stdio`.
+- The `storage` section does not support `--stdio`.
 - Migration requires a Unix host for the file lock.
 - The snapshot directory holds the encrypted catalog and the history file. Keep
   it with your backups and delete it once you no longer need it.

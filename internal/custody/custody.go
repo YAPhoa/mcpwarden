@@ -42,7 +42,16 @@ func (p Policy) Valid() bool {
 		stored == !p.ChangedAt.IsZero() && stored == identity.Valid(p.ChangedBy)
 }
 
-// Tx is implemented by the PostgreSQL owner transaction. Policy writes belong
+// Page bounds for Tx reads, the same on every store.
+const (
+	// MaxEventPage bounds SecurityEvents.
+	MaxEventPage = 200
+	// MaxEndedLeases bounds RecentLeases. Ended windows are display history
+	// only; reading them never reactivates or extends a window.
+	MaxEndedLeases = 50
+)
+
+// Tx is implemented by each store's owner transaction. Policy writes belong
 // inside lease.Service.ChangeAtomic so that a change stales pending requests and
 // revokes live leases in the same transaction.
 type Tx interface {

@@ -42,9 +42,6 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if stdio && cfg.Audit.Path == "-" {
-		return fmt.Errorf("audit.path '-' cannot be used with --stdio")
-	}
 	pol, err := policy.New(cfg.Policy)
 	if err != nil {
 		return err
@@ -55,17 +52,19 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	defer fail(nil)
 	var store catalog.Repository
 	var history audit.Store
-	var pg *pgBackend
-	if cfg.Managed != nil && cfg.Managed.Backend == "postgres" {
+	var db *storageBackend
+	if cfg.Storage != nil {
 		if stdio {
-			return fmt.Errorf("--stdio cannot use the postgres catalog backend")
+			return fmt.Errorf("--stdio does not support the storage section yet; connect this client over HTTP")
 		}
-		pg, err = openPostgresCatalog(ctx, cfg, pol, logger, fail)
+		// The executor and its custody caches load before any runtime
+		// exists, so no connector can start without its guard.
+		db, err = openStorage(ctx, cfg, pol, logger, fail)
 		if err != nil {
 			return err
 		}
-		defer pg.close()
-		store, history = pg.repo, pg.history
+		defer db.close()
+		store, history = db.repo, db.history
 	} else {
 		auditLog, err := audit.Open(cfg.Audit.Path)
 		if err != nil {
@@ -82,22 +81,9 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 			store = fileStore
 		}
 	}
-	// The owner security executor and its custody caches load before any
-	// runtime exists, so no connector can start without its guard.
 	var security *securityAPI
-	var fileAccounts *accountAuth
-	if pg != nil {
-		security = pg.security
-	} else if cfg.Accounts != nil && cfg.OwnerSecurity != nil && !stdio {
-		fileAccounts = newAccountAuth(store, cfg)
-		security, err = openSecurity(ctx, cfg, store, pol, fileAccounts, logger)
-		if err != nil {
-			return err
-		}
-		defer security.close()
-		if err := fileAuthority(ctx, security.store); err != nil {
-			return err
-		}
+	if db != nil && cfg.OwnerSecurity != nil {
+		security = db.security
 	}
 	rs := newRuntimes(ctx, cfg, pol, history, store, logger)
 	defer rs.close()
@@ -155,29 +141,16 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		apiProtect = func(h http.Handler) http.Handler {
 			return originOnly(rs.access.keys(h, true, resource.ProtectAPI(h)), cfg.Origins)
 		}
-	} else if pg != nil {
-		// The PostgreSQL catalog coordinates every change with the lease
-		// service itself, so the file backend's guards stay unset.
-		pg.accounts.onRevoke = rs.access.closeCredential
-		pg.security.register(mux)
-		accounts := pg.accounts
-		mcpHandler = accounts.protect(mcpHandler, false)
-		clientProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true, true) }
-		apiProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true) }
-		mux.Handle("/api/auth/", originOnly(http.HandlerFunc(accounts.authHandler), cfg.Origins))
 	} else if cfg.Accounts != nil {
-		accounts := fileAccounts
-		if accounts == nil {
-			accounts = newAccountAuth(store, cfg)
+		// The database catalog coordinates every change with the lease
+		// service itself, so the file backend's guards stay unset.
+		accounts := newAccountAuth(store, cfg)
+		if db != nil {
+			accounts = db.accounts
 		}
 		accounts.onRevoke = rs.access.closeCredential
 		if security != nil {
 			security.register(mux)
-			accounts.guard = security.guardAccess
-			rs.access.guard = security.guardAccess
-			rs.providerGuard = security.guardAccess
-			accounts.sessionGuard = security.service.ChangeSessions
-			rs.access.sessionGuard = security.service.ChangeSessions
 		}
 		mcpHandler = accounts.protect(mcpHandler, false)
 		clientProtect = func(h http.Handler) http.Handler { return accounts.protect(h, true, true) }

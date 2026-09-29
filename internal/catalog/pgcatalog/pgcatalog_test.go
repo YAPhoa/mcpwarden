@@ -13,17 +13,19 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres/pgtest"
+	"github.com/yaphoa/mcpwarden/internal/lease/storetest"
 )
 
 // fixture is a realistic file catalog and history on a scratch database. All
@@ -165,7 +167,7 @@ func (noActivator) Stage(context.Context, string, lease.Credential, []byte) (lea
 }
 
 // gateway starts the runtime side as the PostgreSQL backend does.
-func (f *fixture) gateway() (*Repository, *postgres.Store, *lease.Service, *bool) {
+func (f *fixture) gateway() (*dbcatalog.Repository, *postgres.Store, *lease.Service, *bool) {
 	f.t.Helper()
 	db, err := postgres.Open(f.t.Context(), f.db.RuntimeDSN)
 	if err != nil {
@@ -176,7 +178,7 @@ func (f *fixture) gateway() (*Repository, *postgres.Store, *lease.Service, *bool
 		f.t.Fatal(err)
 	}
 	failed := new(bool)
-	repo, err := New(f.src.CatalogKey, db, func() { *failed = true })
+	repo, err := dbcatalog.New(f.src.CatalogKey, db, func() { *failed = true })
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -283,7 +285,7 @@ func TestImportPreservesCatalogAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	history := NewHistory(db)
+	history := dbcatalog.NewHistory(db)
 	for _, q := range []audit.HistoryFilter{
 		{Owner: f.alice, Page: 1, Size: 5}, {Owner: f.alice, Page: 2, Size: 5}, {Owner: f.alice, Page: 3, Size: 5},
 		{Owner: f.bob, Page: 1, Size: 100}, {Owner: f.alice, Status: "unknown", Page: 1, Size: 10},
@@ -483,7 +485,7 @@ func TestAbortBeforeCutoverRestoresFileGateway(t *testing.T) {
 		t.Fatal("abort after cutover", err)
 	}
 	_, db, _, _ := f.gateway()
-	indexed := NewHistory(db)
+	indexed := dbcatalog.NewHistory(db)
 	unknown, total, tools, _, err := indexed.QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Status: "unknown", Page: 1, Size: 25})
 	if err != nil || total != 1 || len(unknown) != 1 || unknown[0].EventType != audit.DispatchAdmitted || len(tools) != 1 || tools[0].Name != "remote__search" {
 		t.Fatal("history after a repeated import:", total, tools, err)
@@ -503,110 +505,6 @@ func TestAbortBeforeCutoverRestoresFileGateway(t *testing.T) {
 	}
 }
 
-// No MCP session survives a restart: EndStaleSessions ends every open one
-// with an event, and the owner can open new sessions afterwards.
-func TestStaleMCPSessionsEndAtStartup(t *testing.T) {
-	f := newFixture(t)
-	f.cutover()
-	repo, db, service, _ := f.gateway()
-	var ids []string
-	for i := range 10 {
-		a := catalog.AccessRecord{ID: identity.New(), Owner: f.bob, Name: fmt.Sprintf("session %d", i), Kind: "mcp", Role: "client", ParentID: "parent", SecretHash: fmt.Sprintf("%064x", 900+i)}
-		if err := repo.AddAccess(a); err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, a.ID)
-	}
-	f.stop(service, db) // unclean for the sessions: nothing ended them
-	repo, db, service, _ = f.gateway()
-	if err := repo.EndStaleSessions(); err != nil {
-		t.Fatal(err)
-	}
-	for _, owner := range []string{f.alice, f.bob} {
-		for _, a := range repo.AccessList(owner) {
-			if a.Kind == "mcp" && a.EndedAt.IsZero() {
-				t.Fatal("open MCP session after restart:", a.Name)
-			}
-		}
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='access.ended'"); n != len(ids) {
-		t.Fatal("access.ended events:", n)
-	}
-	next := catalog.AccessRecord{ID: identity.New(), Owner: f.bob, Name: "session 11", Kind: "mcp", Role: "client", ParentID: "parent", SecretHash: fmt.Sprintf("%064x", 999)}
-	if err := repo.AddAccess(next); err != nil {
-		t.Fatal("a new session after restart:", err)
-	}
-	f.stop(service, db)
-	restarted, _, _, _ := f.gateway()
-	if a, ok := restarted.AccessByID(f.bob, ids[0]); !ok || a.EndedAt.IsZero() {
-		t.Fatal("ending was not committed")
-	}
-}
-
-func TestRepositoryCommitsAtomicallyAndFailsClosed(t *testing.T) {
-	f := newFixture(t)
-	f.cutover()
-	repo, _, _, failed := f.gateway()
-	ctx := t.Context()
-
-	// Each change commits with its security event.
-	key := catalog.AccessRecord{Owner: f.alice, Name: "new", Kind: "api_key", Role: "client", SecretHash: strings.Repeat("f", 64)}
-	if err := repo.AddAccess(key); err != nil {
-		t.Fatal(err)
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1 AND event_type='access.created'", f.alice); n != 1 {
-		t.Fatal("access.created events", n)
-	}
-
-	// The active limit holds in the database transaction, not only in memory:
-	// concurrent additions never exceed it.
-	var wg sync.WaitGroup
-	for i := 0; i < 2*catalog.MaxAPIKeys; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_ = repo.AddAccess(catalog.AccessRecord{Owner: f.alice, Name: "k", Kind: "api_key", Role: "client", SecretHash: fmt.Sprintf("%063x%d", i, 1)})
-		}(i)
-	}
-	wg.Wait()
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.catalog_access WHERE owner_id=$1 AND kind='api_key' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())", f.alice); n != catalog.MaxAPIKeys {
-		t.Fatal("active key limit", n)
-	}
-
-	// A refused change publishes nothing, records no event and leaves the
-	// repository healthy.
-	created := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'")
-	if err := repo.Add(catalog.Entry{ID: identity.New(), Owner: f.alice, Name: "remote", URL: "https://example.com/other"}); err == nil {
-		t.Fatal("duplicate connector name accepted")
-	}
-	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='connector.created'"); n != created || *failed || len(repo.List(f.alice)) != 2 {
-		t.Fatal("refused change recorded an event, failed the repository or published", n)
-	}
-
-	// Losing the session fails closed: no authentication from the stale view,
-	// no change reported as saved, and no fallback.
-	if _, err := f.db.Admin.Exec(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='mcpwarden-security' AND datname=current_database()"); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !repo.Failed() {
-		if time.Now().After(deadline) {
-			t.Fatal("session loss not detected")
-		}
-		_ = repo.TouchAccess(f.alice, "missing")
-		time.Sleep(20 * time.Millisecond)
-	}
-	if _, ok := repo.AuthenticateAccess(f.tokens["agent"], "api_key"); ok {
-		t.Fatal("authenticated after storage loss")
-	}
-	if err := repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "all"}); !errors.Is(err, ErrUnavailable) {
-		t.Fatal("change without storage", err)
-	}
-	if repo.Visibility(f.alice, "remote").Mode != "selected" {
-		t.Fatal("uncommitted visibility published")
-	}
-}
-
 func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	f := newFixture(t)
 	f.cutover()
@@ -619,21 +517,35 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := audit.Record{Owner: f.alice, Tool: "remote__search", Upstream: "remote", Decision: "allow", Status: "ok", TS: time.Now().UTC(), ArgsSHA256: strings.Repeat("b", 64)}
-	if err := NewHistory(db).Write(live); err != nil {
+	if err := dbcatalog.NewHistory(db).Write(live); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Rollback(t.Context(), f.db.Admin, f.src); !errors.Is(err, ErrLocked) {
 		t.Fatal("rollback ran beside a PostgreSQL gateway", err)
 	}
 	f.stop(service, db)
-
-	// Interrupted after the database left the active state.
-	st, _, _ := Status(t.Context(), f.db.Admin)
-	st, err := beginRollback(t.Context(), f.db.Admin, st)
+	// An access window still open when the rollback starts.
+	window, err := postgres.Open(t.Context(), f.db.RuntimeDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.gatewayErr(); !errors.Is(err, ErrNotActive) {
+	leaseID := storetest.ActiveWindow(t, window)
+	f.closeStore(window)
+
+	// Interrupted after the database left the active state.
+	st, _, _ := Status(t.Context(), f.db.Admin)
+	st, err = beginRollback(t.Context(), f.db.Admin, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The rollback ends the window, with its event under the rollback ID.
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.leases WHERE lease_id=$1 AND state='suspended'", leaseID); n != 1 {
+		t.Fatal("rollback left the window open")
+	}
+	if n := f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE event_type='lease.suspended' AND lease_id=$1 AND boot_id=$2", leaseID, st.RollbackID); n != 1 {
+		t.Fatal("window suspension not audited under the rollback", n)
+	}
+	if _, err := f.gatewayErr(); !errors.Is(err, catalogdb.ErrNotActive) {
 		t.Fatal("PostgreSQL gateway loaded while rolling back", err)
 	}
 	// A file someone put back is never overwritten silently.
@@ -650,7 +562,7 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.RollbackID != st.RollbackID || m.LegacyHistory != int64(f.lines) || m.LiveHistory != 1 || m.EndedMCP != 0 {
+	if m.RollbackID != st.RollbackID || m.SuspendedLeases != 1 || m.LegacyHistory != int64(f.lines) || m.LiveHistory != 1 || m.EndedMCP != 0 {
 		t.Fatalf("manifest: %+v", m)
 	}
 	again, err := Rollback(t.Context(), f.db.Admin, f.src)
@@ -677,6 +589,9 @@ func TestRollbackResumesAndRefusesReplacedFiles(t *testing.T) {
 	}
 	if st, _, _ := Status(t.Context(), f.db.Admin); st.State != "rolled_back" {
 		t.Fatal(st.State)
+	}
+	if _, err := f.gatewayErr(); !errors.Is(err, catalogdb.ErrNotActive) {
+		t.Fatal("PostgreSQL gateway loaded after rollback", err)
 	}
 	if marker, ok, err := catalog.ReadMarker(f.src.CatalogPath); err != nil || !ok || marker.State != "rolled_back" || marker.RollbackID != m.RollbackID {
 		t.Fatal("marker", marker, err)
@@ -716,7 +631,7 @@ func (f *fixture) closeStore(db *postgres.Store) {
 	}
 }
 
-func (f *fixture) gatewayErr() (*Repository, error) {
+func (f *fixture) gatewayErr() (*dbcatalog.Repository, error) {
 	db, err := postgres.Open(f.t.Context(), f.db.RuntimeDSN)
 	if err != nil {
 		return nil, err
@@ -725,7 +640,7 @@ func (f *fixture) gatewayErr() (*Repository, error) {
 	if err := db.Start(f.t.Context(), identity.New()); err != nil {
 		return nil, err
 	}
-	repo, err := New(f.src.CatalogKey, db, nil)
+	repo, err := dbcatalog.New(f.src.CatalogKey, db, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -799,58 +714,6 @@ func TestMarkerBelongsToItsDatabase(t *testing.T) {
 	}
 	if _, err := catalog.Open(f.src.CatalogPath, f.src.CatalogKey); err == nil {
 		t.Fatal("pre-cutover catalog opened after the abandoned import")
-	}
-}
-
-// Provider availability and tool visibility are connector security: a real
-// change moves the revision scopes bind, a repeated one changes nothing.
-func TestProviderChangesMoveTheSecurityRevision(t *testing.T) {
-	f := newFixture(t)
-	f.cutover()
-	repo, db, service, _ := f.gateway()
-	var remote string
-	for _, e := range repo.List(f.alice) {
-		if e.Name == "remote" {
-			remote = e.ID
-		}
-	}
-	events := func() int {
-		return f.count("SELECT count(*) FROM mcpwarden_security.security_events WHERE owner_id=$1 AND event_type IN ('connector.availability_changed','connector.visibility_changed')", f.alice)
-	}
-	revision := func() string { return repo.ConnectorSecurityRevision(f.alice, remote) }
-	if revision() != "1" {
-		t.Fatal("imported revision", revision())
-	}
-	steps := []struct {
-		name   string
-		change func() error
-		want   string
-		events int
-	}{
-		{"enable while enabled", func() error { return repo.SetProviderEnabled(f.alice, "remote", true) }, "1", 0},
-		{"disable", func() error { return repo.SetProviderEnabled(f.alice, "remote", false) }, "2", 1},
-		{"disable again", func() error { return repo.SetProviderEnabled(f.alice, "remote", false) }, "2", 1},
-		{"enable", func() error { return repo.SetProviderEnabled(f.alice, "remote", true) }, "3", 2},
-		{"same visibility", func() error {
-			return repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{"remote__search"}})
-		}, "3", 2},
-		{"hide the tool", func() error {
-			return repo.SetVisibility(f.alice, "remote", catalog.Visibility{Mode: "selected", Enabled: []string{}})
-		}, "4", 3},
-	}
-	for _, step := range steps {
-		if err := step.change(); err != nil {
-			t.Fatal(step.name, err)
-		}
-		if revision() != step.want || events() != step.events {
-			t.Fatal(step.name, revision(), events())
-		}
-	}
-	// The revision is sealed with the row and survives a restart.
-	f.stop(service, db)
-	restarted, _, _, _ := f.gateway()
-	if got := restarted.ConnectorSecurityRevision(f.alice, remote); got != "4" {
-		t.Fatal("revision after reload", got)
 	}
 }
 
@@ -971,60 +834,6 @@ func TestAbortResumesAfterItsDatabaseCommit(t *testing.T) {
 	}
 }
 
-// A PostgreSQL catalog holding a connector sealed by an older build (header
-// values, OAuth settings or a grant) is refused at load. An older no-auth
-// connector (empty header map, null OAuth) still loads.
-func TestOldFormatRefusedOnLoad(t *testing.T) {
-	for name, tc := range map[string]struct {
-		connector string
-		mutate    func(p map[string]any) (grant bool)
-		refused   bool
-	}{
-		"header values": {"remote", func(p map[string]any) bool {
-			p["headers"] = map[string]string{"Authorization": "Bearer synthetic"}
-			return false
-		}, true},
-		"oauth":         {"remote", func(p map[string]any) bool { p["oauth"] = map[string]any{"scopes": []string{"read"}}; return false }, true},
-		"grant id":      {"remote", func(p map[string]any) bool { return true }, true},
-		"empty headers": {"svc", func(p map[string]any) bool { p["headers"] = map[string]string{}; p["oauth"] = nil; return false }, false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			f.cutover()
-			repo, _, _, _ := f.gateway()
-			var e catalog.Entry
-			for _, owner := range []string{f.alice, f.bob} {
-				for _, x := range repo.List(owner) {
-					if x.Name == tc.connector {
-						e = x
-					}
-				}
-			}
-			p := map[string]any{"id": e.ID, "owner": e.Owner, "name": e.Name, "url": e.URL, "auth_type": e.AuthType, "header_names": e.HeaderNames,
-				"call_timeout": e.CallTimeout, "created_at": e.CreatedAt, "updated_at": e.UpdatedAt}
-			q, args := "UPDATE mcpwarden_security.catalog_connectors SET grant_id='g1' WHERE connector_id=$1", []any{e.ID}
-			if !tc.mutate(p) {
-				sealed, err := repo.seal.seal(connectorAAD(e.ID), p)
-				if err != nil {
-					t.Fatal(err)
-				}
-				q, args = "UPDATE mcpwarden_security.catalog_connectors SET sealed=$1 WHERE connector_id=$2", []any{sealed, e.ID}
-			}
-			if _, err := f.db.Admin.Exec(t.Context(), q, args...); err != nil {
-				t.Fatal(err)
-			}
-			fresh, err := New(f.src.CatalogKey, repo.loader, func() {})
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = fresh.Load(t.Context())
-			if tc.refused != errors.Is(err, catalog.ErrOldFormat) || !tc.refused && err != nil {
-				t.Fatalf("%s: got %v", name, err)
-			}
-		})
-	}
-}
-
 // Above 25,000 matches the readers differ on purpose: PostgreSQL counts the
 // newest 25,000 and reports the rest as capped, while the JSONL reader, which
 // PR 4 removes, still counts everything. Below the window they agree (see
@@ -1058,14 +867,14 @@ func TestCappedHistoryDiffersFromJSONL(t *testing.T) {
 	}
 	f.cutover()
 	_, db, _, _ := f.gateway()
-	_, total, _, stats, err := NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
+	_, total, _, stats, err := dbcatalog.NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1, Size: 25})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fileTotal <= 25000 || total != 25000 || !stats.Capped {
 		t.Fatal("capped difference:", fileTotal, total, stats.Capped)
 	}
-	if _, _, _, _, err := NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1001, Size: 25}); err == nil {
+	if _, _, _, _, err := dbcatalog.NewHistory(db).QueryHistoryPerformance(audit.HistoryFilter{Owner: f.alice, Page: 1001, Size: 25}); err == nil {
 		t.Fatal("a page beyond the window was served")
 	}
 }

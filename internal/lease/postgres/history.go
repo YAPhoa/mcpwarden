@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,7 +50,7 @@ func newReader(config *pgx.ConnConfig) *reader {
 
 // ReadHistory runs fn in one REPEATABLE READ, read-only transaction on the
 // history session, so a page's rows, count and timings share one snapshot.
-func (s *Store) ReadHistory(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error {
+func (s *Store) ReadHistory(ctx context.Context, fn func(context.Context, DB) error) error {
 	select {
 	case <-s.lost:
 		return lease.ErrLocked
@@ -58,7 +59,7 @@ func (s *Store) ReadHistory(ctx context.Context, fn func(context.Context, catalo
 	return s.reader.read(ctx, fn)
 }
 
-func (r *reader) read(ctx context.Context, fn func(context.Context, catalogdb.DB) error) error {
+func (r *reader) read(ctx context.Context, fn func(context.Context, DB) error) error {
 	// Waiting for the session has its own bound, so queued pages do not share
 	// one deadline; each page gets the full limit once it runs. A page that
 	// gives up waiting leaves the session alone. A free session is taken
@@ -96,6 +97,10 @@ func (r *reader) read(ctx context.Context, fn func(context.Context, catalogdb.DB
 		})
 		if err == nil {
 			return nil
+		}
+		// A page beyond the window is the caller's error, not a failure.
+		if errors.Is(err, catalogdb.ErrHistoryWindow) {
+			return err
 		}
 		// Close only a session that is actually gone; a page that failed on a
 		// healthy session leaves it for the next page. pgx closes a session

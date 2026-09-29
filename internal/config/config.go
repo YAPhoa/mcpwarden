@@ -27,16 +27,34 @@ type Config struct {
 	Policy         Policy         `yaml:"policy"`
 	Audit          Audit          `yaml:"audit"`
 	Managed        *Managed       `yaml:"managed_upstreams"`
+	Storage        *Storage       `yaml:"storage"`
 	OwnerSecurity  *OwnerSecurity `yaml:"owner_security"`
 	Token          string         `yaml:"-"`
 }
 
-// OwnerSecurity enables the owner vault, access-request and lease routes backed
-// by PostgreSQL. Credentialed personal connectors run only through access
-// windows; the server never holds their credentials.
+// Storage keeps the catalog, tool-call history and security metadata in one
+// database: a local SQLite file or PostgreSQL. See docs/storage.md.
+type Storage struct {
+	// Driver is sqlite (default) or postgres.
+	Driver string `yaml:"driver"`
+	// Path is the SQLite database file, on a local filesystem.
+	Path string `yaml:"path"`
+	// DatabaseURLEnv names the variable holding the PostgreSQL runtime
+	// role's URL, never the migration role's.
+	DatabaseURLEnv string `yaml:"database_url_env"`
+	DatabaseURL    string `yaml:"-"`
+	// KeyEnv names the variable holding the catalog sealing key.
+	KeyEnv string `yaml:"key_env"`
+	Key    string `yaml:"-"`
+}
+
+// OwnerSecurity enables the owner vault, access-request and lease routes on
+// the storage database. Credentialed personal connectors run only through
+// access windows; the server never holds their credentials.
 type OwnerSecurity struct {
+	// DatabaseURLEnv was replaced by storage.database_url_env; it is kept
+	// only to refuse it with a specific message.
 	DatabaseURLEnv        string   `yaml:"database_url_env"`
-	DatabaseURL           string   `yaml:"-"`
 	TrustedProxies        []string `yaml:"trusted_proxies"`
 	AllowInsecureLoopback bool     `yaml:"allow_insecure_loopback"`
 }
@@ -58,12 +76,13 @@ func (c OwnerSecurity) ProxyPrefixes() ([]netip.Prefix, error) {
 	return out, nil
 }
 
+// Managed is the encrypted file catalog, used when storage is not set.
 type Managed struct {
 	Path   string `yaml:"path"`
 	KeyEnv string `yaml:"key_env"`
 	Key    string `yaml:"-"`
-	// Backend is file (default) or postgres. PostgreSQL requires owner_security
-	// and a completed catalog import and cutover.
+	// Backend was replaced by the storage section; it is kept only to refuse
+	// it with a specific message.
 	Backend string `yaml:"backend"`
 }
 type Auth struct {
@@ -128,8 +147,22 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) ResolveAndValidate() error {
-	if c.Accounts != nil && (c.Managed == nil || c.OAuth != nil) {
-		return fmt.Errorf("accounts requires managed_upstreams and cannot be combined with oauth mode")
+	if c.Accounts != nil && (c.Managed == nil && c.Storage == nil || c.OAuth != nil) {
+		return fmt.Errorf("accounts requires storage (or managed_upstreams) and cannot be combined with oauth mode")
+	}
+	if c.Managed != nil && c.Managed.Backend != "" {
+		return fmt.Errorf("managed_upstreams.backend was replaced by the storage section; see docs/storage.md")
+	}
+	if c.Storage != nil {
+		if err := c.Storage.resolve(); err != nil {
+			return err
+		}
+		if c.Managed != nil {
+			return fmt.Errorf("managed_upstreams cannot be combined with storage: the catalog is in the storage database, sealed with storage.key_env")
+		}
+		if c.Audit.Path != "" {
+			return fmt.Errorf("audit.path must be unset with storage: tool-call history is in the storage database")
+		}
 	}
 	if c.OwnerSecurity != nil {
 		// Only local-account browser sessions can prove an interactive owner.
@@ -137,22 +170,20 @@ func (c *Config) ResolveAndValidate() error {
 		if c.Accounts == nil {
 			return fmt.Errorf("owner_security requires accounts mode")
 		}
+		if c.OwnerSecurity.DatabaseURLEnv != "" {
+			return fmt.Errorf("owner_security.database_url_env was replaced by storage.database_url_env with storage.driver postgres; see docs/storage.md")
+		}
+		if c.Storage == nil {
+			return fmt.Errorf("owner_security requires the storage section")
+		}
 		if _, err := c.OwnerSecurity.ProxyPrefixes(); err != nil {
 			return err
-		}
-		if c.OwnerSecurity.DatabaseURLEnv == "" {
-			return fmt.Errorf("owner_security.database_url_env is required")
-		}
-		var ok bool
-		c.OwnerSecurity.DatabaseURL, ok = os.LookupEnv(c.OwnerSecurity.DatabaseURLEnv)
-		if !ok || c.OwnerSecurity.DatabaseURL == "" {
-			return fmt.Errorf("owner_security: environment variable %s is unset or empty", c.OwnerSecurity.DatabaseURLEnv)
 		}
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8787"
 	}
-	if c.Audit.Path == "" {
+	if c.Storage == nil && c.Audit.Path == "" {
 		c.Audit.Path = "./audit.jsonl"
 	}
 	if c.Audit.Path == "-" {
@@ -166,17 +197,6 @@ func (c *Config) ResolveAndValidate() error {
 		c.Managed.Key, ok = os.LookupEnv(c.Managed.KeyEnv)
 		if !ok || c.Managed.Key == "" {
 			return fmt.Errorf("managed_upstreams: environment variable %s is unset or empty", c.Managed.KeyEnv)
-		}
-		switch c.Managed.Backend {
-		case "":
-			c.Managed.Backend = "file"
-		case "file":
-		case "postgres":
-			if c.OwnerSecurity == nil {
-				return fmt.Errorf("managed_upstreams.backend postgres requires owner_security")
-			}
-		default:
-			return fmt.Errorf("managed_upstreams.backend must be file or postgres")
 		}
 	}
 	host, _, err := net.SplitHostPort(c.Listen)
@@ -279,6 +299,42 @@ func (c *Config) ResolveAndValidate() error {
 		if !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") {
 			return fmt.Errorf("allowed_origins: invalid origin %q", origin)
 		}
+	}
+	return nil
+}
+
+func (s *Storage) resolve() error {
+	switch s.Driver {
+	case "", "sqlite":
+		s.Driver = "sqlite"
+		if s.Path == "" {
+			return fmt.Errorf("storage.path is required with storage.driver sqlite")
+		}
+		if s.DatabaseURLEnv != "" {
+			return fmt.Errorf("storage.database_url_env is only for storage.driver postgres")
+		}
+	case "postgres":
+		if s.Path != "" {
+			return fmt.Errorf("storage.path is only for storage.driver sqlite")
+		}
+		if s.DatabaseURLEnv == "" {
+			return fmt.Errorf("storage.database_url_env is required with storage.driver postgres")
+		}
+		var ok bool
+		s.DatabaseURL, ok = os.LookupEnv(s.DatabaseURLEnv)
+		if !ok || s.DatabaseURL == "" {
+			return fmt.Errorf("storage: environment variable %s is unset or empty", s.DatabaseURLEnv)
+		}
+	default:
+		return fmt.Errorf("storage.driver must be sqlite or postgres")
+	}
+	if s.KeyEnv == "" {
+		return fmt.Errorf("storage.key_env is required")
+	}
+	var ok bool
+	s.Key, ok = os.LookupEnv(s.KeyEnv)
+	if !ok || s.Key == "" {
+		return fmt.Errorf("storage: environment variable %s is unset or empty", s.KeyEnv)
 	}
 	return nil
 }

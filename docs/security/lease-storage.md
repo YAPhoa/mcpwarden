@@ -101,7 +101,7 @@ client-release catalog schema.
 The reviewed first migration is
 [`001_leases.sql`](../../internal/lease/postgres/migrations/001_leases.sql).
 `cmd/mcpwarden-security-db` embeds it and the additive `002_vault.sql` and
-`003_owner_api.sql`, `004_catalog.sql` and `005_history_index.sql`, verifying every SHA-256 hash in an
+`003_owner_api.sql`, `004_catalog.sql`, `005_history_index.sql` and `006_request_checks.sql`, verifying every SHA-256 hash in an
 ordered ledger. Earlier migrations are unchanged. Migration 003 adds per-owner
 approval policies (revision CAS enforced by a trigger; the runtime role may
 insert and update, not delete) and the owner-route audit event types. Migration
@@ -113,6 +113,11 @@ adds the history filter indexes, `history_tools` (the latest name of each tool)
 and `history_open` (admissions without a stored completion), backfilled from
 history. The runtime role may insert and update `history_tools` and insert and
 delete `history_open`, never truncate either; `history_events` stays insert-only.
+Migration 006 replaces the request binding and approved-mode CHECKs with
+`requests_binding_identity` and `requests_approved_mode`, wrapped in
+`(…) IS TRUE`, so a binding missing its ID, boot ID, owner or (once approved)
+mode is refused instead of passing as NULL. It fails on an existing row that
+breaks them; the store never wrote such rows.
 There is no destructive down migration. Rerunning the same version is supported;
 checksum drift or a newer/unexpected ledger fails closed.
 
@@ -136,6 +141,30 @@ executor contend for the same advisory lock, so a cooperating executor must stop
 before schema migration. Catalog import, cutover and rollback hold the same lock
 and also an exclusive lock on the catalog file, which a running file gateway
 holds shared.
+
+## SQLite
+
+The SQLite store (`internal/lease/sqlite`) keeps the same tables, keys, checks
+and guard triggers in one file and passes the same contract suite
+(`internal/lease/storetest`). Differences:
+
+- It migrates itself at startup from one embedded baseline under the lock file;
+  there is no migration or runtime role. The ledger must match the embedded
+  migrations exactly, and `application_id` must identify an mcpwarden database.
+- The single executor is an exclusive lock on `<path>.lock` instead of an
+  advisory lock; the heartbeat also checks that the database and lock paths
+  still name the files that were opened.
+- IDs are lowercase canonical UUID text, timestamps are integer Unix
+  microseconds, and guard functions are `BEFORE` triggers with null-safe
+  comparisons. `OR IGNORE`, `OR REPLACE` and `REPLACE INTO` are forbidden; a test
+  scans the SQL.
+- Grants have no equivalent, so `BEFORE DELETE` triggers refuse deletes on the
+  tables the PostgreSQL runtime role cannot delete from. They catch bugs, not a
+  compromised gateway, which owns the file. See the threat model in
+  [storage](../storage.md#threat-model-sqlite-and-postgresql).
+- A failed statement poisons the transaction and a failed COMMIT is rolled back,
+  matching PostgreSQL's aborted-transaction rule. Busy, I/O, full-disk and
+  corruption errors fail the store.
 
 ## Isolated local tests
 

@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -163,8 +162,8 @@ func (x *ownerTx) PutLease(l lease.Lease) error {
 	if err != nil {
 		return err
 	}
-	if r.State != "activated" || r.LeaseID != l.ID || l.CallerID != r.Scope.RequesterAccessID || l.CredentialID != r.Scope.CredentialID || l.Epoch != r.Scope.CredentialEpoch || l.BootID != r.BootID || l.ScopeDigest != r.ScopeDigest || l.ActivationActorID != r.ApproverID || (l.MaxCalls == nil) != (r.Scope.MaxCalls == nil) || l.MaxCalls != nil && *l.MaxCalls != *r.Scope.MaxCalls || l.ExpiresAt.Sub(l.ActivatedAt) > time.Duration(r.Scope.DurationSeconds)*time.Second {
-		return lease.ErrDenied
+	if err := lease.CheckLease(x.owner, l, r); err != nil {
+		return err
 	}
 	epoch, err := strconv.ParseInt(l.Epoch, 10, 64)
 	if err != nil {
@@ -184,7 +183,7 @@ func (x *ownerTx) PutLease(l lease.Lease) error {
 	return nil
 }
 func (x *ownerTx) Event(e lease.Event) error {
-	if e.OwnerID != x.owner || !identity.Valid(e.ID) || !identity.Valid(e.BootID) || e.At.IsZero() || e.ActorID != "" && !identity.Valid(e.ActorID) || e.Source != "" && e.Source != "client_activation" && e.Source != "owner_confirmation" || !validEventDetail(e) {
+	if !lease.ValidEvent(x.owner, e) {
 		return lease.ErrDenied
 	}
 	raw, err := json.Marshal(e)
@@ -196,21 +195,6 @@ func (x *ownerTx) Event(e lease.Event) error {
 		return lease.ErrStorage
 	}
 	return nil
-}
-
-var eventReasons = map[string]bool{"": true, "key": true, "stale": true, "denied": true, "not_found": true, "locked": true, "api_key": true}
-
-func optionalVersion(v string) bool {
-	if v == "" {
-		return true
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	return err == nil && n > 0 && strconv.FormatInt(n, 10) == v
-}
-
-func validEventDetail(e lease.Event) bool {
-	return (e.CredentialID == "" || identity.Valid(e.CredentialID)) && (e.SubjectID == "" || identity.Valid(e.SubjectID)) && optionalVersion(e.Epoch) && optionalVersion(e.Revision) &&
-		(e.Mode == "" || e.Mode == "none" || e.Mode == "confirm") && eventReasons[e.Reason]
 }
 
 func (x *ownerTx) Admission(r audit.Record) error {
@@ -225,8 +209,8 @@ func (x *ownerTx) Admission(r audit.Record) error {
 	if err != nil {
 		return err
 	}
-	if l.State != "active" || !x.now.Before(l.ExpiresAt) || r.ApprovalID != l.RequestID || r.ActorAccessID != l.CallerID || r.CredentialID != l.CredentialID || r.CredentialEpoch != l.Epoch || r.ScopeDigest != l.ScopeDigest || r.UpstreamID != request.Scope.ConnectorID || r.ApprovalMode != request.Mode || r.ApprovalPolicyRevision != request.ApprovalPolicyRevision || r.AuthorizationSource != request.AuthorizationSource {
-		return lease.ErrDenied
+	if err := lease.CheckAdmission(r, l, request, x.now); err != nil {
+		return err
 	}
 	return x.invocation(r)
 }
@@ -260,17 +244,9 @@ func (s *Store) Complete(ctx context.Context, r audit.Record) error {
 		if json.UnmarshalStrict(raw, &admitted) != nil || audit.ValidateInvocation(admitted) != nil {
 			return lease.ErrStorage
 		}
-		if !bytes.Equal(invocationOrigin(r), invocationOrigin(admitted)) {
+		if !lease.SameInvocation(r, admitted) {
 			return lease.ErrDenied
 		}
 		return x.invocation(r)
 	})
-}
-func invocationOrigin(r audit.Record) []byte {
-	r.EventID, r.EventType, r.Decision, r.Status = "", "", "", ""
-	r.OccurredAt, r.CompletedAt = time.Time{}, time.Time{}
-	r.Timing = nil
-	r.DurationMS, r.ResponseItems, r.Structured = 0, 0, false
-	b, _ := json.Marshal(r)
-	return b
 }

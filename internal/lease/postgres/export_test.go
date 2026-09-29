@@ -1,4 +1,4 @@
-package catalogdb
+package postgres
 
 // Window exposes the history window query to plan tests.
 var Window = window

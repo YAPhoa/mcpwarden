@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/yaphoa/mcpwarden/internal/vault"
 	"io"
 	"net"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,128 +205,36 @@ func (f *serviceFixture) admit() (*lease.Admission, error) {
 	return f.service.Admit(f.caller, f.scope.CredentialID, r.ToolID, f.scope.Tools[0].DefinitionDigest, []byte(`{}`), r)
 }
 
-func TestPostgresDurabilityIsolationAndPrivileges(t *testing.T) {
-	f := testDatabase(t)
-	store := f.store(t)
-	service := newService(t, store, nil, "confirm")
-	service.activate(t)
-	var admission audit.Record
-	for i := 0; i < 25; i++ {
-		a, err := service.admit()
-		if err != nil {
-			t.Fatal(err)
-		}
-		admission = a.Record
-		if err := a.Run(func(context.Context) error { return nil }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	completed := admission
-	completed.EventID = identity.New()
-	completed.EventType = audit.DispatchCompleted
-	completed.Status = "ok"
-	completed.CompletedAt = time.Now().UTC()
-	completed.OccurredAt = completed.CompletedAt
-	if err := store.Complete(t.Context(), completed); err != nil {
-		t.Fatal(err)
-	}
-	var count, calls int
-	if err := f.admin.QueryRow(t.Context(), "SELECT admitted_calls FROM mcpwarden_security.leases WHERE lease_id=$1", service.active.ID).Scan(&calls); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.admin.QueryRow(t.Context(), "SELECT count(*) FROM mcpwarden_security.invocation_events").Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 25 || count != 26 {
-		t.Fatal("durable call/event counts disagree")
-	}
-	if err := store.WithOwner(t.Context(), "bob", func(tx lease.Tx) error {
-		if _, err := tx.Request(service.request.ID); err != lease.ErrNotFound {
-			t.Fatal("foreign request exposed")
-		}
-		if _, err := tx.Lease(service.active.ID); err != lease.ErrNotFound {
-			t.Fatal("foreign lease exposed")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	runtime := f.runtime(t)
-	for _, sql := range []string{"UPDATE mcpwarden_security.invocation_events SET metadata=metadata", "DELETE FROM mcpwarden_security.security_events", "TRUNCATE mcpwarden_security.leases", "ALTER TABLE mcpwarden_security.owners ADD COLUMN forbidden text", "INSERT INTO mcpwarden_security.schema_migrations VALUES (2,'invalid',clock_timestamp())"} {
-		_, err := runtime.Exec(t.Context(), sql)
-		requireCode(t, err, "42501")
-	}
-	_, err := runtime.Exec(t.Context(), "UPDATE mcpwarden_security.leases SET expires_at=expires_at+interval '1 second'")
-	requireCode(t, err, "23514")
-	_, err = runtime.Exec(t.Context(), `UPDATE mcpwarden_security.requests SET binding=jsonb_set(binding,'{mode}','"none"')`)
-	requireCode(t, err, "23514")
-	_, err = runtime.Exec(t.Context(), `INSERT INTO mcpwarden_security.leases SELECT 'bob',lease_id,request_id,caller_id,credential_id,epoch,boot_id,scope_digest,state,activated_at,expires_at,ended_at,max_calls,admitted_calls,activation_actor_id,operation_id FROM mcpwarden_security.leases WHERE owner_id='alice'`)
-	requireCode(t, err, "23503")
-	if err := service.service.Revoke(service.browser, service.active.ID); err != nil {
-		t.Fatal(err)
-	}
-	_, err = runtime.Exec(t.Context(), "UPDATE mcpwarden_security.leases SET state='active',ended_at=NULL")
-	requireCode(t, err, "23514")
-}
-
-func TestPostgresAtomicBudget(t *testing.T) {
-	f := testDatabase(t)
-	budget := int64(7)
-	service := newService(t, f.store(t), &budget, "none")
-	service.activate(t)
-	var admitted atomic.Int32
-	var wg sync.WaitGroup
-	for i := 0; i < 40; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			a, err := service.admit()
-			if err == nil {
-				admitted.Add(1)
-				if err := a.Run(func(context.Context) error { return nil }); err != nil {
-					t.Error(err)
-				}
-			} else if err != lease.ErrRequired {
-				t.Error(err)
-			}
-		}()
-	}
-	wg.Wait()
-	var events, calls int
-	err := f.admin.QueryRow(t.Context(), `SELECT admitted_calls,(SELECT count(*) FROM mcpwarden_security.invocation_events) FROM mcpwarden_security.leases`).Scan(&calls, &events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if admitted.Load() != 7 || calls != 7 || events != 7 {
-		t.Fatal("budget admission was not atomic")
-	}
-}
-
-func TestPostgresAdmissionCommitFailure(t *testing.T) {
+// The runtime role cannot rewrite events, change the schema or remove rows.
+// Constraint and guard behavior shared with SQLite is in storetest.
+func TestPostgresPrivileges(t *testing.T) {
 	f := testDatabase(t)
 	store := f.store(t)
 	service := newService(t, store, nil, "none")
 	service.activate(t)
-	_, err := f.admin.Exec(t.Context(), `CREATE FUNCTION mcpwarden_security.fail_admission() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic commit failure'; END $$;
-        CREATE CONSTRAINT TRIGGER fail_admission AFTER INSERT ON mcpwarden_security.invocation_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION mcpwarden_security.fail_admission();`, pgx.QueryExecModeSimpleProtocol)
+	a, err := service.admit()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.admit(); err != lease.ErrStorage {
-		t.Fatalf("commit failure admitted work: %v", err)
-	}
-	var count, calls int
-	err = f.admin.QueryRow(t.Context(), `SELECT admitted_calls,(SELECT count(*) FROM mcpwarden_security.invocation_events) FROM mcpwarden_security.leases`).Scan(&calls, &count)
-	if err != nil {
+	_ = a.Run(func(context.Context) error { return nil })
+	root := vaultRootFixture(t, "alice")
+	if err := withVault(t, store, "alice", func(tx vault.Tx) error {
+		if err := tx.PutVaultRoot(root, ""); err != nil {
+			return err
+		}
+		return tx.PutCredentialRecord(credentialFixture(t, root), nil)
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 0 || count != 0 {
-		t.Fatal("commit failure retained counter/audit")
-	}
-	select {
-	case <-store.Lost():
-	default:
-		t.Fatal("commit failure did not lock executor")
+	runtime := f.runtime(t)
+	for _, sql := range []string{"UPDATE mcpwarden_security.invocation_events SET metadata=metadata", "DELETE FROM mcpwarden_security.security_events",
+		"TRUNCATE mcpwarden_security.leases", "ALTER TABLE mcpwarden_security.owners ADD COLUMN forbidden text",
+		"INSERT INTO mcpwarden_security.schema_migrations VALUES (2,'invalid',clock_timestamp())",
+		"UPDATE mcpwarden_security.credential_versions SET envelope=envelope", "DELETE FROM mcpwarden_security.credential_epochs",
+		"DELETE FROM mcpwarden_security.credential_heads", "UPDATE mcpwarden_security.vault_wrapper_sets SET passphrase=passphrase",
+		"TRUNCATE mcpwarden_security.vault_roots"} {
+		_, err := runtime.Exec(t.Context(), sql)
+		requireCode(t, err, "42501")
 	}
 }
 
@@ -416,36 +324,6 @@ func TestPostgresExclusiveExecutorAndLoss(t *testing.T) {
 	}
 }
 
-func TestPostgresClockAfterOwnerLock(t *testing.T) {
-	f := testDatabase(t)
-	store := f.store(t)
-	_ = newService(t, store, nil, "none")
-	tx, err := f.admin.Begin(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(context.Background())
-	if _, err := tx.Exec(t.Context(), "SELECT owner_id FROM mcpwarden_security.owners WHERE owner_id='alice' FOR UPDATE"); err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan time.Time, 1)
-	failed := make(chan error, 1)
-	go func() {
-		failed <- store.WithOwner(t.Context(), "alice", func(tx lease.Tx) error { result <- tx.Now(); return nil })
-	}()
-	time.Sleep(100 * time.Millisecond)
-	released := time.Now().UTC()
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-failed; err != nil {
-		t.Fatal(err)
-	}
-	if (<-result).Before(released) {
-		t.Fatal("transaction used a timestamp from before the lock wait")
-	}
-}
-
 func TestPostgresSnapshotRestartLocksExecution(t *testing.T) {
 	f := testDatabase(t)
 	store := f.store(t)
@@ -495,7 +373,7 @@ func TestPostgresSnapshotRestartLocksExecution(t *testing.T) {
 	}
 }
 
-func TestPostgresSchemaDriftAndCompletionBinding(t *testing.T) {
+func TestPostgresSchemaDrift(t *testing.T) {
 	t.Run("powerful membership", func(t *testing.T) {
 		f := testDatabase(t)
 		powerful := f.role + "_elevated"
@@ -517,6 +395,17 @@ func TestPostgresSchemaDriftAndCompletionBinding(t *testing.T) {
 			t.Fatal("runtime accepted SET ROLE escalation")
 		}
 	})
+	for _, table := range []string{"owners", "requests", "leases"} {
+		t.Run("delete on "+table, func(t *testing.T) {
+			f := testDatabase(t)
+			if _, err := f.admin.Exec(t.Context(), "GRANT DELETE ON mcpwarden_security."+table+" TO "+pgx.Identifier{f.role}.Sanitize()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(t.Context(), f.runtimeDSN); err != lease.ErrStorage {
+				t.Fatal("runtime accepted DELETE on", table)
+			}
+		})
+	}
 	t.Run("checksum", func(t *testing.T) {
 		f := testDatabase(t)
 		if _, err := f.admin.Exec(t.Context(), "UPDATE mcpwarden_security.schema_migrations SET sha256='changed'"); err != nil {
@@ -527,41 +416,6 @@ func TestPostgresSchemaDriftAndCompletionBinding(t *testing.T) {
 		}
 		if _, err := Open(t.Context(), f.runtimeDSN); err != lease.ErrStorage {
 			t.Fatal("executor accepted schema drift")
-		}
-	})
-	t.Run("completion binding", func(t *testing.T) {
-		f := testDatabase(t)
-		store := f.store(t)
-		service := newService(t, store, nil, "none")
-		service.activate(t)
-		a, err := service.admit()
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = a.Run(func(context.Context) error { return nil })
-		completed := a.Record
-		completed.EventID = identity.New()
-		completed.EventType = audit.DispatchCompleted
-		completed.Status = "ok"
-		completed.CompletedAt = time.Now().UTC()
-		completed.OccurredAt = completed.CompletedAt
-		completed.ActorLabel = "substituted snapshot"
-		if err := store.Complete(t.Context(), completed); err != lease.ErrDenied {
-			t.Fatal("completion changed immutable origin")
-		}
-		completed.ActorLabel = a.Record.ActorLabel
-		if err := store.Complete(t.Context(), completed); err != nil {
-			t.Fatal(err)
-		}
-	})
-	t.Run("deny approved", func(t *testing.T) {
-		f := testDatabase(t)
-		service := newService(t, f.store(t), nil, "confirm")
-		if err := service.service.Deny(service.browser, service.request.ID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := service.service.Activate(service.browser, activationInput(service.request)); err != lease.ErrStale {
-			t.Fatal("denied approval activated")
 		}
 	})
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/catalog/catalogdb"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease/postgres"
 )
@@ -44,7 +45,7 @@ func Rollback(ctx context.Context, conn *pgx.Conn, src Sources) (RollbackManifes
 		return RollbackManifest{}, err
 	}
 	defer unlock()
-	st, exists, err := catalogdb.ReadState(ctx, conn, false)
+	st, exists, err := postgres.ReadState(ctx, conn, false)
 	if err != nil {
 		return RollbackManifest{}, err
 	}
@@ -81,7 +82,7 @@ func Rollback(ctx context.Context, conn *pgx.Conn, src Sources) (RollbackManifes
 		return RollbackManifest{}, err
 	}
 	st.State, st.RollbackManifest = "rolled_back", raw
-	if err := catalogdb.PutState(ctx, conn, st); err != nil {
+	if err := postgres.PutState(ctx, conn, st); err != nil {
 		return RollbackManifest{}, err
 	}
 	if err := catalog.WriteMarker(src.CatalogPath, catalog.Marker{State: "rolled_back", ImportID: st.ImportID, RollbackID: st.RollbackID}); err != nil {
@@ -90,10 +91,10 @@ func Rollback(ctx context.Context, conn *pgx.Conn, src Sources) (RollbackManifes
 	return m, nil
 }
 
-func beginRollback(ctx context.Context, conn *pgx.Conn, st catalogdb.State) (catalogdb.State, error) {
+func beginRollback(ctx context.Context, conn *pgx.Conn, st postgres.CatalogState) (postgres.CatalogState, error) {
 	id := identity.New()
 	err := inTx(ctx, conn, func(tx pgx.Tx) error {
-		current, ok, err := catalogdb.ReadState(ctx, tx, true)
+		current, ok, err := postgres.ReadState(ctx, tx, true)
 		if err != nil {
 			return err
 		}
@@ -109,18 +110,18 @@ func beginRollback(ctx context.Context, conn *pgx.Conn, st catalogdb.State) (cat
 			return err
 		}
 		current.State, current.RollbackID, current.RollbackManifest = "rolling_back", id, raw
-		return catalogdb.PutState(ctx, tx, current)
+		return postgres.PutState(ctx, tx, current)
 	})
 	if err != nil {
 		return st, err
 	}
-	st, _, err = catalogdb.ReadState(ctx, conn, false)
+	st, _, err = postgres.ReadState(ctx, conn, false)
 	return st, err
 }
 
 // base returns the pre-cutover history: the protected snapshot copy, or the
 // original file if the copy is gone, whichever still matches the pinned hash.
-func base(src Sources, st catalogdb.State) (string, error) {
+func base(src Sources, st postgres.CatalogState) (string, error) {
 	for _, path := range []string{snapshotSources(src, st.ImportID).HistoryPath, src.HistoryPath} {
 		if path == "" {
 			continue
@@ -161,7 +162,7 @@ func replaceable(path, sourceSHA string, sourceBytes int64, ours func(string) bo
 	return ErrReplaced
 }
 
-func export(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st catalogdb.State, m *RollbackManifest) error {
+func export(ctx context.Context, conn *pgx.Conn, seal *dbcatalog.Codec, src Sources, st postgres.CatalogState, m *RollbackManifest) error {
 	if src.HistoryPath == "" {
 		return fmt.Errorf("audit.path must name the history file to roll back into")
 	}
@@ -177,30 +178,30 @@ func export(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 		if _, err := tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"); err != nil {
 			return catalogdb.ErrStorage
 		}
-		rows, err := catalogdb.Load(ctx, tx)
+		rows, err := postgres.Load(ctx, tx)
 		if err != nil {
 			return err
 		}
-		decoded, err := seal.decode(rows)
+		decoded, err := seal.Decode(rows)
 		if err != nil {
 			return err
 		}
+		snap = decoded.Snapshot
 		// Connectors hold no upstream OAuth grants any more, so none needs
 		// reauthorization.
 		m.Reauthorize, m.EndedMCP = nil, 0
-		for id, a := range decoded.access {
+		for i, a := range snap.Access {
 			if a.Kind == "mcp" && a.EndedAt.IsZero() {
 				a.EndedAt, a.UpdatedAt = at, at
-				decoded.access[id] = a
+				snap.Access[i] = a
 				m.EndedMCP++
 			}
 		}
-		snap = decoded.snapshot()
 		snap.Rollback = st.RollbackID
 		if err := tx.QueryRow(ctx, "SELECT count(*) FROM mcpwarden_security.history_events WHERE source='legacy'").Scan(&legacy); err != nil {
 			return catalogdb.ErrStorage
 		}
-		return catalogdb.LiveHistory(ctx, tx, func(seq int64, raw string) error {
+		return postgres.LiveHistory(ctx, tx, func(seq int64, raw string) error {
 			live++
 			if _, err := audit.ParseLine(int(legacy+live), []byte(raw)); err != nil {
 				return fmt.Errorf("%w: stored history record %d is invalid", ErrVerify, seq)
@@ -221,7 +222,7 @@ func export(ctx context.Context, conn *pgx.Conn, seal *sealer, src Sources, st c
 		return err
 	}
 	defer clear(expected)
-	if m.CatalogDigest, err = seal.snapshotDigest(snap); err != nil {
+	if m.CatalogDigest, err = snapshotDigest(seal, snap); err != nil {
 		return err
 	}
 
@@ -309,7 +310,7 @@ func copyInto(h hash.Hash, path string) error {
 }
 
 // checkExport reads both files back the way a file gateway will.
-func checkExport(src Sources, st catalogdb.State, expected []byte, m *RollbackManifest) error {
+func checkExport(src Sources, st postgres.CatalogState, expected []byte, m *RollbackManifest) error {
 	read, normalized, err := catalog.ReadSnapshot(src.CatalogPath, src.CatalogKey, st.ChangedAt)
 	if err != nil {
 		return err
@@ -342,7 +343,7 @@ func checkExport(src Sources, st catalogdb.State, expected []byte, m *RollbackMa
 
 // finishedRollback confirms the catalog file is the rollback export (the file
 // gateway may have changed its contents since) and rewrites the marker.
-func finishedRollback(src Sources, st catalogdb.State) (RollbackManifest, error) {
+func finishedRollback(src Sources, st postgres.CatalogState) (RollbackManifest, error) {
 	var m RollbackManifest
 	if json.Unmarshal(st.RollbackManifest, &m) != nil {
 		return m, ErrState

@@ -1,18 +1,25 @@
 # Owner security API
 
 Roadmap step 1. The routes below are registered only when `owner_security` is set
-in accounts mode. They run the lease engine, encrypted vault records and custody
-index against PostgreSQL schema v3. With `owner_security` set, every personal
+in accounts mode with a [`storage`](../storage.md) database. They run the lease
+engine, encrypted vault records and custody index against that database
+(PostgreSQL or SQLite). With `owner_security` set, every personal
 connector with credentials runs only through access windows; see
 [startup integration](encrypted-runtime.md#startup-integration). Without it, only
 connectors without authentication can be created.
 
 ```yaml
+storage:
+  driver: sqlite                  # or postgres with database_url_env
+  path: /data/mcpwarden.db
+  key_env: MCPWARDEN_CREDENTIAL_KEY
 owner_security:
-  database_url_env: MCPWARDEN_SECURITY_DATABASE_URL  # runtime role DSN, never inline
-  trusted_proxies: []                             # explicit immediate proxy CIDRs
-  allow_insecure_loopback: false                  # direct local development only
+  trusted_proxies: []             # explicit immediate proxy CIDRs
+  allow_insecure_loopback: false  # direct local development only
 ```
+
+`owner_security.database_url_env` was replaced by `storage.database_url_env` and
+is refused.
 
 Startup opens the executor session, starts a new boot (old windows are suspended),
 loads every credential head and approval policy in one read-only snapshot, and

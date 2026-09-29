@@ -1,6 +1,6 @@
 //go:build historyscale
 
-package catalogdb_test
+package postgres_test
 
 import (
 	"context"
@@ -77,9 +77,9 @@ func TestHistoryScale(t *testing.T) {
 		var result catalogdb.HistoryResult
 		for i := range 3 {
 			began := time.Now()
-			err := store.ReadHistory(t.Context(), func(ctx context.Context, tx catalogdb.DB) error {
+			err := store.ReadHistory(t.Context(), func(ctx context.Context, tx postgres.DB) error {
 				var err error
-				result, err = catalogdb.QueryHistory(ctx, tx, c.q)
+				result, err = postgres.QueryHistory(ctx, tx, c.q)
 				return err
 			})
 			if err != nil {
@@ -100,14 +100,14 @@ func TestHistoryScale(t *testing.T) {
 	// An admission written while a page runs completes normally.
 	done := make(chan error, 1)
 	go func() {
-		done <- store.ReadHistory(t.Context(), func(ctx context.Context, tx catalogdb.DB) error {
-			_, err := catalogdb.QueryHistory(ctx, tx, catalogdb.HistoryQuery{Owner: "alice", ActorAccessID: "actor-10", Status: "timeout", Limit: 25})
+		done <- store.ReadHistory(t.Context(), func(ctx context.Context, tx postgres.DB) error {
+			_, err := postgres.QueryHistory(ctx, tx, catalogdb.HistoryQuery{Owner: "alice", ActorAccessID: "actor-10", Status: "timeout", Limit: 25})
 			return err
 		})
 	}()
 	row := event("alice", "during", "tool.dispatch.admitted", "inv-during", "tool-1", "tool", "busy", "unknown", 3_000_000)
 	began := time.Now()
-	if err := store.Run(t.Context(), func(ctx context.Context, tx catalogdb.DB) error { return catalogdb.InsertHistory(ctx, tx, row) }); err != nil {
+	if err := store.InsertHistory(t.Context(), row); err != nil {
 		t.Fatal("admission during a page:", err)
 	}
 	t.Logf("admission during a page: %d ms", time.Since(began).Milliseconds())

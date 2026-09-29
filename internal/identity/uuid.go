@@ -22,6 +22,13 @@ func Valid(id string) bool {
 	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
 		return false
 	}
+	// Only the canonical lowercase form, so every store compares IDs the
+	// same way (PostgreSQL's uuid type would fold case; SQLite text would not).
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; c >= 'A' && c <= 'F' {
+			return false
+		}
+	}
 	b, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
 	return err == nil && len(b) == 16 && b[8]&0xc0 == 0x80
 }

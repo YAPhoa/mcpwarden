@@ -29,9 +29,12 @@ var catalogMigration string
 //go:embed migrations/005_history_index.sql
 var historyMigration string
 
-var migrations = []string{migration, vaultMigration, ownerMigration, catalogMigration, historyMigration}
+//go:embed migrations/006_request_checks.sql
+var requestChecksMigration string
 
-const SchemaVersion = 5
+var migrations = []string{migration, vaultMigration, ownerMigration, catalogMigration, historyMigration, requestChecksMigration}
+
+const SchemaVersion = 6
 
 const executorLock int64 = 0x4d43505753454331 // MCPWSEC1, shared by migration and executor
 

@@ -8,7 +8,6 @@ upstreams: []
 managed_upstreams:
   path: /data/managed-upstreams.enc
   key_env: MCPWARDEN_CREDENTIAL_KEY
-  backend: file
 
 policy:
   default: allow

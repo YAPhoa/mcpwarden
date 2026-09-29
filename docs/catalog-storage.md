@@ -53,24 +53,26 @@ JSON or unencrypted text columns are not acceptable for secret-bearing fields.
 
 ## PostgreSQL backend
 
-`pgcatalog.Repository` implements this contract on PostgreSQL schema v5 and is
-selected with `managed_upstreams.backend: postgres`, which requires
-`owner_security`. The default stays `file`. Moving data between the two is the
-[catalog migration](catalog-migration.md).
+The database repository (`dbcatalog.Repository`) implements this contract on
+PostgreSQL schema v6 and on SQLite. It is selected with the
+[`storage`](storage.md) section; without it the file catalog stays in use.
+Moving file data to PostgreSQL is the [catalog migration](catalog-migration.md).
 
 Tables `catalog_accounts`, `catalog_access`, `catalog_connectors`,
-`catalog_legacy_tombstones`, `catalog_discovery` and `catalog_visibility` keep
-one row per record. Every secret-bearing value is in a `sealed` column:
+`catalog_discovery` and `catalog_visibility` keep one row per record, and on
+PostgreSQL `catalog_legacy_tombstones` keeps file tombstones from an import. Every secret-bearing value is in a `sealed` column:
 AES-GCM under a key derived with HKDF-SHA256 from the existing catalog key, with
 the row's identity as associated data. Key verifiers are indexed by an HMAC
 digest, never by the verifier itself. Plain columns (owner, username, public ID,
 kind, role, lifecycle times, connector name, auth type and revision) exist for
 constraints and indexes. They must match the sealed payload, or loading fails.
-The `grant_id` column stays NULL; a row with a grant ID is from an older build
-and is refused at load. Sealing protects account data at rest under the server
+On PostgreSQL the connector `grant_id` column stays NULL; a row with a grant
+ID is from an older build and is refused at load. SQLite has neither that
+column nor the tombstone table. Sealing protects account data at rest under the server
 key; connector credentials are never in these rows.
-`catalog_state` records the import and which store is authoritative. The
-runtime role cannot change it or delete catalog rows.
+On PostgreSQL `catalog_state` records the import and which store is
+authoritative, and the runtime role cannot change it or delete catalog rows.
+SQLite has no import state; its delete guards are triggers.
 
 The repository loads and verifies every row at startup and serves reads from
 that view. Each mutation runs in one owner transaction under the lease

@@ -77,7 +77,7 @@ func TestHistoryBackfillMatchesLiveWrites(t *testing.T) {
 	events := historyEvents()
 	live := testDatabase(t)
 	for _, r := range events {
-		if err := pgx.BeginFunc(t.Context(), live.admin, func(tx pgx.Tx) error { return catalogdb.InsertHistory(t.Context(), tx, r) }); err != nil {
+		if err := pgx.BeginFunc(t.Context(), live.admin, func(tx pgx.Tx) error { return InsertHistory(t.Context(), tx, r) }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -117,8 +117,8 @@ func TestHistoryBackfillMatchesLiveWrites(t *testing.T) {
 }
 
 func page(s *Store) error {
-	return s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
-		_, err := catalogdb.QueryHistory(ctx, db, catalogdb.HistoryQuery{Owner: "alice", Limit: 25})
+	return s.ReadHistory(context.Background(), func(ctx context.Context, db DB) error {
+		_, err := QueryHistory(ctx, db, catalogdb.HistoryQuery{Owner: "alice", Limit: 25})
 		return err
 	})
 }
@@ -149,7 +149,7 @@ func historyPIDs(t *testing.T, f *databaseFixture) []int32 {
 }
 
 func sleepPage(s *Store, d time.Duration, ran *bool) error {
-	return s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
+	return s.ReadHistory(context.Background(), func(ctx context.Context, db DB) error {
 		if ran != nil {
 			*ran = true
 		}
@@ -174,7 +174,7 @@ func TestHistorySessionFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var readOnly string
-	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db catalogdb.DB) error {
+	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db DB) error {
 		return db.QueryRow(ctx, "SHOW transaction_read_only").Scan(&readOnly)
 	}); err != nil || readOnly != "on" {
 		t.Fatal("history session is not read-only:", readOnly, err)
@@ -208,12 +208,12 @@ func TestHistorySessionFailure(t *testing.T) {
 	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
 	defer cancel()
 	ran := false
-	if err := s.ReadHistory(expired, func(context.Context, catalogdb.DB) error { ran = true; return nil }); err == nil || ran {
+	if err := s.ReadHistory(expired, func(context.Context, DB) error { ran = true; return nil }); err == nil || ran {
 		t.Fatal("expired page ran:", err, ran)
 	}
 	// A page that fails on a healthy session, here by the statement
 	// timeout, also leaves it open.
-	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db catalogdb.DB) error {
+	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db DB) error {
 		_, err := db.Exec(ctx, "SET LOCAL statement_timeout = 50; SELECT pg_sleep(1)")
 		return err
 	}); err == nil {
@@ -225,7 +225,7 @@ func TestHistorySessionFailure(t *testing.T) {
 	// pg_stat_activity can still list a session the client just closed, so
 	// check the backend a page actually runs on.
 	var pid int32
-	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db catalogdb.DB) error {
+	if err := s.ReadHistory(t.Context(), func(ctx context.Context, db DB) error {
 		return db.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
 	}); err != nil || pid != second[0] {
 		t.Fatal("a failed page replaced a healthy session:", second, pid, err)
@@ -291,7 +291,7 @@ func TestHistoryPagesQueue(t *testing.T) {
 	held := make(chan error, 1)
 	started := make(chan struct{})
 	go func() {
-		held <- s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
+		held <- s.ReadHistory(context.Background(), func(ctx context.Context, db DB) error {
 			close(started)
 			_, err := db.Exec(ctx, "SELECT pg_sleep(0.6)")
 			return err
@@ -342,7 +342,7 @@ func TestHistoryCloseEndsPages(t *testing.T) {
 	running := make(chan struct{})
 	errs := make(chan error, 4)
 	go func() {
-		errs <- s.ReadHistory(context.Background(), func(ctx context.Context, db catalogdb.DB) error {
+		errs <- s.ReadHistory(context.Background(), func(ctx context.Context, db DB) error {
 			close(running)
 			_, err := db.Exec(ctx, "SELECT pg_sleep(3)")
 			return err

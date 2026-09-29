@@ -108,10 +108,7 @@ func TestOwnerRejectsInsecureExternalActivation(t *testing.T) {
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: f.cookies["alice"]})
 	w := httptest.NewRecorder()
 	f.mux.ServeHTTP(w, r)
-	var active int
-	if err := f.db.Admin.QueryRow(t.Context(), "SELECT count(*) FROM mcpwarden_security.leases WHERE request_id=$1 AND state='active'", pending.ID).Scan(&active); err != nil {
-		t.Fatal(err)
-	}
+	active := f.count("SELECT count(*) FROM leases WHERE request_id=$1 AND state='active'", pending.ID)
 	if w.Code != http.StatusForbidden || read || active != 0 || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("insecure activation: status=%d, body read=%v, active leases=%d", w.Code, read, active)
 	}

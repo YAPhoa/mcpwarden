@@ -80,17 +80,7 @@ func (f *ownerFixture) guardedGateway() *guardedGateway {
 	f.t.Helper()
 	cfg := f.cfg
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	var history audit.Store
-	if f.pg != nil {
-		history = f.pg.history
-	} else {
-		log, err := audit.Open(f.t.TempDir() + "/audit.jsonl")
-		if err != nil {
-			f.t.Fatal(err)
-		}
-		f.t.Cleanup(func() { _ = log.Close() })
-		history = log
-	}
+	history := f.backend.history
 	rs := newRuntimes(f.t.Context(), cfg, pol, history, f.store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	rs.guarded = &guardedCustody{api: f.api, store: f.store, history: history}
 	mux := http.NewServeMux()
@@ -366,10 +356,9 @@ func TestCredentialedConnectorsNeedAccountOwner(t *testing.T) {
 // than silently ignored.
 func TestCustodyModeRefused(t *testing.T) {
 	t.Setenv("TEST_GUARDED_KEY", "synthetic-key")
-	t.Setenv("TEST_GUARDED_DSN", "postgres://runtime@127.0.0.1/unused")
 	dir := t.TempDir()
 	path := dir + "/config.yaml"
-	body := "accounts: {}\nmanaged_upstreams:\n  path: " + dir + "/catalog.enc\n  key_env: TEST_GUARDED_KEY\naudit:\n  path: " + dir + "/audit.jsonl\nowner_security:\n  database_url_env: TEST_GUARDED_DSN\n  custody_mode: client_release\n"
+	body := "accounts: {}\nstorage:\n  path: " + dir + "/mcpwarden.db\n  key_env: TEST_GUARDED_KEY\nowner_security:\n  custody_mode: client_release\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

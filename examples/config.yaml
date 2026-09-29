@@ -33,28 +33,34 @@ policy:
 audit:
   path: ./audit.jsonl # Persistent file required: admission is synced before dispatch.
 
-# Optional user-registered remote upstreams, stored encrypted:
+# Optional user-registered remote upstreams, stored in an encrypted file:
 # managed_upstreams:
 #   path: ./managed-upstreams.enc
 #   key_env: MCPWARDEN_CREDENTIAL_KEY
-#   # file (default) or postgres. postgres requires owner_security and a
-#   # completed catalog import and cutover (docs/catalog-migration.md); the
-#   # gateway then never reads the file and refuses to start if PostgreSQL is
-#   # unavailable or not cut over.
-#   backend: file
 
-# Optional local panel accounts (requires managed_upstreams, incompatible with oauth):
+# Optional database storage (docs/storage.md), replacing managed_upstreams and
+# audit.path: the catalog, tool-call history and the owner vault live in one
+# SQLite file or PostgreSQL database. With it, remove managed_upstreams and
+# audit.path. The gateway refuses to start if the database is unavailable and
+# stops if it is lost; it never falls back to the files. --stdio is refused.
+# storage:
+#   driver: sqlite            # sqlite (default) or postgres
+#   path: ./mcpwarden.db      # sqlite only; a local filesystem, not a network share
+#   # database_url_env: MCPWARDEN_DATABASE_URL  # postgres only: runtime role DSN
+#   key_env: MCPWARDEN_CREDENTIAL_KEY
+
+# Optional local panel accounts (requires managed_upstreams or storage,
+# incompatible with oauth):
 # accounts:
 #   allow_registration: true
 
-# Optional owner security API (requires accounts). Adds vault, access-request,
-# approval and lease routes backed by PostgreSQL schema v4 (migrate first with
-# cmd/mcpwarden-security-db). Personal connectors with credentials (bearer,
-# API key, custom headers) need it: their credentials live only in the owner's
-# vault and each call runs inside an owner-activated access window. Without it,
-# only connectors without authentication can be added.
+# Optional owner security API (requires accounts and storage). Adds vault,
+# access-request, approval and lease routes. Personal connectors with
+# credentials (bearer, API key, custom headers) need it: their credentials
+# live only in the owner's vault and each call runs inside an owner-activated
+# access window. Without it, only connectors without authentication can be
+# added.
 # owner_security:
-#   database_url_env: MCPWARDEN_SECURITY_DATABASE_URL
 #   # Trust only the immediate proxy's IP/CIDR. It must overwrite
 #   # X-Forwarded-Proto with the verified client scheme, not forward user input.
 #   trusted_proxies: ["127.0.0.1/32", "::1/128"]

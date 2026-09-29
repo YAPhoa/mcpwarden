@@ -1530,3 +1530,82 @@ rollback contract for the SQLite store in PR 3.
 Round 5 nits: a change that gave up in the queue also reads "change not
 saved; try again" (new `queued` case), and the `WithOwner`, `Catalog` and
 `ErrRolledBack` comments state the contract exactly.
+
+## 2026-09-28 — SQLite store and the storage section (removal plan PR 3)
+
+The catalog database layer is split: `catalogdb` holds backend-neutral rows and
+interfaces, `dbcatalog` the repository and history taken from `pgcatalog`, and
+the SQL lives in each store. `internal/lease/sqlite` is a new store with the same
+tables, guards, poisoning, error mapping, cancellation, heartbeat and bounded
+history as the PostgreSQL store, plus a lock file, pragma and identity checks,
+an embedded migration ledger, filesystem checks and no-delete triggers.
+`identity.Valid` accepts only lowercase canonical IDs. The new `storage` section
+(`docs/storage.md`) selects SQLite or PostgreSQL for the catalog, history and
+executor in every HTTP mode; `managed_upstreams.backend` and
+`owner_security.database_url_env` are refused, and `owner_security` requires
+`storage`. Without `storage` nothing changes.
+
+Tests: `internal/lease/storetest` (34 cases) runs on both stores and replaced the
+PostgreSQL-only copies. SQLite-only tests cover open settings and identity, the
+lock wait, unsafe paths, ledger refusals, a busy database, a replaced lock file,
+a killed process keeping its commits, forbidden conflict clauses, history index
+plans and a slow page that does not stop the store. The gateway owner flows run
+on SQLite by default and on PostgreSQL under `TestOwnerFlowsOnPostgres`; new
+`TestStorageLossStopsGateway`, `TestStorageRefusesStdio` and
+`TestStorageOperatorMode`. CI adds a `CGO_ENABLED=0` SQLite test run and a
+Windows and macOS vet, and the history scale step now points at
+`internal/lease/postgres`, where the test moved. The UI owner flows run on
+`storage: postgres`.
+
+Validation: `gofmt`, `go mod tidy -diff`, `go mod verify`, `integrity.py`,
+build, vet (plain, `flowtest`, `historyscale`, and Windows and macOS for the
+SQLite store and gateway), the `CGO_ENABLED=0` build and SQLite tests,
+`npm test` (70) and the Chromium owner flows on `storage: postgres` passed.
+`go test -race -count=1 ./...` with PostgreSQL 16 first failed twice in the
+SQLite package: the race detector slows the pure Go engine enough that a
+25,000-event history page passed the 5 s deadline. Under the race detector the
+tests now give pages a minute and skip the timing-only slow-page test, which
+runs in the CGO-disabled step. The full race run then passed.
+
+Review round 1 fixes. The SQLite heartbeat now checks the database and lock
+inodes on every tick, so a replaced file stops a busy store
+(`TestReplacedFilesStopBusyStore`). The request binding and approved-mode
+CHECKs are wrapped in `IS TRUE` (SQLite baseline, PostgreSQL migration 006,
+schema v6). With a tool filter, SQLite history terms use a unary `+`, and
+`TestHistoryPlansUseFilterIndexes` covers the combinations. New tests:
+- contract `SchemaRules` (45 subtests naming the rule that refused each
+  statement); `CatalogStatementPastDeadline`, `HistoryFiltersOpenCalls` and
+  `EnvelopeEpochTyping`;
+- `TestFatalCodeStopsStore`, `TestSettingsRefused`, SQLite `TestHistoryScale`
+  (all cases 17 to 316 ms at 1M calls without statistics; now in CI) and
+  `TestHistoryBackendEquivalence`;
+- `TestRollbackResumesAndRefusesReplacedFiles` again checks that a rollback
+  suspends an open window under its ID and that a rolled-back database refuses
+  to load.
+Removing any of the 59 SQLite schema rules fails a test; so did 7 spot-checked
+PostgreSQL guard edits. Removing the PostgreSQL store deadline check fails
+nothing: when the deadline cuts a statement, pgx closes the connection and the
+failed rollback stops the store anyway.
+
+Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
+`historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
+`go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
+Chromium owner flows passed.
+
+Review round 2 fixes. `SchemaRules` adds the four guard rules no test named:
+an immutable binding on a pending request, a nonzero initial write count, and
+a stale or out-of-context credential version inserted directly. Removing any
+of them fails a test on both stores. The typing case is now
+`JSONIdentityTyping`, covering all six integer columns also stored in JSON on
+both stores, and catches all eight of the reviewer's mutations. The SQLite type
+check for the envelope revision is still not caught. It only matters at
+revision 1 (`true` compares as the text '1'), and revision 1 exists only
+inside the transaction that creates a credential or epoch. The PostgreSQL text
+compare and the Go string fields cover it. PostgreSQL constraint names are
+matched whole, and `Open` also refuses a runtime role that may delete from
+`owners`, `requests` or `leases`.
+
+Validation: `gofmt`, `go mod tidy -diff`, build, vet (plain, `flowtest`,
+`historyscale`, Windows and macOS), `CGO_ENABLED=0` SQLite tests,
+`go test -race -count=1 ./...` with PostgreSQL 16, `npm test` (70) and the
+Chromium owner flows passed.
