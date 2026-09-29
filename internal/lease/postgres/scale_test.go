@@ -25,10 +25,10 @@ func TestHistoryScale(t *testing.T) {
 	for _, sql := range []string{
 		`INSERT INTO mcpwarden_security.history_events
          (owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,
-          timed,failed,forwarded,handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record,source)
+          timed,failed,forwarded,handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record)
          SELECT 'alice', e.id, 2, e.kind, 'inv-'||g, CASE WHEN g%100=1 THEN 'rare' ELSE 'tool-'||(g%10) END, 'tool', CASE WHEN g%10=0 THEN 'quiet' ELSE 'busy' END,
           e.status, 'actor-'||(g%50), 2*g, e.ns, e.timed, e.status='timeout', e.timed, 100, 10, 90, 6, 3, 6,
-          json_build_object('schema_version',2,'event_id',e.id,'owner','alice')::text, 'live'
+          json_build_object('schema_version',2,'event_id',e.id,'owner','alice')::text
          FROM generate_series(1,1000000) g,
          LATERAL (VALUES ('a'||lpad(g::text,7,'0'), 'tool.dispatch.admitted', 'unknown', 2*g::bigint, false),
                          ('c'||lpad(g::text,7,'0'), 'tool.dispatch.completed', CASE WHEN g%20=0 THEN 'timeout' ELSE 'ok' END, 2*g::bigint+1, true)) AS e(id,kind,status,ns,timed)
