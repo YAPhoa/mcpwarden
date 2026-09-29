@@ -251,6 +251,9 @@ func valueAt(v any, p string) (any, bool) {
 	return v, true
 }
 
+// Matches reports whether a tool-use scope admits one tools/call. A setup
+// scope names no tools and never admits a call: its window only lends material
+// for connection setup and tools/list (Service.Setup).
 func (s Scope) Matches(toolID, definition string, arguments []byte) bool {
 	if s.Purpose != "tool_use" {
 		return false

@@ -400,7 +400,7 @@ test('vault-custody connectors count as available and never refresh',async()=>{
  await ui.node('refresh').handlers.click();
  const paths=ui.requests.filter(r=>r.options.method==='POST').map(r=>r.path);
  assert.deepEqual(paths,['/api/discovery/docs/refresh']);
- assert.match(ui.node('notice').textContent,/Refreshed 1 enabled connector\. Skipped 1 in vault custody\./);
+ assert.match(ui.node('notice').textContent,/Refreshed 1 enabled connector\. Skipped 1 in vault custody; refresh those with Connect and inspect/);
  assert.equal(ui.run("refreshState.has('vaulted')"),false);
 });
 

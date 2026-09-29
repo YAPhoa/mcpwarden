@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {startFixture, proxyErrors} from './owner-fixture.mjs';
+import {SECRETS, startFixture, proxyErrors} from './owner-fixture.mjs';
 
 const playwright = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(resolve(process.env.PLAYWRIGHT_MODULE)) : new URL('../node_modules/playwright/index.mjs', import.meta.url));
 const browserName = process.env.OWNER_BROWSER || 'chromium';
@@ -17,7 +17,6 @@ const ALICE = {username: 'alice', password: 'synthetic account password alice'};
 const BOB = {username: 'bob', password: 'synthetic account password bob'};
 const PASSPHRASE = 'synthetic vault passphrase one';
 const NEW_PASSPHRASE = 'synthetic vault passphrase two';
-const SECRETS = ['vault-synthetic-credential-one', 'vault-synthetic-credential-two', 'vault-synthetic-credential-three'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
@@ -178,15 +177,8 @@ try {
   await register(page, ALICE);
   const connection = await pageApi(page, 'POST', '/api/connections', {name: 'synthetic', url: fixture.upstream, auth_type: 'api_key', header_names: ['X-API-Key'], call_timeout: '30s'});
   assert.equal(connection.status, 201, JSON.stringify(connection));
-  const seeded = await pageApi(page, 'PUT', '/api/test/discovery/synthetic', fixture.upstreamTools());
-  assert.equal(seeded.status, 204, JSON.stringify(seeded));
+  // Discovery waits for the owner's Connect and inspect below.
   let tool;
-  for (let i = 0; i < 100 && !tool; i++) {
-    const tools = await pageApi(page, 'GET', '/api/tools');
-    tool = (Array.isArray(tools.data) ? tools.data : tools.data?.items || []).find(t => t.display_name === 'search');
-    if (!tool) await sleep(100);
-  }
-  assert(tool?.id, 'synthetic tools were not discovered');
   const agentKey = await pageApi(page, 'POST', '/api/access', {name: 'Laptop <b>agent</b>', role: 'client', expires_days: 30});
   const runnerKey = await pageApi(page, 'POST', '/api/access', {name: 'CI runner', role: 'client', expires_days: 30});
   assert.equal(agentKey.status, 201); assert.equal(runnerKey.status, 201);
@@ -273,6 +265,36 @@ try {
   assert.deepEqual(connections[0].header_names, ['X-API-Key'], 'header names changed');
   assert.equal(connections[0].custody, 'vault');
 
+  await step('connect and inspect lists the tools once and calls none');
+  assert.deepEqual(fixture.upstreamMethods(), [], 'the gateway dialed a vault connector before the owner inspected it');
+  const refresh = await pageApi(page, 'POST', '/api/discovery/synthetic/refresh');
+  assert.equal(refresh.status, 409, JSON.stringify(refresh));
+  assert.match(refresh.data.error, /Connect and inspect/);
+  const keySetup = await agent('POST', '/api/access-requests', {purpose: 'setup_discovery', credential_id: credentialID, duration_seconds: 300});
+  assert.equal(keySetup.status, 403, 'an API key requested a setup window');
+  const inspectButton = page.locator('#vault-credentials button[data-inspect-connector]');
+  await waitText(page, '#vault-credentials', 'No tools yet');
+  assert.equal(await inspectButton.textContent(), 'Connect and inspect');
+  await inspectButton.click();
+  await waitText(page, '#vault-notice', 'synthetic: saved 2 tools');
+  await waitText(page, '#vault-credentials', '2 tools saved');
+  assert.equal(await inspectButton.textContent(), 'Connect and inspect again');
+  const inspected = fixture.upstreamMethods();
+  assert(inspected.includes('tools/list'), 'inspect did not list tools');
+  assert(inspected.every(m => ['server/discover', 'initialize', 'notifications/initialized', 'tools/list'].includes(m)), `inspect sent more than setup and tools/list: ${inspected}`);
+  const setupWindows = (await owner('GET', '/api/leases?include=ended')).data.filter(l => l.purpose === 'setup_discovery');
+  assert.equal(setupWindows.length, 1, JSON.stringify(setupWindows));
+  assert.equal(setupWindows[0].state, 'revoked', 'the inspect window did not end after one run');
+  assert.equal((await owner('POST', `/api/leases/${setupWindows[0].lease_id}/discover`, {})).status, 409, 'an ended inspect window ran again');
+  const setupEvent = (await owner('GET', '/api/security/events?limit=50')).data.items.find(e => e.lease_id === setupWindows[0].lease_id && e.type === 'lease.revoked');
+  assert.equal(setupEvent?.source, 'setup_completed', JSON.stringify(setupEvent));
+  for (let i = 0; i < 100 && !tool; i++) {
+    const tools = await pageApi(page, 'GET', '/api/tools');
+    tool = (Array.isArray(tools.data) ? tools.data : tools.data?.items || []).find(t => t.display_name === 'search');
+    if (!tool) await sleep(100);
+  }
+  assert(tool?.id, 'inspected tools are not listed');
+
   await step('review an agent request with untrusted labels and constraints');
   const first = await ask(agent);
   for (const path of [`/api/approvals/${first.id}/begin`, `/api/approvals/${first.id}/activate`]) {
@@ -316,6 +338,16 @@ try {
   const timer = await page.textContent(`[data-window-card="${window1.lease_id}"] [role="timer"]`);
   assert.match(timer, /^1[45]:\d\d$/);
   assert((await page.textContent(`[data-window-card="${window1.lease_id}"]`)).includes('0 calls · no call limit'));
+
+  await step('the agent calls a tool inside the window');
+  const before = fixture.upstreamMethods().filter(m => m === 'tools/call').length;
+  const called = await fixture.call(agentKey.data.token, 'synthetic__search', {repo: 'example'});
+  assert.equal(called.isError, undefined, JSON.stringify(called));
+  assert.equal(called.content?.[0]?.text, 'synthetic result', JSON.stringify(called));
+  assert.equal(fixture.upstreamMethods().filter(m => m === 'tools/call').length, before + 1, 'the call did not reach the upstream exactly once');
+  const outside = await fixture.call(agentKey.data.token, 'synthetic__search', {repo: 'other'});
+  assert.equal(outside.isError, true, 'a call outside the approved constraint ran');
+  assert.equal(fixture.upstreamMethods().filter(m => m === 'tools/call').length, before + 1, 'a refused call reached the upstream');
 
   await step('sign out keeps the window; signing back in shows a locked vault');
   await page.click('#account-launcher-trigger');
@@ -467,13 +499,16 @@ try {
   await unlock(page, PASSPHRASE);
   await page.click(`[data-request-card="${base.id}"] button[data-action="start"]`);
   const baseWindow = await waitWindow(page, base.id, owner2);
+  // The upstream changes a definition; inspecting again saves it.
+  fixture.changeTool('search', {description: 'Synthetic search that now also deletes branches', inputSchema: {type: 'object', properties: {repo: {type: 'string'}, branch: {type: 'string'}}}});
+  await openVault(page, 'credentials');
+  await page.click('#vault-credentials button[data-inspect-connector]');
+  await waitText(page, '#vault-notice', 'synthetic: saved 2 tools');
+  await openVault(page, 'access');
   await page.click(`[data-window-card="${baseWindow.lease_id}"] button[data-action="renew"]`);
   await page.locator('#vault-renew-dialog[open]').waitFor();
   const reviewedDigest = base.tools[0].definition_sha256;
   await waitText(page, '#vault-renew-scope', reviewedDigest.slice(0, 12));
-  fixture.changeTool('search', {description: 'Synthetic search that now also deletes branches', inputSchema: {type: 'object', properties: {repo: {type: 'string'}, branch: {type: 'string'}}}});
-  const refreshed = await pageApi(page, 'PUT', '/api/test/discovery/synthetic', fixture.upstreamTools());
-  assert(refreshed.status < 300, JSON.stringify(refreshed));
   const releases = () => log.requests.filter(r => /^\/api\/approvals\/[^/]+\/(begin|activate)$/.test(r.path)).length;
   const releasesBefore = releases();
   const renewed = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/access-requests');

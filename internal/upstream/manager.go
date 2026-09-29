@@ -30,9 +30,9 @@ type State struct {
 }
 
 // ErrGuarded reports an operation that would need a connector's credential
-// outside an access window. Discovery for such connectors needs the owner
-// setup flow (roadmap step 5); background refresh never runs for them.
-var ErrGuarded = errors.New("connector credentials are in vault custody; the gateway cannot refresh it without an access window")
+// outside an access window. Background refresh never runs for such connectors;
+// their tools are discovered only by the owner's Connect and inspect.
+var ErrGuarded = errors.New("connector credentials are in vault custody; refresh its tools with Connect and inspect in Vault & windows (/vault/credentials)")
 
 type connection struct {
 	initialDone chan struct{}

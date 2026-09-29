@@ -89,7 +89,7 @@ Design and project records: [storage](docs/storage.md), [decisions](docs/decisio
 
 ## Security roadmap
 
-Security spec v1.1 includes integrated public caller-key IDs and durable dispatch audit, plus a tested lease engine, encrypted storage on SQLite or PostgreSQL, browser [vault primitives](docs/security/vault-storage.md), and an [encrypted MCP dispatch adapter](docs/security/encrypted-runtime.md). With `owner_security` set, personal connector credentials are held only in the owner vault and every call to a credentialed connector needs an access window. Setup discovery (step 5) and vault-backed upstream OAuth (step 6) are still to come, so new credentialed connectors have no tools yet.
+Security spec v1.1 includes integrated public caller-key IDs and durable dispatch audit, plus a tested lease engine, encrypted storage on SQLite or PostgreSQL, browser [vault primitives](docs/security/vault-storage.md), and an [encrypted MCP dispatch adapter](docs/security/encrypted-runtime.md). With `owner_security` set, personal connector credentials are held only in the owner vault and every call to a credentialed connector needs an access window. The owner lists a credentialed connector's tools with Connect and inspect, a short window that can list tools but never call one. Vault-backed upstream OAuth (step 6) is still to come.
 
 See the [review and implementation roadmap](docs/security/implementation.md) and the [remaining implementation tasks](docs/pending-tasks.md), which describe the work still needed.
 

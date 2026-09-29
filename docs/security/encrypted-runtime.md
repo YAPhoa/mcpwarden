@@ -83,8 +83,49 @@ manager-path upstreams may need their own session expiry/cleanup limits.
 
 The per-call `approval.Approver` is bypassed for this path; owner activation and
 optional confirmation happen when opening the window. Maintenance during a tool
-window is not the separate owner `setup_discovery` flow for registering an unknown
-provider. That registration flow remains to be implemented.
+window only checks the selected definition; it never saves discovery. Saving a
+connector's tools is the separate owner setup flow below.
+
+## Connect and inspect (setup discovery)
+
+A vault connector's tools are discovered only when its owner asks, from
+**Vault & windows → Credentials → Connect and inspect** (spec §14.1, §10.2):
+
+1. The owner's browser session requests a `setup_discovery` window for the
+   credential (`POST /api/access-requests` with `"purpose": "setup_discovery"`).
+   The scope names no tools and no call budget and lasts at most 300 seconds
+   (the console asks for 300). The requester is that browser session itself;
+   API keys, admin keys and other sessions cannot request, start or run it. The
+   approval policy applies as for tool windows (`confirm` means begin, then
+   activate, both by the owner), and activation releases the credential key as
+   usual.
+2. `POST /api/leases/{id}/discover` runs one discovery through
+   `lease.Service.Setup`. The window must be active, current and unused; the
+   service marks it used before lending the material, in phase `setup`. In that
+   phase the credential transport forwards only `initialize`,
+   `notifications/initialized`, `server/discover` and `tools/list`; a
+   `tools/call` is refused before any header is injected, and `Scope.Matches`
+   never admits a call for a setup scope. `upstream.DiscoverLeased` opens one
+   SDK session with no retries or standalone stream through the destination
+   guard, pages `tools/list` at most 16 times, and fails the whole run on a
+   repeated cursor, a duplicate or empty name, more than 256 tools or more than
+   4 MiB of definitions. The run times out after 30 seconds.
+3. `Repository.SetupDiscovery` saves the list and ends the window in one owner
+   transaction (`lease.Ending.Setup`): the save commits only if the window is
+   still active, live and current, has run, and names the same connector, and
+   the connector was not replaced. Otherwise the transaction rolls back and
+   nothing is saved. The tools are then published to the owner's runtime under
+   the runtime lock, so a connector removed meanwhile does not reappear.
+4. The window ends after this one run: `lease.revoked` with source
+   `setup_completed`, or `setup_failed` when the upstream failed or the save
+   was refused. Provider errors are not returned; the route answers 502
+   `discovery_failed`.
+
+Saving discovery does not end tool windows. A window whose selected tool's
+definition changed is stale by its definition digest, so an agent must ask again
+and the owner reviews the new definition. Background refresh stays off for vault
+connectors: the refresh route and `warden_refresh_provider` return 409 and point
+to Connect and inspect, never to a bypass.
 
 ## Destination guard
 
@@ -138,10 +179,8 @@ Guarded execution is installed whenever `owner_security` runs; the former
   the vault destination accepts.
 - Cached tool definitions stay in `tools/list` while the connector is enabled;
   each call verifies the selected definition against the upstream inside its
-  window. Discovery for new credentialed connectors needs the owner setup flow
-  (step 5); until then they have no tools. Browser flow tests build the gateway
-  with `-tags flowtest`, which adds `PUT /api/test/discovery/<name>` to seed
-  cached discovery for a vault connector without dialing; step 5 removes it.
+  window. A new credentialed connector has no tools until its owner runs
+  [Connect and inspect](#connect-and-inspect-setup-discovery).
 - Each call uses the connector's configured call timeout, clamped to 5 minutes
   (30 seconds when unset). Unlike a manager call, whose timeout starts after its
   admission write and covers only the upstream, a guarded call's timeout covers
@@ -153,7 +192,10 @@ Guarded execution is installed whenever `owner_security` runs; the former
 `TestGuardedHeaderExecution` (SQLite and PostgreSQL) drives one
 connector from creation through locked calls and refused refresh, credential
 save, an owner-activated window, a scope miss, disabling, restart and credential
-deletion against a real SDK upstream. `TestCredentialSaveDuringCallsNeverDials`
+deletion against a real SDK upstream. `TestConnectAndInspect` (SQLite and
+PostgreSQL) covers setup windows: keys refused, one tools/list run with the vault
+header and no tool call, the atomic save and end, runtime publication and a failed
+run. `TestCredentialSaveDuringCallsNeverDials`
 shows that saving a credential concurrently with calls never reaches the upstream
 without a lease, and `TestGuardedConnectorNeverDials` covers the manager.
 
@@ -176,7 +218,7 @@ committed. It covers locked listing/calls, owner-only key release, wrong keys,
 revision attribution, completion failure, lost responses, redirect refusal,
 definition changes, revocation, and a real deferred admission commit rejection.
 
-Before live rollout: a fresh-start deployment; setup/discovery
-authorization; OAuth refresh; session/resource limits; restart/restore drills;
-and load qualification. Deployment history is recorded in
-[progress](../progress.md); the live deployment does not set `owner_security`.
+Before live rollout: a fresh-start deployment; OAuth refresh; session/resource
+limits; restart/restore drills; and load qualification. Deployment history is
+recorded in [progress](../progress.md); the live deployment does not set
+`owner_security`.

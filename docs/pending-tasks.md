@@ -57,13 +57,12 @@ per-case coverage of the 68 acceptance tests is in the
    the vault destination accepts; everyone else gets no-auth connectors. Catalogs from older builds (header values, OAuth settings, grant
    IDs) are refused at load; there is no conversion. `--stdio` serves only
    connectors without authentication.
-5. **Initial setup/discovery authorization.** Implement a bounded owner-only
-   discovery capability for new providers before their tool catalog exists.
-   Until then a new credentialed connector has no tools and cannot be used;
-   browser flow tests seed discovery through a `flowtest`-tagged test route
-   that this step removes.
-   Revalidate destination/header/network policy and actual discovered definitions.
-   The current per-call maintenance capability is not this registration flow.
+5. **Initial setup/discovery authorization.** Done (2026-09-29): Connect and
+   inspect. The owner's browser session requests and starts a `setup_discovery`
+   window (at most 5 minutes, no tools, no call budget); one discovery lists
+   tools through the destination guard, never calls one, and saves in the
+   transaction that ends the window. Refresh stays off for vault connectors.
+   See [encrypted runtime](security/encrypted-runtime.md#connect-and-inspect-setup-discovery).
 6. **OAuth encrypted state and refresh.** Upstream OAuth for personal
    connectors is removed and returns here, vault-backed. Encrypt the whole token/client-secret
    bundle, bind refresh to current authority, commit rotated tokens with revision

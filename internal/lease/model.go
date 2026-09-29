@@ -20,9 +20,9 @@ var (
 	ErrLocked   = errors.New("execution is locked")
 	ErrLimit    = errors.New("access request limit reached")
 	ErrKey      = errors.New("credential activation failed")
-	// ErrRolledBack wraps the caller's context error when a transaction was
-	// abandoned before COMMIT: nothing was committed. A failed ROLLBACK still
-	// fails the store, which Lost reports.
+	// ErrRolledBack wraps the reason a transaction was abandoned before
+	// COMMIT, the caller's context error or a refused setup save: nothing was
+	// committed. A failed ROLLBACK still fails the store, which Lost reports.
 	ErrRolledBack = errors.New("transaction rolled back before commit")
 )
 

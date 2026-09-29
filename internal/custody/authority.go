@@ -2,6 +2,8 @@ package custody
 
 import (
 	"sort"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"sync"
 	"time"
 
@@ -24,6 +26,9 @@ const PolicyRevision = "1"
 type Catalog interface {
 	catalog.Repository
 	ConnectorSecurityRevision(owner, connectorID string) string
+	// SetupDiscovery saves a setup window's discovery and ends the window
+	// in the same transaction.
+	SetupDiscovery(owner, name, connectorID, leaseID string, tools []*mcp.Tool) error
 }
 
 // Authority implements lease.Authority over the catalog and the committed
@@ -185,7 +190,10 @@ func (a *Authority) SelectableTools(owner, credentialID string) ([]ToolView, boo
 // ScopeRequest is the caller-selected part of a scope. The gateway fills every
 // binding field (owner, connector, epoch, revisions, destination and definition
 // digests) from current authority, so a caller cannot pin stale metadata.
+// Purpose is "tool_use" (the default) or "setup_discovery", which names no
+// tools and no call budget.
 type ScopeRequest struct {
+	Purpose           string          `json:"purpose,omitempty"`
 	RequesterAccessID string          `json:"requester_access_id"`
 	CredentialID      string          `json:"credential_id"`
 	DurationSeconds   int             `json:"duration_seconds"`
@@ -197,20 +205,35 @@ type ToolSelection struct {
 	Constraints []lease.Constraint `json:"constraints"`
 }
 
-// BuildScope materializes a finite tool-use scope from current metadata. The
-// result is still validated by lease.ParseScope and the lease service.
+// BuildScope materializes a finite tool-use or setup scope from current
+// metadata. The result is still validated by lease.ParseScope and the lease
+// service.
 func (a *Authority) BuildScope(owner string, in ScopeRequest) ([]byte, error) {
 	k, ok := a.Credential(owner, in.CredentialID)
 	if !ok || !k.Enabled {
 		return nil, lease.ErrStale
 	}
-	if len(in.Tools) == 0 || len(in.Tools) > lease.MaxTools {
-		return nil, lease.ErrScope
+	purpose := in.Purpose
+	if purpose == "" {
+		purpose = "tool_use"
 	}
 	s := lease.Scope{Schema: lease.ScopeSchema, OwnerID: owner, RequesterAccessID: in.RequesterAccessID, ConnectorID: k.ConnectorID,
-		CredentialID: k.ID, CredentialEpoch: k.Epoch, Purpose: "tool_use", DurationSeconds: in.DurationSeconds,
+		CredentialID: k.ID, CredentialEpoch: k.Epoch, Purpose: purpose, DurationSeconds: in.DurationSeconds,
 		PolicyRevision: k.PolicyRevision, ConnectorSecurityRevision: k.ConnectorSecurityRevision,
-		DestinationDigest: k.DestinationDigest, MaxCalls: in.MaxCalls}
+		DestinationDigest: k.DestinationDigest, MaxCalls: in.MaxCalls, Tools: []lease.ToolScope{}}
+	switch purpose {
+	case "tool_use":
+		if len(in.Tools) == 0 || len(in.Tools) > lease.MaxTools {
+			return nil, lease.ErrScope
+		}
+	case "setup_discovery":
+		if len(in.Tools) != 0 || in.MaxCalls != nil {
+			return nil, lease.ErrScope
+		}
+		return json.Marshal(s)
+	default:
+		return nil, lease.ErrScope
+	}
 	for _, selected := range in.Tools {
 		t, ok := k.Tools[selected.ToolID]
 		if !ok || !t.Allowed || !t.Visible {

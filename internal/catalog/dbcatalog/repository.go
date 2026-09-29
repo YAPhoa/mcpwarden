@@ -29,6 +29,9 @@ type Coordinator interface {
 	// after it, means nothing was committed; any other error after the
 	// mutation ran leaves the outcome unknown.
 	Catalog(ctx context.Context, owner string, mutation func(lease.Tx) (func(), lease.Ending, error)) error
+	// CatalogSetup is Catalog for a change that saves the discovery of a
+	// setup window and ends the window in the same transaction.
+	CatalogSetup(ctx context.Context, owner string, setup lease.SetupEnd, mutation func(lease.Tx) (func(), lease.Ending, error)) error
 	BootID() string
 }
 
@@ -149,6 +152,11 @@ func (c *change) event(kind, subject string) {
 // apply runs one owner transaction. plan runs with the view locked and must
 // not change the view; it returns the writes and the publication.
 func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st *state) (func(), error)) error {
+	return r.commit(owner, endLeases, nil, plan)
+}
+
+// commit is apply; with setup, the transaction also ends that setup window.
+func (r *Repository) commit(owner string, endLeases bool, setup *lease.SetupEnd, plan func(c *change, st *state) (func(), error)) error {
 	if r.snapshot {
 		return ErrReadOnly
 	}
@@ -167,7 +175,7 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 			r.mu.Unlock()
 		}
 	}()
-	err := coord.Catalog(ctx, owner, func(tx lease.Tx) (func(), lease.Ending, error) {
+	mutation := func(tx lease.Tx) (func(), lease.Ending, error) {
 		otx, ok := tx.(catalogdb.OwnerTx)
 		if !ok || otx.CatalogOwner() != owner {
 			return nil, lease.Ending{}, lease.ErrStorage
@@ -196,7 +204,13 @@ func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st
 			held = false
 			r.mu.Unlock()
 		}, lease.Ending{All: endLeases, Connector: c.end}, nil
-	})
+	}
+	var err error
+	if setup != nil {
+		err = coord.CatalogSetup(ctx, owner, *setup, mutation)
+	} else {
+		err = coord.Catalog(ctx, owner, mutation)
+	}
 	if err != nil && wrote && !errors.Is(err, lease.ErrRolledBack) {
 		// The writes ran; the commit may or may not have happened. A
 		// transaction the store abandoned before COMMIT committed nothing, so
@@ -211,6 +225,9 @@ func mapError(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, lease.ErrStale):
+		// A setup save whose window ended; rolled back before COMMIT.
+		return lease.ErrStale
 	case errors.Is(err, lease.ErrRolledBack), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Rolled back before COMMIT, or gave up before running.
 		return ErrNotSaved
@@ -469,6 +486,32 @@ func (r *Repository) SetDiscovery(owner, name string, tools []*mcp.Tool) error {
 		return nil
 	}
 	return r.apply(owner, false, func(c *change, st *state) (func(), error) {
+		k := catalog.ProviderKey{Owner: owner, Provider: name}
+		d := copyDiscovery(catalog.Discovery{Tools: tools, UpdatedAt: c.now})
+		row, err := r.seal.discoveryRow(k, d)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.rows.PutDiscovery(row); err != nil {
+			return nil, err
+		}
+		return func() { st.discovery[k] = d }, nil
+	})
+}
+
+// SetupDiscovery saves a vault connector's tools found by a setup window
+// ("Connect and inspect") and ends that window in the same owner transaction.
+// Nothing is saved if the window ended, is not current, or belongs to another
+// connector, or if the connector was replaced since the window was requested.
+func (r *Repository) SetupDiscovery(owner, name, connectorID, leaseID string, tools []*mcp.Tool) error {
+	if !validProvider(owner, name) || !identity.Valid(connectorID) || !identity.Valid(leaseID) {
+		return fmt.Errorf("invalid provider")
+	}
+	setup := &lease.SetupEnd{LeaseID: leaseID, ConnectorID: connectorID}
+	return r.commit(owner, false, setup, func(c *change, st *state) (func(), error) {
+		if st.connectorID(owner, name) != connectorID {
+			return nil, lease.ErrStale
+		}
 		k := catalog.ProviderKey{Owner: owner, Provider: name}
 		d := copyDiscovery(catalog.Discovery{Tools: tools, UpdatedAt: c.now})
 		row, err := r.seal.discoveryRow(k, d)

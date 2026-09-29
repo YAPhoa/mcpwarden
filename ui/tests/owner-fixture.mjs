@@ -14,7 +14,9 @@ import {fileURLToPath} from 'node:url';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const staticRoot = fileURLToPath(new URL('../static', import.meta.url));
-export const UPSTREAM_KEY = 'upstream-synthetic-key';
+// Credential values the flows store in the vault. The synthetic upstream
+// accepts exactly these, so it answers only a gateway that used the vault.
+export const SECRETS = ['vault-synthetic-credential-one', 'vault-synthetic-credential-two', 'vault-synthetic-credential-three'];
 // The main page runs under a strict policy so violations fail the flows. The
 // /security/ worker scripts carry the same policy as ui/nginx.conf.
 export const PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
@@ -35,22 +37,22 @@ function psql(url, sql) { execFileSync('psql', [url.toString(), '-v', 'ON_ERROR_
 
 export function buildBinaries(dir) {
   if (process.env.MCPWARDEN_BIN_DIR) return process.env.MCPWARDEN_BIN_DIR;
-  // The flowtest tag adds a route that seeds cached discovery for vault
-  // connectors until setup discovery (roadmap step 5) exists.
-  for (const name of ['mcpwarden', 'mcpwarden-security-db']) execFileSync('go', ['build', '-tags', 'flowtest', '-o', join(dir, name), `./cmd/${name}`], {cwd: repo, stdio: 'inherit'});
+  for (const name of ['mcpwarden', 'mcpwarden-security-db']) execFileSync('go', ['build', '-o', join(dir, name), `./cmd/${name}`], {cwd: repo, stdio: 'inherit'});
   return dir;
 }
 
-// Minimal Streamable HTTP MCP server answering with JSON. The gateway never
-// dials it: its connector is in vault custody and the flows open no calls. It
-// refuses requests without a header the gateway does not have.
+// Minimal Streamable HTTP MCP server answering with JSON. Its connector is in
+// vault custody, so the gateway dials it only for Connect and inspect or an
+// admitted call. It refuses requests without a vault credential header and
+// records each JSON-RPC method it receives.
 export async function startUpstream() {
+  const methods = [];
   const tools = [
     {name: 'search', description: 'Synthetic search <img src=x onerror="document.title=\'pwned\'"> across one repository', inputSchema: {type: 'object', properties: {repo: {type: 'string'}}}},
     {name: 'write', description: 'Synthetic write', inputSchema: {type: 'object'}},
   ];
   const server = createServer((req, res) => {
-    if (req.headers['x-api-key'] !== UPSTREAM_KEY) { res.writeHead(401); res.end(); return; }
+    if (!SECRETS.includes(req.headers['x-api-key'])) { res.writeHead(401); res.end(); return; }
     if (req.method === 'DELETE') { res.writeHead(200); res.end(); return; }
     if (req.method !== 'POST') { res.writeHead(405, {Allow: 'POST'}); res.end(); return; }
     let body = '';
@@ -58,6 +60,7 @@ export async function startUpstream() {
     req.on('end', () => {
       let message;
       try { message = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
+      methods.push(message.method);
       if (message.id === undefined) { res.writeHead(202); res.end(); return; }
       const result = message.method === 'initialize' ? {protocolVersion: message.params?.protocolVersion || '2025-06-18', capabilities: {tools: {}}, serverInfo: {name: 'synthetic', version: '1.0.0'}}
         : message.method === 'tools/list' ? {tools} : message.method === 'tools/call' ? {content: [{type: 'text', text: 'synthetic result'}]} : {};
@@ -66,7 +69,7 @@ export async function startUpstream() {
     });
   });
   const port = await listen(server);
-  return {url: `http://127.0.0.1:${port}/mcp`, tools, close: () => new Promise(done => server.close(done)),
+  return {url: `http://127.0.0.1:${port}/mcp`, tools, methods, close: () => new Promise(done => server.close(done)),
     // Changes a tool definition as an upstream release would; discovery sees it on refresh.
     change: (name, patch) => Object.assign(tools.find(t => t.name === name), patch)};
 }
@@ -161,7 +164,7 @@ export async function startFixture() {
   }
   await start();
   return {
-    ui: ui.origin, gateway, upstream: upstream.url, upstreamTools: () => structuredClone(upstream.tools), changeTool: upstream.change, logs: () => logs,
+    ui: ui.origin, gateway, upstream: upstream.url, upstreamMethods: () => [...upstream.methods], changeTool: upstream.change, logs: () => logs,
     restart: async () => { await stop(); await start(); },
     // Diagnostics for a stalled run: the Go runtime prints every goroutine on SIGQUIT.
     dumpGoroutines: async () => {
@@ -177,6 +180,27 @@ export async function startFixture() {
       const response = await fetch(gateway + path, {method, headers: {Authorization: `Bearer ${token}`, ...(body ? {'Content-Type': 'application/json'} : {})}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000)});
       const text = await response.text();
       return {status: response.status, data: text ? JSON.parse(text) : null};
+    },
+    // One MCP tool call by a named API key, as an agent would make it.
+    call: async (token, name, args) => {
+      let session = '', id = 0;
+      const rpc = async (method, params, notify = false) => {
+        const headers = {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream'};
+        if (session) { headers['Mcp-Session-Id'] = session; headers['Mcp-Protocol-Version'] = '2025-06-18'; }
+        const message = notify ? {jsonrpc: '2.0', method, params} : {jsonrpc: '2.0', id: ++id, method, params};
+        const response = await fetch(gateway + '/mcp', {method: 'POST', headers, body: JSON.stringify(message), signal: AbortSignal.timeout(30000)});
+        session ||= response.headers.get('Mcp-Session-Id') || '';
+        const text = await response.text();
+        if (notify) return null;
+        if (!response.ok) throw new Error(`MCP ${method}: HTTP ${response.status} ${text}`);
+        const frames = /^application\/json/.test(response.headers.get('Content-Type') || '') ? [text] : text.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5));
+        const reply = frames.map(f => JSON.parse(f)).find(m => m.id === message.id);
+        if (!reply || reply.error) throw new Error(`MCP ${method}: ${JSON.stringify(reply?.error || text)}`);
+        return reply.result;
+      };
+      await rpc('initialize', {protocolVersion: '2025-06-18', capabilities: {}, clientInfo: {name: 'owner-flows', version: '1'}});
+      await rpc('notifications/initialized', {}, true);
+      return rpc('tools/call', {name, arguments: args});
     },
     // An owner browser session replayed outside the page (another tab).
     owner: cookie => async (method, path, body) => {

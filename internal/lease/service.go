@@ -48,6 +48,9 @@ type runtimeLease struct {
 	cancel   context.CancelFunc
 	inflight int
 	ended    bool
+	// setupUsed marks a setup_discovery window whose one discovery run has
+	// started; a second run is refused.
+	setupUsed bool
 }
 
 // Admission is a single-use, internal dispatch capability. Work starts directly
@@ -236,7 +239,21 @@ func (s *Service) actor(ctx context.Context, now time.Time, interactive bool) (C
 }
 func (s *Service) current(scope Scope, now time.Time) (Credential, Caller, error) {
 	c, ok := s.authority.Caller(scope.OwnerID, scope.RequesterAccessID)
-	if !ok || c.Owner != scope.OwnerID || c.AccessID != scope.RequesterAccessID || c.Kind != "api_key" || !identity.ValidPublicID(c.PublicID) || !c.Active || !c.ExpiresAt.IsZero() && !now.Before(c.ExpiresAt) {
+	if !ok || c.Owner != scope.OwnerID || c.AccessID != scope.RequesterAccessID || !c.Active || !c.ExpiresAt.IsZero() && !now.Before(c.ExpiresAt) {
+		return Credential{}, Caller{}, ErrDenied
+	}
+	// A tool window belongs to a named API key. A setup window belongs to the
+	// owner's own browser session, which runs the discovery itself.
+	switch scope.Purpose {
+	case "tool_use":
+		if c.Kind != "api_key" || !identity.ValidPublicID(c.PublicID) {
+			return Credential{}, Caller{}, ErrDenied
+		}
+	case "setup_discovery":
+		if c.Kind != "browser" || !c.Interactive {
+			return Credential{}, Caller{}, ErrDenied
+		}
+	default:
 		return Credential{}, Caller{}, ErrDenied
 	}
 	k, ok := s.authority.Credential(scope.OwnerID, scope.CredentialID)
@@ -271,6 +288,9 @@ func (s *Service) Request(ctx context.Context, raw []byte) (Request, error) {
 			return err
 		}
 		if !actor.Interactive && actor.AccessID != scope.RequesterAccessID {
+			return ErrDenied
+		}
+		if scope.Purpose == "setup_discovery" && actor.AccessID != scope.RequesterAccessID {
 			return ErrDenied
 		}
 		if time.Duration(scope.DurationSeconds)*time.Second > s.opts.MaxTTL {
@@ -453,6 +473,9 @@ func (s *Service) Activate(ctx context.Context, input ActivationInput) (Lease, e
 			}
 			out = l
 			return nil
+		}
+		if r.Scope.Purpose == "setup_discovery" && r.Scope.RequesterAccessID != actor.AccessID {
+			return ErrDenied
 		}
 		k, caller, err := s.validateRequest(r, tx.Now())
 		if err != nil {
@@ -733,25 +756,30 @@ func (s *Service) Revoke(ctx context.Context, id string) error {
 		if !actor.Interactive && actor.AccessID != l.CallerID {
 			return ErrDenied
 		}
-		if l.State != "active" {
-			return nil
+		return s.revoke(tx, o, a.Owner, l, actor.AccessID, "")
+	})
+}
+
+// revoke ends an active window and, after commit, its live material.
+func (s *Service) revoke(tx Tx, o *ownerState, owner string, l Lease, actor, source string) error {
+	if l.State != "active" {
+		return nil
+	}
+	l.State, l.EndedAt = "revoked", tx.Now()
+	if err := tx.PutLease(l); err != nil {
+		return err
+	}
+	if err := s.event(tx, owner, "lease.revoked", actor, l.RequestID, l.ID, source); err != nil {
+		return err
+	}
+	o.publish = append(o.publish, func() error {
+		if rt := o.live[l.ID]; rt != nil {
+			endRuntime(rt)
+			delete(o.live, l.ID)
 		}
-		l.State, l.EndedAt = "revoked", tx.Now()
-		if err := tx.PutLease(l); err != nil {
-			return err
-		}
-		if err := s.event(tx, a.Owner, "lease.revoked", actor.AccessID, l.RequestID, id, ""); err != nil {
-			return err
-		}
-		o.publish = append(o.publish, func() error {
-			if rt := o.live[id]; rt != nil {
-				endRuntime(rt)
-				delete(o.live, id)
-			}
-			return nil
-		})
 		return nil
 	})
+	return nil
 }
 
 func (s *Service) Deny(ctx context.Context, id string) error {
@@ -841,6 +869,12 @@ type Ending struct {
 	Connector string
 }
 
+// SetupEnd names the setup_discovery window whose discovery a CatalogSetup
+// change saves.
+type SetupEnd struct {
+	LeaseID, ConnectorID string
+}
+
 // Catalog commits one catalog change in a single owner transaction under the
 // owner gate. The mutation returns its publication and what the same
 // transaction must end; ended windows lose their live material before
@@ -851,6 +885,20 @@ type Ending struct {
 // unknown; callers never retry the mutation or fall back to another store. The
 // callback must not call Service.
 func (s *Service) Catalog(ctx context.Context, owner string, mutation func(Tx) (func(), Ending, error)) error {
+	return s.catalog(ctx, owner, nil, mutation)
+}
+
+// CatalogSetup is Catalog for the change that saves a setup window's
+// discovery. In the same owner transaction, before the mutation runs, it
+// checks that the window is still active, live and current, has run, and names
+// setup.ConnectorID, and ends it; otherwise it returns ErrStale wrapped in
+// ErrRolledBack and nothing is written. The check reads the catalog through
+// the authority, so it must run before a mutation that locks the catalog.
+func (s *Service) CatalogSetup(ctx context.Context, owner string, setup SetupEnd, mutation func(Tx) (func(), Ending, error)) error {
+	return s.catalog(ctx, owner, &setup, mutation)
+}
+
+func (s *Service) catalog(ctx context.Context, owner string, setup *SetupEnd, mutation func(Tx) (func(), Ending, error)) error {
 	if owner == "" || len(owner) > 512 || mutation == nil {
 		return ErrDenied
 	}
@@ -867,6 +915,13 @@ func (s *Service) Catalog(ctx context.Context, owner string, mutation func(Tx) (
 		ended   []string
 	)
 	err := s.store.WithOwner(ctx, owner, func(tx Tx) error {
+		if setup != nil {
+			id, err := s.endSetup(tx, o, *setup)
+			if err != nil {
+				return err
+			}
+			ended = append(ended, id)
+		}
 		p, e, err := mutation(tx)
 		if err != nil {
 			return err
@@ -876,9 +931,11 @@ func (s *Service) Catalog(ctx context.Context, owner string, mutation func(Tx) (
 			if e.All {
 				connector = ""
 			}
-			if ended, err = s.endMatching(tx, owner, "revoked", "", connector); err != nil {
+			more, err := s.endMatching(tx, owner, "revoked", "", connector)
+			if err != nil {
 				return err
 			}
+			ended = append(ended, more...)
 		}
 		publish, end = p, e
 		return nil

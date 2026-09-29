@@ -55,9 +55,19 @@ loopback Origin. The default Compose deployment leaves `owner_security` unset.
 | `/api/vault/lock-execution` | POST | Owner browser |
 | `/api/vault/credentials` | GET | Owner browser or API key (selectable tools only) |
 | `/api/vault/credentials/{id}` | PUT, DELETE | Owner browser; epoch/revision CAS |
-| `/api/access-requests`, `/{id}` | GET, POST | API key (its own requests) or owner browser (all) |
+| `/api/access-requests`, `/{id}` | GET, POST | API key (its own requests) or owner browser (all). `"purpose": "setup_discovery"` is owner browser only |
 | `/api/approvals/{id}/begin`, `/deny`, `/activate` | POST | Owner browser only |
 | `/api/leases`, `/{id}` | GET `[?include=ended]`, DELETE | API key (its own windows) or owner browser. `include=ended` adds windows that ended in the last 24 hours (at most 50, newest first, with `ended_at`) |
+| `/api/leases/{id}/discover` | POST | Owner browser that requested and started the setup window; runs Connect and inspect once |
+
+Requests and windows carry `purpose`: `tool_use`, or `setup_discovery` for
+Connect and inspect. A setup request names no tools and no `max_calls`, lasts
+at most 300 seconds, and its requester is the calling browser session. The
+discover route answers `{provider, tool_count, tools}` with the tool names,
+409 `stale` when the window ended, was already run or changed, and 502
+`discovery_failed` when the upstream failed or returned an invalid list; the
+window ends either way. See
+[Connect and inspect](encrypted-runtime.md#connect-and-inspect-setup-discovery).
 
 Owner-only fields on a request (`gateway_boot_id`, `scope_digest`,
 `request_digest`, `challenge`) are never returned to the requesting key.

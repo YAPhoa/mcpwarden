@@ -1,5 +1,25 @@
 # Progress
 
+## 2026-09-29 — Step 5: Connect and inspect (removal plan PR 5)
+
+Added owner setup discovery. The owner's own browser session requests and
+activates a `setup_discovery` window (no tools, no call budget, at most 300 s,
+approval mode as for tool windows). `lease.Service.Setup` runs one discovery in
+material phase `setup`, where the credential transport forwards only connection
+setup and `tools/list`; `Service.CatalogSetup` saves the discovered tools and
+ends the window (`lease.revoked`, source `setup_completed`) in one owner
+transaction, and refuses the save when the window ended or changed meanwhile.
+A failed discovery or save revokes the window with source `setup_failed`. The
+route is `POST /api/leases/{id}/discover`, and the Vault & windows console adds
+Connect and inspect on each credential. The flowtest seed route is removed; the
+browser flows now discover through the UI.
+
+Local `gofmt`, `go build ./...`, `go vet ./...`, `go vet -tags historyscale`,
+Windows/macOS vet of `./internal/lease/sqlite ./cmd/mcpwarden`,
+`go mod tidy -diff`, `CGO_ENABLED=0` build and the full
+`go test -race -count=1 ./...` with the isolated PostgreSQL fixture passed.
+`npm test` (72) and the Chromium owner flows on SQLite and PostgreSQL passed.
+
 ## 2026-09-25 — PR #8 follow-up review, merge and deployment
 
 Reviewed head `5e61ae5` and confirmed both earlier findings are fixed. SSE events

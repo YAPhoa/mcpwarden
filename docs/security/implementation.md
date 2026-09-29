@@ -274,7 +274,7 @@ gone; guarded execution is installed whenever `owner_security` runs, and without
 it only `none` connectors can be created. Upstream OAuth for personal connectors
 is removed and returns vault-backed in step 6. Catalogs from older builds are
 refused at load, with no conversion. New credentialed connectors have no tools
-until setup discovery (step 5).
+until setup discovery (step 5, below).
 
 ## Single database — 2026-09-29
 
@@ -291,3 +291,19 @@ snapshot without credentialed connectors, and writes only history.
 `compose.tls.yaml` adds HTTPS for the panel, so the owner routes work in Compose
 through the pinned ui proxy. The live deployment still does not run
 `owner_security`; the fresh-start deployment is the user's.
+
+## Connect and inspect — 2026-09-29
+
+Roadmap step 5, requested by the user on 2026-09-29. The owner's browser session
+requests and starts a `setup_discovery` window for a vault credential: no tools,
+no call budget, at most five minutes, under the same approval policy and key
+release as a tool window. API keys cannot request, start or run it.
+`POST /api/leases/{id}/discover` runs one discovery with the material in the
+`setup` phase, where the credential transport forwards only connection setup
+and `tools/list`. The tool list is saved in the owner transaction that ends the
+window (`lease.revoked`, source `setup_completed`); a failed run or a refused
+save ends it with `setup_failed`. Saved tools publish to the owner's runtime.
+Refresh of a vault connector stays 409 and points to Connect and inspect. The
+flowtest seed route is removed; the browser flows discover through the real
+path and make one agent call inside a window. See
+[encrypted runtime](encrypted-runtime.md#connect-and-inspect-setup-discovery).
