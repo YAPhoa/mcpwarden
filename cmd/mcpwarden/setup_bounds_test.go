@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
+	"github.com/yaphoa/mcpwarden/internal/catalog/dbcatalog"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/lease"
 	"github.com/yaphoa/mcpwarden/internal/secret"
@@ -272,6 +275,9 @@ func TestConnectAndInspectBounds(t *testing.T) {
 					t.Fatalf("route %+v, agent sees %v", result, exposed)
 				}
 			}
+			if c.name == "repeated cursor" && countOf(u.seen(), "tools/list") != 2 {
+				t.Fatalf("a repeated cursor was followed: %v", u.seen())
+			}
 			if u.calls.Load() != 0 {
 				t.Fatal("a tool was called")
 			}
@@ -346,7 +352,11 @@ func TestConnectAndInspectStoppedDuringRun(t *testing.T) {
 	id := p.window()
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- p.inspect(id) }()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("tools/list never reached the upstream")
+	}
 	p.f.expect(req{method: "DELETE", path: "/api/leases/" + id, user: "alice"}, 204, nil)
 	once.Do(func() { close(release) })
 	w := <-done
@@ -499,5 +509,145 @@ func TestSetupPhaseForwardsOnlyListing(t *testing.T) {
 		if !slices.Contains([]string{"server/discover", "initialize", "notifications/initialized", "tools/list"}, method) {
 			t.Fatalf("the upstream saw %q", method)
 		}
+	}
+}
+
+func countOf(items []string, item string) int {
+	n := 0
+	for _, v := range items {
+		if v == item {
+			n++
+		}
+	}
+	return n
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestConnectAndInspectLogsOnlyTheStep: a failed run logs the provider and the
+// failed step, never upstream text or the credential, and the response carries
+// neither.
+func TestConnectAndInspectLogsOnlyTheStep(t *testing.T) {
+	const marker = "upstream-text-7f3a"
+	raw := func(list listFunc) func(t *testing.T) string {
+		return func(t *testing.T) string { return newRawUpstream(t, list).server.URL + "/mcp" }
+	}
+	cases := []struct {
+		step string
+		url  func(t *testing.T) string
+	}{
+		{"connect", func(t *testing.T) string {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, marker, http.StatusInternalServerError)
+			}))
+			t.Cleanup(s.Close)
+			return s.URL + "/mcp"
+		}},
+		{"list", raw(func(_ *http.Request, _ string, w http.ResponseWriter, id json.RawMessage) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":%q,"data":%q}}`, id, marker, marker)
+		})},
+		{"schema", raw(func(_ *http.Request, _ string, w http.ResponseWriter, id json.RawMessage) {
+			writeRPC(w, id, map[string]any{"tools": []any{map[string]any{"name": "broken", "description": marker}}})
+		})},
+		{"name", raw(func(_ *http.Request, _ string, w http.ResponseWriter, id json.RawMessage) {
+			writeRPC(w, id, map[string]any{"tools": []any{rawTool(marker), rawTool(marker)}})
+		})},
+	}
+	for _, c := range cases {
+		t.Run(c.step, func(t *testing.T) {
+			p := newInspectProbe(t, c.url(t))
+			logs := &lockedBuffer{}
+			p.f.api.logger = slog.New(slog.NewTextHandler(logs, nil))
+			w := p.inspect(p.window())
+			out := logs.String()
+			if w.Code != http.StatusBadGateway || !strings.Contains(out, "step="+c.step) || strings.Contains(out, marker) || strings.Contains(out, "SYNTHETIC") || strings.Contains(w.Body.String(), marker) {
+				t.Fatalf("%d %s; log %q", w.Code, w.Body.String(), out)
+			}
+		})
+	}
+}
+
+// TestConnectAndInspectNotSaved: a save the catalog did not commit answers 503
+// not_saved, not "execution is locked", and ends the window.
+func TestConnectAndInspectNotSaved(t *testing.T) {
+	u := newRawUpstream(t, func(_ *http.Request, _ string, w http.ResponseWriter, id json.RawMessage) {
+		writeRPC(w, id, map[string]any{"tools": []any{rawTool("fresh")}})
+	})
+	p := newInspectProbe(t, u.server.URL+"/mcp")
+	p.f.api.saveDiscovery = func(string, string, string, string, []*mcp.Tool) error { return dbcatalog.ErrNotSaved }
+	before := p.saved()
+	id := p.window()
+	w := p.inspect(id)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"not_saved"`) || p.source(id) != "setup_failed" || !slices.Equal(p.saved(), before) {
+		t.Fatalf("%d %s; source %q", w.Code, w.Body.String(), p.source(id))
+	}
+}
+
+// TestSetupItemsOfAnotherSession: another browser session of the same owner
+// sees the setup request and window with current false, cannot start or run
+// them, and can stop the window.
+func TestSetupItemsOfAnotherSession(t *testing.T) {
+	u := newRawUpstream(t, func(_ *http.Request, _ string, w http.ResponseWriter, id json.RawMessage) {
+		writeRPC(w, id, map[string]any{"tools": []any{rawTool("fresh")}})
+	})
+	p := newInspectProbe(t, u.server.URL+"/mcp")
+	f := p.f
+	f.cookies["alice2"] = f.session("alice")
+	var request requestView
+	f.expect(req{method: "POST", path: "/api/access-requests", user: "alice", body: encode(map[string]any{"purpose": "setup_discovery", "credential_id": p.credentialID, "duration_seconds": 60})}, 201, &request)
+	requestCurrent := func(user string) bool {
+		var list []requestView
+		f.expect(req{path: "/api/access-requests", user: user}, 200, &list)
+		for _, r := range list {
+			if r.ID == request.ID {
+				return r.Requester.Current
+			}
+		}
+		t.Fatalf("%s does not see the request", user)
+		return false
+	}
+	if !requestCurrent("alice") || requestCurrent("alice2") {
+		t.Fatal("current marks the wrong session's request")
+	}
+	f.expect(req{method: "POST", path: "/api/approvals/" + request.ID + "/activate", user: "alice2", idempotency: identity.New(), body: f.activation(f.ownerRequest(request.ID), f.cek)}, 403, nil)
+	var window leaseView
+	f.expect(req{method: "POST", path: "/api/approvals/" + request.ID + "/activate", user: "alice", idempotency: identity.New(), body: f.activation(f.ownerRequest(request.ID), f.cek)}, 200, &window)
+	leaseCurrent := func(user string) bool {
+		var list []leaseView
+		f.expect(req{path: "/api/leases", user: user}, 200, &list)
+		for _, l := range list {
+			if l.LeaseID == window.LeaseID {
+				return l.Client.Current
+			}
+		}
+		t.Fatalf("%s does not see the window", user)
+		return false
+	}
+	if !leaseCurrent("alice") || leaseCurrent("alice2") {
+		t.Fatal("current marks the wrong session's window")
+	}
+	f.expect(req{method: "POST", path: "/api/leases/" + window.LeaseID + "/discover", user: "alice2", body: "{}"}, 403, nil)
+	if p.state(window.LeaseID) != "active" || len(u.seen()) != 0 {
+		t.Fatal("another session's refused run touched the window or the upstream")
+	}
+	f.expect(req{method: "DELETE", path: "/api/leases/" + window.LeaseID, user: "alice2"}, 204, nil)
+	if p.state(window.LeaseID) == "active" {
+		t.Fatal("stop from another session did not end the window")
 	}
 }

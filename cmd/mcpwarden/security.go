@@ -1281,7 +1281,7 @@ func (api *securityAPI) discover(w http.ResponseWriter, r *http.Request, caller 
 	case err == nil:
 	case errors.As(err, &failed), errors.Is(err, upstream.ErrLeasedUpstream), errors.Is(err, context.DeadlineExceeded):
 		step := "timeout"
-		if failed != nil {
+		if failed != nil && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			step = failed.Step
 		}
 		api.logger.Warn("connect and inspect failed", "provider", entry.Name, "step", step)

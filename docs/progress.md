@@ -34,6 +34,14 @@ on another session's setup items, uses a 60-second window and setup-specific
 Stop copy. All the checks above passed again, including the full race suite
 with PostgreSQL and the Chromium flows on both databases.
 
+Review round 2 (`582d179`): nothing blocking or should-fix. Took the optional
+notes: tests for the failure step log (no upstream text or credential), the
+`not_saved` answer, another browser session's `current: false` items (403 to
+start or run, 204 to stop), and a repeated cursor that is not followed; the
+stop-during-run test no longer waits without a timeout; a run that hits the
+30-second limit logs step `timeout`. The `cmd/mcpwarden` race tests with
+PostgreSQL, vet (plain, Windows, macOS) and `go mod tidy -diff` passed.
+
 ## 2026-09-25 — PR #8 follow-up review, merge and deployment
 
 Reviewed head `5e61ae5` and confirmed both earlier findings are fixed. SSE events
