@@ -120,7 +120,7 @@ func Open(ctx context.Context, path string, opt Options) (*Store, error) {
 		return nil, err
 	}
 	if err := migrate(openCtx, s.conn); err != nil {
-		if errors.Is(err, ErrMigration) || errors.Is(err, ErrNewer) || errors.Is(err, ErrForeign) {
+		if errors.Is(err, ErrMigration) || errors.Is(err, ErrNewer) || errors.Is(err, ErrForeign) || errors.Is(err, ErrSchemaReset) {
 			return nil, err
 		}
 		return nil, errors.New("storage database could not be migrated")

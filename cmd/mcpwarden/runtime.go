@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -44,10 +43,6 @@ type runtimes struct {
 	store  catalog.Repository
 	logger *slog.Logger
 	users  map[string]*userRuntime
-	// providerGuard ends the owner's access windows before a file catalog
-	// changes a provider's availability or visible tools. The PostgreSQL
-	// catalog does this in its own transaction and leaves it unset.
-	providerGuard accessGuard
 	// guarded is set when the owner vault runs, before any runtime exists.
 	// Without it, credentialed connectors cannot be created.
 	guarded *guardedCustody
@@ -69,38 +64,30 @@ func (rs *runtimes) getLocked(owner string) *userRuntime {
 	}
 	upstreams := append([]config.Upstream(nil), rs.cfg.Upstreams...)
 	reg := registry.NewForOwner(owner)
-	if rs.store != nil {
-		for _, entry := range rs.store.List(owner) {
-			upstreams = append(upstreams, rs.upstreamConfig(entry))
-			reg.SetProviderID(entry.Name, entry.ID)
-		}
+	for _, entry := range rs.store.List(owner) {
+		upstreams = append(upstreams, rs.upstreamConfig(entry))
+		reg.SetProviderID(entry.Name, entry.ID)
 	}
-	if rs.store != nil {
-		for i := range upstreams {
-			upstreams[i].Disabled = rs.store.Visibility(owner, upstreams[i].Name).Disabled
-		}
+	for i := range upstreams {
+		upstreams[i].Disabled = rs.store.Visibility(owner, upstreams[i].Name).Disabled
 	}
 	p := proxy.New(reg, rs.policy, approval.None{}, rs.audit, rs.logger)
 	p.Owner = owner
 	p.Server.AddReceivingMiddleware(rs.access.middleware)
 	p.AdminServer.AddReceivingMiddleware(rs.access.middleware)
-	if rs.store != nil {
-		p.Visible = func(name string) bool {
-			provider, _, ok := registry.Split(name)
-			return !ok || rs.store.ToolVisible(owner, provider, name)
-		}
+	p.Visible = func(name string) bool {
+		provider, _, ok := registry.Split(name)
+		return !ok || rs.store.ToolVisible(owner, provider, name)
 	}
-	if rs.store != nil {
-		for _, upstreamCfg := range upstreams {
-			if cached, ok := rs.store.Discovery(owner, upstreamCfg.Name); ok {
-				p.Changed(upstreamCfg.Name, cached.Tools, true)
-				p.Changed(upstreamCfg.Name, nil, false)
-			}
+	for _, upstreamCfg := range upstreams {
+		if cached, ok := rs.store.Discovery(owner, upstreamCfg.Name); ok {
+			p.Changed(upstreamCfg.Name, cached.Tools, true)
+			p.Changed(upstreamCfg.Name, nil, false)
 		}
 	}
 	m := upstream.New(upstreams, rs.logger, func(name string, tools []*mcp.Tool, healthy bool) {
 		p.Changed(name, tools, healthy)
-		if healthy && rs.store != nil {
+		if healthy {
 			if err := rs.store.SetDiscovery(owner, name, tools); err != nil {
 				rs.logger.Error("store tool discovery failed", "upstream", name, "error", err)
 			}
@@ -126,9 +113,6 @@ func (rs *runtimes) vaultOwner(owner string) bool {
 }
 
 func (rs *runtimes) add(e catalog.Entry) error {
-	if rs.store == nil {
-		return fmt.Errorf("panel-managed upstreams are not configured")
-	}
 	if e.ID == "" {
 		e.ID = identity.New()
 	}
@@ -160,9 +144,6 @@ func (rs *runtimes) add(e catalog.Entry) error {
 }
 
 func (rs *runtimes) remove(owner, name string) error {
-	if rs.store == nil {
-		return fmt.Errorf("panel-managed upstreams are not configured")
-	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	rt := rs.getLocked(owner)
@@ -261,10 +242,8 @@ func (rs *runtimes) providers(w http.ResponseWriter, r *http.Request) {
 	owner := requestOwner(r)
 	rt := rs.get(owner)
 	managed := map[string]bool{}
-	if rs.store != nil {
-		for _, entry := range rs.store.List(owner) {
-			managed[entry.Name] = true
-		}
+	for _, entry := range rs.store.List(owner) {
+		managed[entry.Name] = true
 	}
 	type provider struct {
 		Enabled        bool       `json:"enabled"`
@@ -286,13 +265,11 @@ func (rs *runtimes) providers(w http.ResponseWriter, r *http.Request) {
 		if managed[state.Name] {
 			p.Source = "personal"
 		}
-		if rs.store != nil {
-			setting := rs.store.Visibility(owner, state.Name)
-			p.VisibilityMode = setting.Mode
-			p.EnabledTools = setting.Enabled
-			if cached, ok := rs.store.Discovery(owner, state.Name); ok {
-				p.LastDiscovered = &cached.UpdatedAt
-			}
+		setting := rs.store.Visibility(owner, state.Name)
+		p.VisibilityMode = setting.Mode
+		p.EnabledTools = setting.Enabled
+		if cached, ok := rs.store.Discovery(owner, state.Name); ok {
+			p.LastDiscovered = &cached.UpdatedAt
 		}
 		if p.VisibilityMode == "" {
 			p.VisibilityMode = "all"
@@ -339,10 +316,6 @@ func (rs *runtimes) providerTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rs *runtimes) providerVisibility(w http.ResponseWriter, r *http.Request, name string) {
-	if rs.store == nil {
-		jsonResponse(w, http.StatusNotImplemented, map[string]string{"error": "tool visibility requires managed_upstreams configuration"})
-		return
-	}
 	owner := requestOwner(r)
 	switch r.Method {
 	case http.MethodGet:
@@ -353,14 +326,9 @@ func (rs *runtimes) providerVisibility(w http.ResponseWriter, r *http.Request, n
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
 		}
-		set := func() error { return rs.store.SetVisibility(owner, name, setting) }
-		var err error
-		if visibilityChanges(rs.store.Visibility(owner, name), setting) {
-			err = rs.providerGuard.run(r.Context(), owner, set)
-		} else {
-			err = set()
-		}
-		if err != nil {
+		// The repository ends the owner's access windows in the same
+		// transaction when the visible tools change.
+		if err := rs.store.SetVisibility(owner, name, setting); err != nil {
 			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -372,21 +340,7 @@ func (rs *runtimes) providerVisibility(w http.ResponseWriter, r *http.Request, n
 	}
 }
 
-// visibilityChanges reports whether a setting changes which tools are visible.
-func visibilityChanges(old, next catalog.Visibility) bool {
-	if old.Mode == "all" || next.Mode == "all" {
-		return old.Mode != next.Mode
-	}
-	enabled := slices.Clone(next.Enabled)
-	slices.Sort(enabled)
-	return !slices.Equal(old.Enabled, enabled)
-}
-
 func (rs *runtimes) connections(w http.ResponseWriter, r *http.Request) {
-	if rs.store == nil {
-		jsonResponse(w, http.StatusNotImplemented, map[string]string{"error": "panel-managed upstreams are not configured"})
-		return
-	}
 	owner := requestOwner(r)
 	switch r.Method {
 	case http.MethodGet:
@@ -492,10 +446,6 @@ func (rs *runtimes) providerEnabled(w http.ResponseWriter, r *http.Request, name
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if rs.store == nil {
-		jsonResponse(w, http.StatusNotImplemented, map[string]string{"error": "provider settings require managed_upstreams"})
-		return
-	}
 	var input struct {
 		Enabled *bool `json:"enabled"`
 	}
@@ -508,14 +458,9 @@ func (rs *runtimes) providerEnabled(w http.ResponseWriter, r *http.Request, name
 	defer rs.mu.Unlock()
 	rt := rs.getLocked(owner)
 	old := !rs.store.Visibility(owner, name).Disabled
-	set := func() error { return rs.store.SetProviderEnabled(owner, name, *input.Enabled) }
-	var err error
-	if old != *input.Enabled {
-		err = rs.providerGuard.run(r.Context(), owner, set)
-	} else {
-		err = set()
-	}
-	if err != nil {
+	// The repository ends the owner's access windows in the same transaction
+	// when availability changes.
+	if err := rs.store.SetProviderEnabled(owner, name, *input.Enabled); err != nil {
 		http.Error(w, "could not save provider setting", http.StatusInternalServerError)
 		return
 	}
@@ -543,8 +488,6 @@ func oldConnectorFields(headers, oauth json.RawMessage) error {
 
 func (rs *runtimes) upstreamConfig(e catalog.Entry) config.Upstream {
 	u := e.Upstream()
-	if rs.store != nil {
-		u.Disabled = rs.store.Visibility(e.Owner, e.Name).Disabled
-	}
+	u.Disabled = rs.store.Visibility(e.Owner, e.Name).Disabled
 	return u
 }

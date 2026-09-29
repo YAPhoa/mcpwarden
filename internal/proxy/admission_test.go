@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/approval"
 	"github.com/yaphoa/mcpwarden/internal/audit"
+	"github.com/yaphoa/mcpwarden/internal/audit/audittest"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/policy"
@@ -23,7 +24,7 @@ import (
 )
 
 type failingAppender struct {
-	*audit.Writer
+	*audittest.Memory
 	failType string
 }
 
@@ -31,26 +32,22 @@ func (w failingAppender) Write(r audit.Record) error {
 	if r.EventType == w.failType {
 		return errors.New("synthetic-private-error-do-not-log")
 	}
-	return w.Writer.Write(r)
+	return w.Memory.Write(r)
 }
 
 func TestDispatchAuditFailuresNeverCauseExecutionOrReplay(t *testing.T) {
 	for _, failType := range []string{audit.DispatchAdmitted, audit.DispatchCompleted, ""} {
 		t.Run(failType, func(t *testing.T) {
-			log, err := audit.Open(t.TempDir() + "/audit")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer log.Close()
+			log := &audittest.Memory{}
 			remote := testutil.NewMock(time.Second)
 			defer remote.Close()
 			var calls atomic.Int32
 			remote.Add("checked", func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				calls.Add(1)
 				// The upstream itself checks that admission is already visible
-				// through the real file reader before performing its work.
-				rows, total, err := log.History("alice", "", 1, 25)
-				if err != nil || total != 1 || len(rows) != 1 || rows[0].EventType != audit.DispatchAdmitted || rows[0].ActorAccessID != "key-a" {
+				// in history before performing its work.
+				rows := log.History("alice")
+				if len(rows) != 1 || rows[0].EventType != audit.DispatchAdmitted || rows[0].ActorAccessID != "key-a" {
 					t.Error("upstream executed without persisted caller admission")
 				}
 				return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "upstream-success"}}}, nil
@@ -84,9 +81,9 @@ func TestDispatchAuditFailuresNeverCauseExecutionOrReplay(t *testing.T) {
 			if calls.Load() != wantCalls {
 				t.Fatalf("unexpected dispatch/retry count: %d", calls.Load())
 			}
-			rows, total, err := log.History("alice", "", 1, 25)
-			if err != nil || total != 1 || len(rows) != 1 {
-				t.Fatalf("audit history: %d %v", total, err)
+			rows := log.History("alice")
+			if len(rows) != 1 {
+				t.Fatalf("audit history: %d rows", len(rows))
 			}
 			wantStatus := "ok"
 			if failType == audit.DispatchAdmitted {

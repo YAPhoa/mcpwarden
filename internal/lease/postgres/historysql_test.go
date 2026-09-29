@@ -13,13 +13,12 @@ import (
 )
 
 func event(owner, id, kind, invocation, toolID, tool, upstream, status string, ns int64) catalogdb.HistoryRow {
-	version := 1
-	if kind != "" {
-		version = 2
+	if kind == "" {
+		kind, invocation = "tool.dispatch.completed", "inv-"+id
 	}
-	raw, _ := json.Marshal(map[string]any{"schema_version": version, "event_id": id, "owner": owner})
-	return catalogdb.HistoryRow{OwnerID: owner, EventID: id, SchemaVersion: version, EventType: kind, InvocationID: invocation, ToolID: toolID, Tool: tool,
-		Upstream: upstream, Status: status, TSNano: ns, HistoryNano: ns, Record: string(raw), Source: "live"}
+	raw, _ := json.Marshal(map[string]any{"schema_version": 2, "event_id": id, "owner": owner})
+	return catalogdb.HistoryRow{OwnerID: owner, EventID: id, SchemaVersion: 2, EventType: kind, InvocationID: invocation, ToolID: toolID, Tool: tool,
+		Upstream: upstream, Status: status, TSNano: ns, HistoryNano: ns, Record: string(raw)}
 }
 
 func insert(t *testing.T, db *pgx.Conn, rows ...catalogdb.HistoryRow) {
@@ -37,11 +36,11 @@ func insert(t *testing.T, db *pgx.Conn, rows ...catalogdb.HistoryRow) {
 func bulk(t *testing.T, db *pgx.Conn, owner string, n int) {
 	t.Helper()
 	_, err := db.Exec(t.Context(), `INSERT INTO mcpwarden_security.history_events
-        (owner_id,event_id,schema_version,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
-         handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record,source)
-        SELECT $1, 'e'||lpad(g::text,6,'0'), 1, 'tool-'||(g%4), 'tool '||(g%4), 'up-'||(g%3), CASE WHEN g%5=0 THEN 'timeout' ELSE 'ok' END,
+        (owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
+         handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record)
+        SELECT $1, 'e'||lpad(g::text,6,'0'), 2, 'tool.dispatch.completed', 'inv-'||'e'||lpad(g::text,6,'0'), 'tool-'||(g%4), 'tool '||(g%4), 'up-'||(g%3), CASE WHEN g%5=0 THEN 'timeout' ELSE 'ok' END,
          'actor-'||(g%7), g, g, true, g%5=0, true, 100, 10, 90, 6, 3, 6,
-         json_build_object('schema_version',1,'event_id','e'||lpad(g::text,6,'0'),'owner',$1::text)::text, 'live'
+         json_build_object('schema_version',2,'event_id','e'||lpad(g::text,6,'0'),'owner',$1::text)::text
         FROM generate_series(1,$2::int) g`, owner, n)
 	if err != nil {
 		t.Fatal(err)

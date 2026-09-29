@@ -85,8 +85,7 @@ func New(encodedKey string, loader Loader, onFail func()) (*Repository, error) {
 	return r, nil
 }
 
-// Load reads and verifies every row in one transaction. The store refuses a
-// catalog that is not this gateway's to serve (catalogdb.ErrNotActive).
+// Load reads and verifies every row in one transaction.
 func (r *Repository) Load(ctx context.Context) error {
 	var st *state
 	rows, err := r.loader.LoadCatalog(ctx)
@@ -275,12 +274,9 @@ func (r *Repository) Add(e catalog.Entry) error {
 		if _, exists := st.tombstones[e.ID]; exists {
 			return nil, fmt.Errorf("upstream ID already exists")
 		}
-		if _, exists := st.legacy[e.ID]; exists {
-			return nil, fmt.Errorf("upstream ID already exists")
-		}
 		e.CreatedAt = c.now
 		e.UpdatedAt = e.CreatedAt
-		row, err := r.seal.connectorRow(e, 0)
+		row, err := r.seal.connectorRow(e)
 		if err != nil {
 			return nil, err
 		}
@@ -288,7 +284,7 @@ func (r *Repository) Add(e catalog.Entry) error {
 			return nil, err
 		}
 		c.event("connector.created", e.ID)
-		return func() { st.entries[e.ID] = e; st.grants[e.ID] = 0 }, nil
+		return func() { st.entries[e.ID] = e }, nil
 	})
 }
 
@@ -320,7 +316,6 @@ func (r *Repository) Delete(owner, name string) error {
 		k := catalog.ProviderKey{Owner: owner, Provider: name}
 		return func() {
 			delete(st.entries, e.ID)
-			delete(st.grants, e.ID)
 			st.tombstones[e.ID] = tombstone{owner: owner, life: deleted}
 			delete(st.discovery, k)
 			delete(st.visibility, k)
@@ -546,7 +541,7 @@ func (r *Repository) AccountForToken(hash string) (catalog.Account, bool) {
 }
 
 func (r *Repository) AddAccount(a catalog.Account) error {
-	if a.ID == "" || a.Username == "" || a.ClientTokenHash != "" {
+	if a.ID == "" || a.Username == "" {
 		return fmt.Errorf("invalid account")
 	}
 	return r.apply(a.ID, false, func(c *change, st *state) (func(), error) {
@@ -572,37 +567,6 @@ func (r *Repository) AddAccount(a catalog.Account) error {
 		}
 		c.event("account.created", a.ID)
 		return func() { st.accounts[a.Username] = a }, nil
-	})
-}
-
-// SetClientToken replaces the legacy client key: revocation and the new key
-// commit together, and the owner's access windows end with them.
-func (r *Repository) SetClientToken(username, hash string) error {
-	a, ok := r.Account(username)
-	if !ok {
-		return fmt.Errorf("account not found")
-	}
-	fresh := catalog.AccessRecord{Owner: a.ID, Name: "Legacy client key", Kind: "api_key", Role: "client", SecretHash: hash}
-	if err := validAccess(&fresh); err != nil {
-		return err
-	}
-	return r.apply(a.ID, true, func(c *change, st *state) (func(), error) {
-		var publish []func()
-		revoking := map[string]bool{}
-		for id, record := range st.access {
-			if record.Owner == a.ID && record.Kind == "api_key" && record.Name == "Legacy client key" && record.RevokedAt.IsZero() {
-				next := record
-				next.RevokedAt = c.now
-				next.UpdatedAt = next.RevokedAt
-				p, err := r.putAccess(c, st, next, "access.revoked")
-				if err != nil {
-					return nil, err
-				}
-				publish = append(publish, p)
-				revoking[id] = true
-			}
-		}
-		return r.addAccess(c, st, fresh, revoking, publish)
 	})
 }
 

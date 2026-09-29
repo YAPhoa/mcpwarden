@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,30 +12,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
+	"github.com/yaphoa/mcpwarden/internal/identity"
 	"github.com/yaphoa/mcpwarden/internal/policy"
 )
 
-func TestAccountsWorkspaceIsolationAndClientTokens(t *testing.T) {
-	path := t.TempDir() + "/accounts.enc"
-	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
-	store, err := catalog.Open(path, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestAccountsWorkspaceIsolationAndClientKeys(t *testing.T) {
 	cfg := config.Config{Accounts: &config.Accounts{AllowRegistration: true}, DownstreamAuth: &config.Auth{}, Token: "test-operator"}
-	accounts := newAccountAuth(store, cfg)
+	db := testStorage(t, &cfg)
+	store, accounts := db.repo, db.accounts
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	auditLog, err := audit.Open(t.TempDir() + "/audit.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auditLog.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rs := newRuntimes(ctx, cfg, pol, auditLog, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rs := newRuntimes(ctx, cfg, pol, db.history, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rs.close()
 	mux := http.NewServeMux()
 	mux.Handle("/api/auth/", originOnly(http.HandlerFunc(accounts.authHandler), nil))
@@ -129,20 +118,26 @@ func TestAccountsWorkspaceIsolationAndClientTokens(t *testing.T) {
 	if out := call("POST", "/api/auth/register", `{"username":"short","password":"short"}`, nil); out.Code != 400 {
 		t.Fatal("short password accepted")
 	}
-	tokenResponse := call("POST", "/api/auth/client-token", `{}`, cookies["alice"])
-	var issued struct{ Token string }
-	if tokenResponse.Code != 200 || json.Unmarshal(tokenResponse.Body.Bytes(), &issued) != nil || !strings.HasPrefix(issued.Token, "mw_") {
-		t.Fatal("token not issued")
+	// The single legacy client key was replaced by named API keys.
+	if out := call("POST", "/api/auth/client-token", `{}`, cookies["alice"]); out.Code != 404 {
+		t.Fatal("legacy client key route still served:", out.Code)
 	}
-	if out := request("GET", "/mcp", "", nil, issued.Token, "", ""); out.Code != 200 || !strings.Contains(out.Body.String(), ids["alice"]) {
-		t.Fatal("client token did not select account")
+	token, publicID := identity.NewAccessToken()
+	key := catalog.AccessRecord{ID: identity.New(), PublicID: publicID, Owner: ids["alice"], Name: "Laptop", Kind: "api_key", Role: "client", SecretHash: tokenHash(token), ExpiresAt: time.Now().Add(time.Hour)}
+	if err := store.AddAccess(key); err != nil {
+		t.Fatal(err)
+	}
+	if out := request("GET", "/mcp", "", nil, token, "", ""); out.Code != 200 || !strings.Contains(out.Body.String(), ids["alice"]) {
+		t.Fatal("API key did not select account")
 	}
 	if out := call("GET", "/mcp", "", cookies["alice"]); out.Code != 401 {
 		t.Fatal("browser session accepted for MCP")
 	}
-	call("POST", "/api/auth/client-token", `{}`, cookies["alice"])
-	if out := request("GET", "/mcp", "", nil, issued.Token, "", ""); out.Code != 401 {
-		t.Fatal("rotated token still accepted")
+	if err := store.RevokeAccess(ids["alice"], key.ID); err != nil {
+		t.Fatal(err)
+	}
+	if out := request("GET", "/mcp", "", nil, token, "", ""); out.Code != 401 {
+		t.Fatal("revoked key still accepted")
 	}
 	if out := request("GET", "/api/status", "", nil, "test-operator", "", ""); out.Code != 200 || !strings.Contains(out.Body.String(), `"subject":"local"`) {
 		t.Fatal("operator compatibility broken")
@@ -169,17 +164,18 @@ func TestAccountsWorkspaceIsolationAndClientTokens(t *testing.T) {
 	if out := call("GET", "/api/status", "", cookies["bob"]); out.Code != 401 {
 		t.Fatal("expired session accepted")
 	}
-	reopened, err := catalog.Open(path, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	account, found := reopened.Account("alice")
+	rs.close()
+	db.close()
+	reopened := testStorage(t, &cfg)
+	account, found := reopened.repo.Account("alice")
 	if !found || account.ID != ids["alice"] || len(account.PasswordHash) != 32 || account.Iterations != passwordIterations {
 		t.Fatal("account did not persist")
 	}
-	raw, _ := os.ReadFile(path)
-	if strings.Contains(string(raw), "synthetic long passphrase") || strings.Contains(string(raw), "private-alice") || strings.Contains(string(raw), issued.Token) {
-		t.Fatal("plaintext material persisted")
+	for _, suffix := range []string{"", "-wal"} {
+		raw, _ := os.ReadFile(cfg.Storage.Path + suffix)
+		if strings.Contains(string(raw), "synthetic long passphrase") || strings.Contains(string(raw), token) || strings.Contains(string(raw), key.SecretHash) {
+			t.Fatal("plaintext material persisted")
+		}
 	}
 	cfg.Accounts.AllowRegistration = false
 	if out := call("POST", "/api/auth/register", `{"username":"newuser","password":"synthetic long passphrase"}`, nil); out.Code != 403 {
@@ -188,11 +184,8 @@ func TestAccountsWorkspaceIsolationAndClientTokens(t *testing.T) {
 }
 
 func TestAccountAuthCannotFallbackWithoutOperatorToken(t *testing.T) {
-	store, err := catalog.Open(t.TempDir()+"/store", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := newAccountAuth(store, config.Config{Accounts: &config.Accounts{}})
+	cfg := config.Config{Accounts: &config.Accounts{}}
+	a := testStorage(t, &cfg).accounts
 	handler := a.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("bypassed account auth") }), true)
 	req := httptest.NewRequest("GET", "http://localhost/api/status", nil)
 	req.Header.Set("Authorization", "Bearer arbitrary")
@@ -204,11 +197,8 @@ func TestAccountAuthCannotFallbackWithoutOperatorToken(t *testing.T) {
 }
 
 func TestChangePasswordRequiresCurrentAndRevokesOtherBrowsers(t *testing.T) {
-	store, err := catalog.Open(t.TempDir()+"/store", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts := newAccountAuth(store, config.Config{Accounts: &config.Accounts{AllowRegistration: true}})
+	cfg := config.Config{Accounts: &config.Accounts{AllowRegistration: true}}
+	accounts := testStorage(t, &cfg).accounts
 	call := func(path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "http://localhost"+path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

@@ -14,27 +14,22 @@ import (
 )
 
 // Tool policy comes from the config file and changes only with a restart, which
-// starts a new boot and ends every window, so it reports a fixed revision. The
-// PostgreSQL catalog counts connector security changes (availability and
-// visible tools) and ends the connector's requests and windows in the same
-// commit. The file catalog keeps no counter and reports a fixed revision; every
-// admission and activation still rechecks the live tool visibility, policy and
-// definition digest. Replacing a connector gives it a new ID.
-const (
-	PolicyRevision            = "1"
-	ConnectorSecurityRevision = "1"
-)
+// starts a new boot and ends every window, so it reports a fixed revision.
+// Replacing a connector gives it a new ID.
+const PolicyRevision = "1"
 
-// securityRevisions is implemented by catalogs that count connector security
-// changes.
-type securityRevisions interface {
+// Catalog is the database catalog. It counts connector security changes
+// (availability and visible tools) and ends the connector's requests and
+// windows in the same commit.
+type Catalog interface {
+	catalog.Repository
 	ConnectorSecurityRevision(owner, connectorID string) string
 }
 
-// Authority implements lease.Authority over the file catalog and the committed
+// Authority implements lease.Authority over the catalog and the committed
 // custody index. It performs in-memory reads only and never resolves secrets.
 type Authority struct {
-	Catalog catalog.Repository
+	Catalog Catalog
 	Policy  *policy.Policy
 	Index   *Index
 
@@ -48,7 +43,7 @@ type digestKey struct {
 	count            int
 }
 
-func NewAuthority(store catalog.Repository, tools *policy.Policy, index *Index) *Authority {
+func NewAuthority(store Catalog, tools *policy.Policy, index *Index) *Authority {
 	return &Authority{Catalog: store, Policy: tools, Index: index, digests: map[digestKey]map[string]lease.Tool{}}
 }
 
@@ -83,10 +78,7 @@ func (a *Authority) Credential(owner, id string) (lease.Credential, bool) {
 		return lease.Credential{}, false
 	}
 	p := a.Index.Policy(owner)
-	connectorRevision := ConnectorSecurityRevision
-	if counted, ok := a.Catalog.(securityRevisions); ok {
-		connectorRevision = counted.ConnectorSecurityRevision(owner, h.ConnectorID)
-	}
+	connectorRevision := a.Catalog.ConnectorSecurityRevision(owner, h.ConnectorID)
 	k := lease.Credential{ID: h.CredentialID, ConnectorID: h.ConnectorID, Epoch: h.Epoch, Revision: h.Revision,
 		DestinationDigest: h.DestinationDigest, PolicyRevision: PolicyRevision, ConnectorSecurityRevision: connectorRevision,
 		ApprovalPolicyRevision: p.Revision, ApprovalMode: p.Mode, Tools: map[string]lease.Tool{}}

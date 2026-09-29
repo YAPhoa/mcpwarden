@@ -21,6 +21,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/approval"
 	"github.com/yaphoa/mcpwarden/internal/audit"
+	"github.com/yaphoa/mcpwarden/internal/audit/audittest"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/identity"
 	json "github.com/yaphoa/mcpwarden/internal/jsoncodec"
@@ -155,11 +156,7 @@ func TestEncryptedDispatchThroughMCPAndPostgres(t *testing.T) {
 			connector, credentialID := identity.New(), identity.New()
 			reg.SetProviderID("remote", connector)
 			pol, _ := policy.New(config.Policy{Default: "allow"})
-			denials, err := audit.Open(t.TempDir() + "/audit.jsonl")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer denials.Close()
+			denials := &audittest.Memory{}
 			var diagnostics bytes.Buffer
 			p := proxy.New(reg, pol, forbiddenApprover{t}, denials, slog.New(slog.NewTextHandler(&diagnostics, nil)))
 			p.Owner = "alice"

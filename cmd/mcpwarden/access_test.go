@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,10 +23,9 @@ import (
 func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	store, err := catalog.Open(t.TempDir()+"/store", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := config.Config{Accounts: &config.Accounts{}}
+	db := testStorage(t, &cfg)
+	store := db.repo
 	for _, owner := range []string{"alice", "bob"} {
 		if err := store.AddAccount(catalog.Account{ID: owner, Username: owner}); err != nil {
 			t.Fatal(err)
@@ -44,15 +42,9 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cfg := config.Config{Accounts: &config.Accounts{}}
-	account := newAccountAuth(store, cfg)
+	account := db.accounts
 	pol, _ := policy.New(config.Policy{Default: "allow"})
-	log, err := audit.Open(t.TempDir() + "/audit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
-	rs := newRuntimes(ctx, cfg, pol, log, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rs := newRuntimes(ctx, cfg, pol, db.history, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer rs.close()
 	_, remote := upstreamForUser(t, "echo")
 	defer func() { rs.close(); remote.Close() }()
@@ -213,7 +205,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if !strings.Contains(string(content), `"total":0`) {
 		t.Fatal("cross-user history exposed")
 	}
-	rows, total, err := log.History("alice", entry.ID, 1, 25)
+	rows, total, err := historyPage(db.history, "alice", entry.ID)
 	if err != nil || total != 1 || len(rows) != 1 || rows[0].ActorAccessID != "client" || rows[0].ActorPublicID != clientPublicID || rows[0].ActorLabel != "client" {
 		t.Fatal("MCP arguments or clientInfo replaced the authenticated caller")
 	}
@@ -231,7 +223,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if call(admin, "remote__echo", map[string]any{}).IsError {
 		t.Fatal("second caller failed")
 	}
-	rows, total, err = log.History("alice", entry.ID, 1, 25)
+	rows, total, err = historyPage(db.history, "alice", entry.ID)
 	if err != nil || total != 4 || len(rows) != 4 || rows[0].ActorAccessID != "admin" || rows[1].ActorAccessID != "client" || rows[1].ActorLabel != "Renamed caller" || rows[2].ActorLabel != "Renamed caller" || rows[3].ActorLabel != "client" {
 		t.Fatal("caller identity or historical label changed across requests/reconnects")
 	}
@@ -314,7 +306,7 @@ func TestAccessRolesAndRevocableMCPSessions(t *testing.T) {
 	if strings.Contains(string(raw), "secret_hash") || strings.Contains(string(raw), "mw_admin") {
 		t.Fatal("credential leaked")
 	}
-	rs.audit = rejectAdmissionStore{log}
+	rs.audit = rejectAdmissionStore{db.history}
 	if !call(admin, "warden_remove_provider", map[string]any{"provider": "remote"}).IsError {
 		t.Fatal("management action ignored admission failure")
 	}
@@ -343,10 +335,9 @@ func (s rejectAdmissionStore) Write(r audit.Record) error {
 }
 
 func TestNamedKeyMintAndAuthenticationPaths(t *testing.T) {
-	store, err := catalog.Open(t.TempDir()+"/store", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg := config.Config{Accounts: &config.Accounts{}}
+	db := testStorage(t, &cfg)
+	store := db.repo
 	if err := store.AddAccount(catalog.Account{ID: "alice", Username: "alice"}); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +345,7 @@ func TestNamedKeyMintAndAuthenticationPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := newAccessManager(store)
-	accounts := newAccountAuth(store, config.Config{Accounts: &config.Accounts{}})
+	accounts := db.accounts
 	req := httptest.NewRequest("POST", "http://localhost/api/access", strings.NewReader(`{"name":"Laptop", "role":"client", "expires_days":1}`))
 	req.Header.Set("Authorization", "Bearer mw_bootstrap")
 	out := httptest.NewRecorder()

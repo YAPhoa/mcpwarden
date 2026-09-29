@@ -191,11 +191,11 @@ func (d *contractDB) BulkHistory(t *testing.T, owner string, n int) {
 	t.Helper()
 	_, err := d.raw.ExecContext(t.Context(), `WITH RECURSIVE g(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM g WHERE i < $2)
         INSERT INTO history_events
-        (owner_id,event_id,schema_version,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
+        (owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,timed,failed,forwarded,
          handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record)
-        SELECT $1, 'e'||printf('%06d',i), 1, 'tool-'||(i%4), 'tool '||(i%4), 'up-'||(i%3), CASE WHEN i%5=0 THEN 'timeout' ELSE 'ok' END,
+        SELECT $1, 'e'||printf('%06d',i), 2, 'tool.dispatch.completed', 'inv-'||'e'||printf('%06d',i), 'tool-'||(i%4), 'tool '||(i%4), 'up-'||(i%3), CASE WHEN i%5=0 THEN 'timeout' ELSE 'ok' END,
          'actor-'||(i%7), i, i, 1, i%5=0, 1, 100, 10, 90, 6, 3, 6,
-         json_object('schema_version',1,'event_id','e'||printf('%06d',i),'owner',$1)
+         json_object('schema_version',2,'event_id','e'||printf('%06d',i),'owner',$1)
         FROM g`, owner, n)
 	if err != nil {
 		t.Fatal(err)

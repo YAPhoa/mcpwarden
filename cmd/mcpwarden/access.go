@@ -68,13 +68,11 @@ type activeMCP struct {
 	session *mcp.ServerSession
 }
 type accessManager struct {
-	closing      bool
-	cleanup      sync.WaitGroup
-	store        catalog.Repository
-	mu           sync.Mutex
-	sessions     map[*mcp.ServerSession]activeMCP
-	guard        accessGuard
-	sessionGuard accessGuard
+	closing  bool
+	cleanup  sync.WaitGroup
+	store    catalog.Repository
+	mu       sync.Mutex
+	sessions map[*mcp.ServerSession]activeMCP
 }
 
 func newAccessManager(s catalog.Repository) *accessManager {
@@ -106,7 +104,7 @@ func (a *accessManager) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		if !ok {
 			return next(ctx, method, req)
 		}
-		if a.store != nil && credential.Kind != "operator" {
+		if credential.Kind != "operator" {
 			if err := a.store.TouchAccess(credential.Owner, credential.ID); err != nil {
 				return nil, errors.New("access revoked or expired")
 			}
@@ -131,7 +129,7 @@ func (a *accessManager) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		active, exists := a.sessions[session]
 		if !exists {
 			// Recheck under the same lock used by revocation's session scan.
-			if a.store != nil && credential.Kind != "operator" {
+			if credential.Kind != "operator" {
 				if err := a.store.TouchAccess(credential.Owner, credential.ID); err != nil {
 					a.mu.Unlock()
 					go session.Close()
@@ -164,12 +162,10 @@ func (a *accessManager) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 				name = "MCP client"
 			}
 			record := catalog.AccessRecord{ID: identity.New(), Owner: credential.Owner, Name: name, Device: name, Kind: "mcp", Role: credential.Role, ParentID: credential.ID, SecretHash: tokenHash(randomToken()), ExpiresAt: credential.ExpiresAt}
-			if a.store != nil {
-				if err := a.store.AddAccess(record); err != nil {
-					a.mu.Unlock()
-					go session.Close()
-					return nil, errors.New("MCP connection limit reached or session could not be saved")
-				}
+			if err := a.store.AddAccess(record); err != nil {
+				a.mu.Unlock()
+				go session.Close()
+				return nil, errors.New("MCP connection limit reached or session could not be saved")
 			}
 			active = activeMCP{record, session}
 			a.sessions[session] = active
@@ -187,9 +183,7 @@ func (a *accessManager) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 				a.mu.Lock()
 				delete(a.sessions, session)
 				a.mu.Unlock()
-				if a.store != nil {
-					_ = a.store.UpdateAccess(record.Owner, record.ID, "", true)
-				}
+				_ = a.store.UpdateAccess(record.Owner, record.ID, "", true)
 			}()
 
 		}
@@ -197,10 +191,8 @@ func (a *accessManager) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		if active.record.ParentID != credential.ID || active.record.Role != credential.Role {
 			return nil, errors.New("session credential mismatch")
 		}
-		if a.store != nil {
-			if err := a.store.TouchAccess(credential.Owner, active.record.ID); err != nil {
-				return nil, errors.New("session revoked or expired")
-			}
+		if err := a.store.TouchAccess(credential.Owner, active.record.ID); err != nil {
+			return nil, errors.New("session revoked or expired")
 		}
 		return next(ctx, method, req)
 	}
@@ -220,10 +212,6 @@ func (a *accessManager) closeCredential(id string) {
 }
 func (a *accessManager) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if a.store == nil {
-		http.Error(w, "access storage is not configured", 501)
-		return
-	}
 	current, _ := accessFrom(r.Context())
 	owner := requestOwner(r)
 	id := strings.TrimPrefix(r.URL.Path, "/api/access/")
@@ -260,23 +248,15 @@ func (a *accessManager) handler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	existing, ok := a.store.AccessByID(owner, id)
-	if !ok {
+	if _, ok := a.store.AccessByID(owner, id); !ok {
 		http.NotFound(w, r)
 		return
 	}
 	switch r.Method {
 	case http.MethodDelete:
-		revoke := func() error { return a.store.RevokeAccess(owner, id) }
-		var err error
-		if existing.Kind == "api_key" {
-			err = a.guard.run(r.Context(), owner, revoke)
-		} else {
-			// Browser sessions do not own access windows; ending one never
-			// stops approved agent work (browser lock is not execution lock).
-			err = a.sessionGuard.run(r.Context(), owner, revoke)
-		}
-		if err != nil {
+		// The repository ends an API key's access windows in the same commit;
+		// browser sessions own none, so ending one never stops agent work.
+		if err := a.store.RevokeAccess(owner, id); err != nil {
 			http.Error(w, "could not revoke access", 500)
 			return
 		}
@@ -306,10 +286,6 @@ func (a *accessManager) keys(next http.Handler, management bool, fallback http.H
 		value := r.Header.Get("Authorization")
 		if !isAPIKeyAuthorization(value) {
 			fallback.ServeHTTP(w, r)
-			return
-		}
-		if a.store == nil {
-			http.Error(w, "API keys not configured", 401)
 			return
 		}
 		record, ok := authenticateAPIKey(a.store, strings.TrimPrefix(value, "Bearer "))

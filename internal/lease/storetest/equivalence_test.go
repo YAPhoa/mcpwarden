@@ -59,17 +59,13 @@ func TestHistoryBackendEquivalence(t *testing.T) {
 			eid = id()
 		}
 		seen[owner+eid] = true
-		version := 1
-		if kind != "" {
-			version = 2
-		}
-		raw, _ := json.Marshal(map[string]any{"schema_version": version, "event_id": eid, "owner": owner})
+		raw, _ := json.Marshal(map[string]any{"schema_version": 2, "event_id": eid, "owner": owner})
 		timed := rng.IntN(3) > 0
-		return catalogdb.HistoryRow{OwnerID: owner, EventID: eid, SchemaVersion: version, EventType: kind, InvocationID: inv,
+		return catalogdb.HistoryRow{OwnerID: owner, EventID: eid, SchemaVersion: 2, EventType: kind, InvocationID: inv,
 			ToolID: tl.id, Tool: tl.name, Upstream: tl.upstream, Status: status, ActorAccessID: fmt.Sprint("actor-", rng.IntN(4)),
 			TSNano: ns - int64(rng.IntN(5)), HistoryNano: ns, Timed: timed, Failed: status != "ok", Forwarded: timed && rng.IntN(2) == 0,
 			HandlerUS: int64(rng.IntN(1_000_000)), GatewayUS: int64(rng.IntN(10_000)), UpstreamUS: int64(rng.IntN(1_000_000)),
-			HandlerBucket: rng.IntN(32), GatewayBucket: rng.IntN(32), UpstreamBucket: rng.IntN(32), Record: string(raw), Source: "live"}
+			HandlerBucket: rng.IntN(32), GatewayBucket: rng.IntN(32), UpstreamBucket: rng.IntN(32), Record: string(raw)}
 	}
 	for i := 0; i < 1500; i++ {
 		owner := "alice"
@@ -84,8 +80,8 @@ func TestHistoryBackendEquivalence(t *testing.T) {
 		status := statuses[rng.IntN(len(statuses))]
 		inv := identity.New()
 		switch rng.IntN(5) {
-		case 0: // schema v1
-			rows = append(rows, row(owner, "", "", status, tl, ns))
+		case 0: // a completion whose admission is not stored
+			rows = append(rows, row(owner, "tool.dispatch.completed", inv, status, tl, ns))
 		case 1: // admitted and completed in order
 			rows = append(rows, row(owner, "tool.dispatch.admitted", inv, "unknown", tl, ns), row(owner, "tool.dispatch.completed", inv, status, tl, ns+1))
 		case 2: // completion stored first
@@ -115,15 +111,6 @@ func TestHistoryBackendEquivalence(t *testing.T) {
 		{Owner: "alice", HasFrom: true, FromNano: 1100, HasTo: true, ToNano: 1101, Limit: 25},
 		{Owner: "alice", ToolID: "none", Limit: 25}, {Owner: "carol", Limit: 25},
 	}
-	strip := func(r catalogdb.HistoryResult) catalogdb.HistoryResult {
-		for i := range r.Records {
-			r.Records[i].Source, r.Records[i].SourceLine = "", 0
-		}
-		for i := range r.Tools {
-			r.Tools[i].Source, r.Tools[i].SourceLine = "", 0
-		}
-		return r
-	}
 	for _, q := range queries {
 		a, errA := ps.QueryHistory(t.Context(), q)
 		b, errB := ss.QueryHistory(t.Context(), q)
@@ -131,7 +118,6 @@ func TestHistoryBackendEquivalence(t *testing.T) {
 			t.Errorf("%+v: postgres err %v, sqlite err %v", q, errA, errB)
 			continue
 		}
-		a, b = strip(a), strip(b)
 		if !reflect.DeepEqual(a, b) {
 			t.Errorf("%+v differs: postgres total %d capped %v rows %d tools %d timed %d failed %d | sqlite total %d capped %v rows %d tools %d timed %d failed %d",
 				q, a.Total, a.Capped, len(a.Records), len(a.Tools), a.TimedCalls, a.FailedCalls, b.Total, b.Capped, len(b.Records), len(b.Tools), b.TimedCalls, b.FailedCalls)

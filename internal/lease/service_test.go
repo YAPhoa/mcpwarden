@@ -415,11 +415,12 @@ func TestExactCallerScopeAndMutation(t *testing.T) {
 	if _, err := h.admit(h.caller, `{"id":"different"}`); err != ErrRequired {
 		t.Fatal("constraint bypass")
 	}
-	if err := h.service.Change(context.Background(), "alice", func() error {
-		h.authority.mu.Lock()
-		defer h.authority.mu.Unlock()
-		h.authority.credential.Epoch = "2"
-		return nil
+	if err := h.service.Catalog(context.Background(), "alice", func(Tx) (func(), Ending, error) {
+		return func() {
+			h.authority.mu.Lock()
+			defer h.authority.mu.Unlock()
+			h.authority.credential.Epoch = "2"
+		}, Ending{All: true}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}

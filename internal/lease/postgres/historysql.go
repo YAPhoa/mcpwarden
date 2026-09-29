@@ -14,17 +14,13 @@ import (
 // completion is not stored. Writes may arrive out of order: an admission
 // stored after its completion opens nothing.
 func InsertHistory(ctx context.Context, db DB, h catalogdb.HistoryRow) error {
-	var line any
-	if h.Source == "legacy" {
-		line = h.SourceLine
-	}
 	if err := one(db.Exec(ctx, `INSERT INTO mcpwarden_security.history_events
         (owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,
-         timed,failed,forwarded,handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record,source,source_line)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+         timed,failed,forwarded,handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
 		h.OwnerID, h.EventID, h.SchemaVersion, text(h.EventType), text(h.InvocationID), h.ToolID, h.Tool, h.Upstream, h.Status, h.ActorAccessID,
 		h.TSNano, h.HistoryNano, h.Timed, h.Failed, h.Forwarded, h.HandlerUS, h.GatewayUS, h.UpstreamUS,
-		h.HandlerBucket, h.GatewayBucket, h.UpstreamBucket, h.Record, h.Source, line)); err != nil {
+		h.HandlerBucket, h.GatewayBucket, h.UpstreamBucket, h.Record)); err != nil {
 		return err
 	}
 	switch h.EventType {
@@ -60,7 +56,7 @@ func InsertHistory(ctx context.Context, db DB, h catalogdb.HistoryRow) error {
 // events and the admissions still in history_open (no completion stored), so
 // no page walks the admissions of finished calls. The filter indexes are
 // partial on this exact predicate.
-const settled = `(h.event_type IS NULL OR h.event_type <> 'tool.dispatch.admitted')`
+const settled = `h.event_type <> 'tool.dispatch.admitted'`
 
 // window builds the newest catalogdb.HistoryWindow+1 matching visible events with
 // their position in history order: settled events from the filter's index,
@@ -194,46 +190,4 @@ func QueryHistory(ctx context.Context, db DB, q catalogdb.HistoryQuery) (catalog
 		return catalogdb.HistoryResult{}, err
 	}
 	return out, nil
-}
-
-// LegacyHistory streams imported rows in source line order, for verification.
-// LegacyHistory streams imported rows with every stored column, in source
-// line order, so verification can compare what queries read.
-func LegacyHistory(ctx context.Context, db DB, fn func(catalogdb.HistoryRow) error) error {
-	return each(ctx, db, `SELECT owner_id,event_id,schema_version,event_type,invocation_id,tool_id,tool,upstream,status,actor_access_id,ts_ns,history_ns,
-        timed,failed,forwarded,handler_us,gateway_us,upstream_us,handler_bucket,gateway_bucket,upstream_bucket,record,source,source_line
-        FROM mcpwarden_security.history_events WHERE source='legacy' ORDER BY source_line`, func(r pgx.Rows) error {
-		var h catalogdb.HistoryRow
-		var eventType, invocationID *string
-		if err := r.Scan(&h.OwnerID, &h.EventID, &h.SchemaVersion, &eventType, &invocationID, &h.ToolID, &h.Tool, &h.Upstream, &h.Status, &h.ActorAccessID,
-			&h.TSNano, &h.HistoryNano, &h.Timed, &h.Failed, &h.Forwarded, &h.HandlerUS, &h.GatewayUS, &h.UpstreamUS,
-			&h.HandlerBucket, &h.GatewayBucket, &h.UpstreamBucket, &h.Record, &h.Source, &h.SourceLine); err != nil {
-			return catalogdb.ErrStorage
-		}
-		if eventType != nil {
-			if *eventType == "" {
-				return catalogdb.ErrStorage
-			}
-			h.EventType = *eventType
-		}
-		if invocationID != nil {
-			if *invocationID == "" {
-				return catalogdb.ErrStorage
-			}
-			h.InvocationID = *invocationID
-		}
-		return fn(h)
-	})
-}
-
-// LiveHistory streams events the PostgreSQL gateway wrote, in insertion order.
-func LiveHistory(ctx context.Context, db DB, fn func(seq int64, record string) error) error {
-	return each(ctx, db, `SELECT seq,record FROM mcpwarden_security.history_events WHERE source='live' ORDER BY seq`, func(r pgx.Rows) error {
-		var seq int64
-		var record string
-		if err := r.Scan(&seq, &record); err != nil {
-			return catalogdb.ErrStorage
-		}
-		return fn(seq, record)
-	})
 }

@@ -13,10 +13,6 @@ import (
 var (
 	ErrConflict = errors.New("catalog row conflict")
 	ErrStorage  = errors.New("catalog storage failed")
-	// ErrNotActive means the database holds a catalog that is not this
-	// gateway's to serve (a PostgreSQL import that never cut over, or one
-	// that was rolled back).
-	ErrNotActive = errors.New("the database catalog is not active: it was never cut over or has been rolled back")
 )
 
 // Tx writes catalog rows inside lease.Store.WithOwner, so they commit or roll
@@ -76,20 +72,11 @@ type Access struct {
 }
 
 // Connector is a live connector, or a credential-free tombstone when DeletedAt
-// is set: Name and GrantID are then empty and Sealed holds only the lifecycle.
+// is set: Name is then empty and Sealed holds only the lifecycle.
 type Connector struct {
-	ID, OwnerID, Name, AuthType, GrantID string
-	GrantRevision                        int64
-	CreatedAt, UpdatedAt, DeletedAt      time.Time
-	Sealed                               []byte
-}
-
-// Tombstone is a file-catalog connector tombstone, which never had an owner.
-// Sealed holds only its lifecycle, at full precision.
-type Tombstone struct {
-	ConnectorID string
-	DeletedAt   time.Time
-	Sealed      []byte
+	ID, OwnerID, Name, AuthType     string
+	CreatedAt, UpdatedAt, DeletedAt time.Time
+	Sealed                          []byte
 }
 
 type Discovery struct {
@@ -109,7 +96,6 @@ type Rows struct {
 	Accounts   []Account
 	Access     []Access
 	Connectors []Connector
-	Tombstones []Tombstone
 	Discovery  []Discovery
 	Visibility []Visibility
 }

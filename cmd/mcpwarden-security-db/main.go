@@ -1,5 +1,5 @@
-// This deployment command migrates the security schema. It copies no catalog
-// data; cmd/mcpwarden-catalog imports the catalog.
+// This deployment command creates or verifies the PostgreSQL schema with a
+// migration role and grants the runtime role its privileges.
 package main
 
 import (
@@ -17,7 +17,7 @@ func main() {
 	role := flag.String("runtime-role", "", "existing, unprivileged PostgreSQL runtime role")
 	flag.Parse()
 	if *role == "" || os.Getenv("MCPWARDEN_MIGRATION_DATABASE_URL") == "" {
-		fmt.Fprintln(os.Stderr, "Set MCPWARDEN_MIGRATION_DATABASE_URL and pass -runtime-role. This migrates the security schema only.")
+		fmt.Fprintln(os.Stderr, "Set MCPWARDEN_MIGRATION_DATABASE_URL and pass -runtime-role.")
 		os.Exit(2)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -32,5 +32,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("Security schema v%d verified (lease metadata, ciphertext and catalog tables). No catalog data was copied; use mcpwarden-catalog for that.\n", postgres.SchemaVersion)
+	fmt.Printf("Schema v%d verified (leases, vault ciphertext, catalog and history).\n", postgres.SchemaVersion)
 }

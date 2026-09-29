@@ -811,25 +811,6 @@ func (s *Service) LockExecution(ctx context.Context) error {
 	})
 }
 
-// Change serializes a trusted catalog security mutation with admission. It
-// invalidates old bindings first; a failed mutation conservatively keeps access
-// stopped. Integrations must authenticate the mutation before invoking Change.
-func (s *Service) Change(ctx context.Context, owner string, mutation func() error) error {
-	return s.transition(ctx, owner, func(tx Tx, o *ownerState) error {
-		if err := s.endAll(tx, owner, "revoked", ""); err != nil {
-			return err
-		}
-		o.publish = append(o.publish, func() error {
-			for id, rt := range o.live {
-				endRuntime(rt)
-				delete(o.live, id)
-			}
-			return mutation()
-		})
-		return nil
-	})
-}
-
 // ChangeAtomic commits a trusted security mutation, revocations and their audit
 // events in the same owner transaction. Integrations must authorize the mutation
 // before calling this method. mutation may only write through tx; it must not
@@ -843,29 +824,13 @@ func (s *Service) ChangeAtomic(ctx context.Context, owner string, mutation func(
 
 // ChangeOwnerAtomic authorizes an interactive browser under the owner gate,
 // after the database owner lock is acquired, and again after the writes. Session
-// revocation must use ChangeSessions so it cannot interleave with this commit.
+// revocation goes through Catalog, so it cannot interleave with this commit.
 func (s *Service) ChangeOwnerAtomic(ctx context.Context, mutation func(Tx) (func() error, error)) error {
 	a, ok := identity.ActorFrom(ctx)
 	if !ok {
 		return ErrDenied
 	}
 	return s.changeAtomic(ctx, a.Owner, true, mutation)
-}
-
-// ChangeSessions serializes trusted browser-session and password changes with
-// owner mutations. It does not end agent windows and still works with lost
-// storage or a locked executor. The callback must not call back into Service.
-func (s *Service) ChangeSessions(ctx context.Context, owner string, mutation func() error) error {
-	if owner == "" || len(owner) > 512 || mutation == nil {
-		return ErrDenied
-	}
-	o := s.state(owner)
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return mutation()
 }
 
 // Ending selects what a catalog change ends in its own transaction: every

@@ -49,7 +49,8 @@ func TestSessionRevocationWaitsForOwnerCommitAndPublication(t *testing.T) {
 			defer release.Do(func() { close(resume) })
 			pause := func() { close(entered); <-resume }
 			if phase == "commit" {
-				h.store.beforeCommit = pause
+				// The revocation commits through the same store; pause once.
+				h.store.beforeCommit = func() { h.store.beforeCommit = nil; pause() }
 			}
 			var published atomic.Bool
 			changed := make(chan error, 1)
@@ -71,16 +72,17 @@ func TestSessionRevocationWaitsForOwnerCommitAndPublication(t *testing.T) {
 			attempted, revoked := make(chan struct{}), make(chan error, 1)
 			go func() {
 				close(attempted)
-				revoked <- h.service.ChangeSessions(t.Context(), "alice", func() error {
+				revoked <- h.service.Catalog(t.Context(), "alice", func(Tx) (func(), Ending, error) {
 					if !published.Load() {
-						return ErrStale
+						return nil, Ending{}, ErrStale
 					}
-					h.authority.mu.Lock()
-					defer h.authority.mu.Unlock()
-					browser := h.authority.callers[browserID]
-					browser.Active = false
-					h.authority.callers[browserID] = browser
-					return nil
+					return func() {
+						h.authority.mu.Lock()
+						defer h.authority.mu.Unlock()
+						browser := h.authority.callers[browserID]
+						browser.Active = false
+						h.authority.callers[browserID] = browser
+					}, Ending{}, nil
 				})
 			}()
 			<-attempted

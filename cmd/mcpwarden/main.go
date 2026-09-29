@@ -20,7 +20,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/config"
 	"github.com/yaphoa/mcpwarden/internal/oauth"
@@ -50,39 +49,19 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	defer stop()
 	ctx, fail := context.WithCancelCause(ctx)
 	defer fail(nil)
-	var store catalog.Repository
-	var history audit.Store
-	var db *storageBackend
-	if cfg.Storage != nil {
-		if stdio {
-			return fmt.Errorf("--stdio does not support the storage section yet; connect this client over HTTP")
-		}
-		// The executor and its custody caches load before any runtime
-		// exists, so no connector can start without its guard.
-		db, err = openStorage(ctx, cfg, pol, logger, fail)
-		if err != nil {
-			return err
-		}
-		defer db.close()
-		store, history = db.repo, db.history
-	} else {
-		auditLog, err := audit.Open(cfg.Audit.Path)
-		if err != nil {
-			return err
-		}
-		defer auditLog.Close()
-		history = auditLog
-		if cfg.Managed != nil {
-			fileStore, err := catalog.Open(cfg.Managed.Path, cfg.Managed.Key)
-			if err != nil {
-				return err
-			}
-			defer fileStore.Close()
-			store = fileStore
-		}
+	if stdio {
+		return runStdio(ctx, cfg, pol, logger)
 	}
+	// The executor and its custody caches load before any runtime exists,
+	// so no connector can start without its guard.
+	db, err := openStorage(ctx, cfg, pol, logger, fail)
+	if err != nil {
+		return err
+	}
+	defer db.close()
+	store, history := db.repo, db.history
 	var security *securityAPI
-	if db != nil && cfg.OwnerSecurity != nil {
+	if cfg.OwnerSecurity != nil {
 		security = db.security
 	}
 	rs := newRuntimes(ctx, cfg, pol, history, store, logger)
@@ -93,9 +72,6 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 		rs.guarded = &guardedCustody{api: security, store: store, history: history}
 	}
 	local := rs.get("local")
-	if stdio {
-		return local.proxy.Server.Run(ctx, &mcp.StdioTransport{})
-	}
 	mux := http.NewServeMux()
 	mcpHandler := rs.access.bindMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		p := rs.get(requestOwner(r)).proxy
@@ -122,13 +98,9 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 					role = "admin"
 				}
 			}
-			record := catalog.AccessRecord{ID: tokenHash(token), Owner: info.UserID, Kind: "oauth", Role: role, ExpiresAt: info.Expiration}
-			if store != nil {
-				var err error
-				record, err = store.ObserveOAuth(info.UserID, tokenHash(token), role, info.Expiration, req.UserAgent())
-				if err != nil {
-					return ctx, err
-				}
+			record, err := store.ObserveOAuth(info.UserID, tokenHash(token), role, info.Expiration, req.UserAgent())
+			if err != nil {
+				return ctx, err
 			}
 			return withAccess(ctx, record), nil
 		}
@@ -142,12 +114,7 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 			return originOnly(rs.access.keys(h, true, resource.ProtectAPI(h)), cfg.Origins)
 		}
 	} else if cfg.Accounts != nil {
-		// The database catalog coordinates every change with the lease
-		// service itself, so the file backend's guards stay unset.
-		accounts := newAccountAuth(store, cfg)
-		if db != nil {
-			accounts = db.accounts
-		}
+		accounts := db.accounts
 		accounts.onRevoke = rs.access.closeCredential
 		if security != nil {
 			security.register(mux)

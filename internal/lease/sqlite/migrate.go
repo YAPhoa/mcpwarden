@@ -19,6 +19,10 @@ var migrations = []string{baseline}
 // SchemaVersion is the migration count this binary applies and requires.
 const SchemaVersion = 1
 
+// preResetBaseline is the checksum of version 1 in databases written by
+// development builds before the schema reset.
+const preResetBaseline = "0f54ca037e8e9d39dfdf9db554a7516ea304864117bf751bbc2e1c03af929b97"
+
 // applicationID marks a SQLite file as an mcpwarden database ("MCPW").
 const applicationID = 0x4d435057
 
@@ -28,6 +32,9 @@ var (
 	ErrMigration = errors.New("storage database schema is not one this build knows; create a new database")
 	// ErrNewer is a database created by a newer mcpwarden.
 	ErrNewer = errors.New("storage database was created by a newer mcpwarden")
+	// ErrSchemaReset is a database created before the schema reset. It is
+	// never converted.
+	ErrSchemaReset = errors.New("storage database was created by a development build before the schema reset; create a new database")
 	// ErrForeign is a SQLite file that is not an mcpwarden database.
 	ErrForeign = errors.New("storage.path holds a SQLite database that is not an mcpwarden database")
 )
@@ -109,6 +116,9 @@ func ledger(ctx context.Context, db queryer) (int, error) {
 		}
 		if n >= len(migrations) {
 			return 0, ErrNewer
+		}
+		if v == 1 && sum == preResetBaseline {
+			return 0, ErrSchemaReset
 		}
 		if sum != checksum(migrations[n]) {
 			return 0, ErrMigration

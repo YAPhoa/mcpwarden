@@ -94,31 +94,26 @@ func TestCiphertextCacheOwnsPublishedSnapshot(t *testing.T) {
 	}
 }
 
-func TestMigrationV1UpgradeAndRollback(t *testing.T) {
+// A failed migration applies nothing, and the runtime refuses a database
+// without the full schema. Unknown ledger entries fail closed.
+func TestMigrationAtomicAndLedgerChecked(t *testing.T) {
 	db := testDatabase(t)
-	// Only the newly created, random scratch database is reset to a v1 fixture.
+	// Only the newly created, random scratch database is reset.
 	if _, err := db.admin.Exec(t.Context(), "DROP SCHEMA mcpwarden_security CASCADE"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.admin.Exec(t.Context(), migration, pgx.QueryExecModeSimpleProtocol); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.admin.Exec(t.Context(), "INSERT INTO mcpwarden_security.schema_migrations(version,sha256) VALUES(1,$1)", migrationHash()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.admin.Exec(t.Context(), "INSERT INTO mcpwarden_security.owners(owner_id) VALUES('retained-owner'); CREATE TABLE mcpwarden_security.credential_heads(conflict integer)", pgx.QueryExecModeSimpleProtocol); err != nil {
+	if _, err := db.admin.Exec(t.Context(), "CREATE SCHEMA mcpwarden_security; CREATE TABLE mcpwarden_security.credential_heads(conflict integer)", pgx.QueryExecModeSimpleProtocol); err != nil {
 		t.Fatal(err)
 	}
 	if err := Migrate(t.Context(), db.admin, db.role); err != ErrMigration {
 		t.Fatal("partial migration accepted", err)
 	}
-	var count int
-	var rootPresent bool
-	if err := db.admin.QueryRow(t.Context(), "SELECT (SELECT count(*) FROM mcpwarden_security.schema_migrations),to_regclass('mcpwarden_security.vault_roots') IS NOT NULL").Scan(&count, &rootPresent); err != nil || count != 1 || rootPresent {
+	var ledger, rootPresent bool
+	if err := db.admin.QueryRow(t.Context(), "SELECT to_regclass('mcpwarden_security.schema_migrations') IS NOT NULL,to_regclass('mcpwarden_security.vault_roots') IS NOT NULL").Scan(&ledger, &rootPresent); err != nil || ledger || rootPresent {
 		t.Fatal("failed migration was not atomic", err)
 	}
 	if _, err := Open(t.Context(), db.runtimeDSN); err != lease.ErrStorage {
-		t.Fatal("old schema allowed runtime startup")
+		t.Fatal("missing schema allowed runtime startup")
 	}
 	if _, err := db.admin.Exec(t.Context(), "DROP TABLE mcpwarden_security.credential_heads"); err != nil {
 		t.Fatal(err)
@@ -127,10 +122,7 @@ func TestMigrationV1UpgradeAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n, err := appliedMigrations(t.Context(), db.admin); err != nil || n != SchemaVersion {
-		t.Fatal("upgrade ledger invalid", n, err)
-	}
-	if err := db.admin.QueryRow(t.Context(), "SELECT count(*) FROM mcpwarden_security.owners WHERE owner_id='retained-owner'").Scan(&count); err != nil || count != 1 {
-		t.Fatal("upgrade lost metadata", err)
+		t.Fatal("ledger invalid", n, err)
 	}
 	for _, badVersion := range []int{0, SchemaVersion + 1} {
 		if _, err := db.admin.Exec(t.Context(), "INSERT INTO mcpwarden_security.schema_migrations(version,sha256) VALUES($1,$2)", badVersion, strconv.Itoa(badVersion)); err != nil {

@@ -25,15 +25,24 @@ type Config struct {
 	Origins        []string       `yaml:"allowed_origins"`
 	Upstreams      []Upstream     `yaml:"upstreams"`
 	Policy         Policy         `yaml:"policy"`
-	Audit          Audit          `yaml:"audit"`
-	Managed        *Managed       `yaml:"managed_upstreams"`
 	Storage        *Storage       `yaml:"storage"`
 	OwnerSecurity  *OwnerSecurity `yaml:"owner_security"`
 	Token          string         `yaml:"-"`
+	// Removed keys, parsed only to refuse them with their replacement.
+	Audit   any `yaml:"audit"`
+	Managed any `yaml:"managed_upstreams"`
 }
 
+// DefaultStoragePath and DefaultKeyEnv apply when the storage section leaves
+// them out.
+const (
+	DefaultStoragePath = "/data/mcpwarden.db"
+	DefaultKeyEnv      = "MCPWARDEN_CREDENTIAL_KEY"
+)
+
 // Storage keeps the catalog, tool-call history and security metadata in one
-// database: a local SQLite file or PostgreSQL. See docs/storage.md.
+// database: a local SQLite file (the default) or PostgreSQL. See
+// docs/storage.md.
 type Storage struct {
 	// Driver is sqlite (default) or postgres.
 	Driver string `yaml:"driver"`
@@ -52,11 +61,11 @@ type Storage struct {
 // the storage database. Credentialed personal connectors run only through
 // access windows; the server never holds their credentials.
 type OwnerSecurity struct {
-	// DatabaseURLEnv was replaced by storage.database_url_env; it is kept
-	// only to refuse it with a specific message.
-	DatabaseURLEnv        string   `yaml:"database_url_env"`
 	TrustedProxies        []string `yaml:"trusted_proxies"`
 	AllowInsecureLoopback bool     `yaml:"allow_insecure_loopback"`
+	// Removed keys, parsed only to refuse them with their replacement.
+	DatabaseURLEnv any `yaml:"database_url_env"`
+	DatabaseURL    any `yaml:"database_url"`
 }
 
 // ProxyPrefixes accepts explicit, canonical IP networks, never hostnames or a
@@ -76,15 +85,6 @@ func (c OwnerSecurity) ProxyPrefixes() ([]netip.Prefix, error) {
 	return out, nil
 }
 
-// Managed is the encrypted file catalog, used when storage is not set.
-type Managed struct {
-	Path   string `yaml:"path"`
-	KeyEnv string `yaml:"key_env"`
-	Key    string `yaml:"-"`
-	// Backend was replaced by the storage section; it is kept only to refuse
-	// it with a specific message.
-	Backend string `yaml:"backend"`
-}
 type Auth struct {
 	BearerTokenEnv string `yaml:"bearer_token_env"`
 }
@@ -122,9 +122,6 @@ type Rule struct {
 	Match  string `yaml:"match"`
 	Action string `yaml:"action"`
 }
-type Audit struct {
-	Path string `yaml:"path"`
-}
 
 var namePattern = regexp.MustCompile(`^[a-z0-9-]{1,20}$`)
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -147,34 +144,29 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) ResolveAndValidate() error {
-	if c.Accounts != nil && (c.Managed == nil && c.Storage == nil || c.OAuth != nil) {
-		return fmt.Errorf("accounts requires storage (or managed_upstreams) and cannot be combined with oauth mode")
+	if c.Managed != nil {
+		return fmt.Errorf("managed_upstreams was replaced by storage; see docs/storage.md")
 	}
-	if c.Managed != nil && c.Managed.Backend != "" {
-		return fmt.Errorf("managed_upstreams.backend was replaced by the storage section; see docs/storage.md")
+	if c.Audit != nil {
+		return fmt.Errorf("audit was removed: tool-call history is in the storage database; see docs/storage.md")
 	}
-	if c.Storage != nil {
-		if err := c.Storage.resolve(); err != nil {
-			return err
-		}
-		if c.Managed != nil {
-			return fmt.Errorf("managed_upstreams cannot be combined with storage: the catalog is in the storage database, sealed with storage.key_env")
-		}
-		if c.Audit.Path != "" {
-			return fmt.Errorf("audit.path must be unset with storage: tool-call history is in the storage database")
-		}
+	if c.Accounts != nil && c.OAuth != nil {
+		return fmt.Errorf("accounts cannot be combined with oauth mode")
+	}
+	if c.Storage == nil {
+		c.Storage = &Storage{}
+	}
+	if err := c.Storage.resolve(); err != nil {
+		return err
 	}
 	if c.OwnerSecurity != nil {
+		if c.OwnerSecurity.DatabaseURLEnv != nil || c.OwnerSecurity.DatabaseURL != nil {
+			return fmt.Errorf("owner_security.database_url_env and database_url were replaced by storage.database_url_env with storage.driver postgres; see docs/storage.md")
+		}
 		// Only local-account browser sessions can prove an interactive owner.
 		// Operator bearer and external OAuth modes cannot distinguish a human.
 		if c.Accounts == nil {
 			return fmt.Errorf("owner_security requires accounts mode")
-		}
-		if c.OwnerSecurity.DatabaseURLEnv != "" {
-			return fmt.Errorf("owner_security.database_url_env was replaced by storage.database_url_env with storage.driver postgres; see docs/storage.md")
-		}
-		if c.Storage == nil {
-			return fmt.Errorf("owner_security requires the storage section")
 		}
 		if _, err := c.OwnerSecurity.ProxyPrefixes(); err != nil {
 			return err
@@ -182,22 +174,6 @@ func (c *Config) ResolveAndValidate() error {
 	}
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8787"
-	}
-	if c.Storage == nil && c.Audit.Path == "" {
-		c.Audit.Path = "./audit.jsonl"
-	}
-	if c.Audit.Path == "-" {
-		return fmt.Errorf("audit.path must be a persistent file; stdout cannot provide durable dispatch admission")
-	}
-	if c.Managed != nil {
-		if c.Managed.Path == "" || c.Managed.KeyEnv == "" {
-			return fmt.Errorf("managed_upstreams.path and key_env are required")
-		}
-		var ok bool
-		c.Managed.Key, ok = os.LookupEnv(c.Managed.KeyEnv)
-		if !ok || c.Managed.Key == "" {
-			return fmt.Errorf("managed_upstreams: environment variable %s is unset or empty", c.Managed.KeyEnv)
-		}
 	}
 	host, _, err := net.SplitHostPort(c.Listen)
 	if err != nil {
@@ -308,7 +284,7 @@ func (s *Storage) resolve() error {
 	case "", "sqlite":
 		s.Driver = "sqlite"
 		if s.Path == "" {
-			return fmt.Errorf("storage.path is required with storage.driver sqlite")
+			s.Path = DefaultStoragePath
 		}
 		if s.DatabaseURLEnv != "" {
 			return fmt.Errorf("storage.database_url_env is only for storage.driver postgres")
@@ -329,7 +305,7 @@ func (s *Storage) resolve() error {
 		return fmt.Errorf("storage.driver must be sqlite or postgres")
 	}
 	if s.KeyEnv == "" {
-		return fmt.Errorf("storage.key_env is required")
+		s.KeyEnv = DefaultKeyEnv
 	}
 	var ok bool
 	s.Key, ok = os.LookupEnv(s.KeyEnv)

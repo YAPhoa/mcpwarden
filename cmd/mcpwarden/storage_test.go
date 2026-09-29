@@ -199,7 +199,7 @@ func TestStorageLossStopsGateway(t *testing.T) {
 	if err := f.store.Add(keyed); err != nil {
 		t.Fatal(err)
 	}
-	live := audit.Record{Owner: alice, Tool: "remote__search", ToolID: f.toolID, Upstream: "remote", Decision: "allow", Status: "ok", TS: time.Now().UTC(), ArgsSHA256: strings.Repeat("a", 64)}
+	live := completedCall(alice, "remote__search", f.toolID, "remote")
 	if err := f.backend.history.Write(live); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestStorageOperatorMode(t *testing.T) {
 	if err := b.repo.Add(catalog.Entry{Owner: "local", Name: "open", URL: "https://example.com/mcp", AuthType: "none"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.history.Write(audit.Record{Owner: "local", Tool: "open__search", Upstream: "open", Decision: "allow", Status: "ok", TS: time.Now().UTC(), ArgsSHA256: strings.Repeat("a", 64)}); err != nil {
+	if err := b.history.Write(completedCall("local", "open__search", identity.New(), "open")); err != nil {
 		t.Fatal(err)
 	}
 	b.close()

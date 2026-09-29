@@ -113,18 +113,13 @@ func ActiveAccess(ctx context.Context, db DB, owner string, kinds []string, now 
 // owner and never revives a tombstone.
 func PutConnector(ctx context.Context, db DB, c catalogdb.Connector) error {
 	return one(db.Exec(ctx, `INSERT INTO mcpwarden_security.catalog_connectors
-        (connector_id,owner_id,name,auth_type,grant_id,grant_revision,created_at,updated_at,deleted_at,sealed)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        ON CONFLICT (connector_id) DO UPDATE SET name=excluded.name,auth_type=excluded.auth_type,grant_id=excluded.grant_id,
-        grant_revision=excluded.grant_revision,created_at=excluded.created_at,updated_at=excluded.updated_at,
+        (connector_id,owner_id,name,auth_type,created_at,updated_at,deleted_at,sealed)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (connector_id) DO UPDATE SET name=excluded.name,auth_type=excluded.auth_type,
+        created_at=excluded.created_at,updated_at=excluded.updated_at,
         deleted_at=excluded.deleted_at,sealed=excluded.sealed
         WHERE catalog_connectors.owner_id=excluded.owner_id AND catalog_connectors.deleted_at IS NULL`,
-		c.ID, c.OwnerID, text(c.Name), c.AuthType, text(c.GrantID), c.GrantRevision, ts(c.CreatedAt), ts(c.UpdatedAt), ts(c.DeletedAt), c.Sealed))
-}
-
-func PutTombstone(ctx context.Context, db DB, t catalogdb.Tombstone) error {
-	return one(db.Exec(ctx, `INSERT INTO mcpwarden_security.catalog_legacy_tombstones(connector_id,deleted_at,sealed) VALUES ($1,$2,$3)`,
-		t.ConnectorID, t.DeletedAt, t.Sealed))
+		c.ID, c.OwnerID, text(c.Name), c.AuthType, ts(c.CreatedAt), ts(c.UpdatedAt), ts(c.DeletedAt), c.Sealed))
 }
 
 func PutDiscovery(ctx context.Context, db DB, d catalogdb.Discovery) error {
@@ -184,26 +179,15 @@ func Load(ctx context.Context, db DB) (catalogdb.Rows, error) {
 	}); err != nil {
 		return catalogdb.Rows{}, err
 	}
-	if err := each(ctx, db, `SELECT connector_id::text,owner_id,coalesce(name,''),auth_type,coalesce(grant_id,''),grant_revision,created_at,updated_at,deleted_at,sealed
+	if err := each(ctx, db, `SELECT connector_id::text,owner_id,coalesce(name,''),auth_type,created_at,updated_at,deleted_at,sealed
         FROM mcpwarden_security.catalog_connectors ORDER BY connector_id`, func(r pgx.Rows) error {
 		var k catalogdb.Connector
 		var c, u, d nullTime
-		if err := r.Scan(&k.ID, &k.OwnerID, &k.Name, &k.AuthType, &k.GrantID, &k.GrantRevision, &c.t, &u.t, &d.t, &k.Sealed); err != nil {
+		if err := r.Scan(&k.ID, &k.OwnerID, &k.Name, &k.AuthType, &c.t, &u.t, &d.t, &k.Sealed); err != nil {
 			return catalogdb.ErrStorage
 		}
 		k.CreatedAt, k.UpdatedAt, k.DeletedAt = c.value(), u.value(), d.value()
 		out.Connectors = append(out.Connectors, k)
-		return nil
-	}); err != nil {
-		return catalogdb.Rows{}, err
-	}
-	if err := each(ctx, db, `SELECT connector_id::text,deleted_at,sealed FROM mcpwarden_security.catalog_legacy_tombstones ORDER BY connector_id`, func(r pgx.Rows) error {
-		var t catalogdb.Tombstone
-		if err := r.Scan(&t.ConnectorID, &t.DeletedAt, &t.Sealed); err != nil {
-			return catalogdb.ErrStorage
-		}
-		t.DeletedAt = t.DeletedAt.UTC()
-		out.Tombstones = append(out.Tombstones, t)
 		return nil
 	}); err != nil {
 		return catalogdb.Rows{}, err

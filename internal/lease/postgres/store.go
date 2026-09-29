@@ -77,8 +77,6 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
         AND NOT has_table_privilege(current_user,'mcpwarden_security.credential_epochs','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.vault_roots','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.approval_policies','DELETE,TRUNCATE')
-        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_state','INSERT,UPDATE,DELETE,TRUNCATE')
-        AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_legacy_tombstones','INSERT,UPDATE,DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_accounts','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_access','DELETE,TRUNCATE')
         AND NOT has_table_privilege(current_user,'mcpwarden_security.catalog_connectors','DELETE,TRUNCATE')
@@ -90,6 +88,9 @@ func open(ctx context.Context, config *pgx.ConnConfig) (*Store, error) {
 		return nil, lease.ErrStorage
 	}
 	count, err := appliedMigrations(ctx, conn)
+	if errors.Is(err, ErrSchemaReset) {
+		return nil, err
+	}
 	if err != nil || count != SchemaVersion {
 		return nil, lease.ErrStorage
 	}
