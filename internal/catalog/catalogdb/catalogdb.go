@@ -56,6 +56,17 @@ type Store interface {
 	Lost() <-chan struct{}
 }
 
+// Client is the --stdio side (SQLite only): a process that shares the
+// database with other clients under a shared lock, never with a gateway. It
+// has no owner transactions and writes nothing but history.
+type Client interface {
+	// LoadOwner reads one owner's catalog rows in one transaction.
+	LoadOwner(ctx context.Context, owner string) (Rows, error)
+	// InsertHistory commits one event, keeping the tool list and the open
+	// admissions in the same transaction.
+	InsertHistory(context.Context, HistoryRow) error
+}
+
 type Account struct {
 	OwnerID, Username    string
 	CreatedAt, UpdatedAt time.Time

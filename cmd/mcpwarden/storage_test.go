@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -223,26 +222,6 @@ func TestStorageLossStopsGateway(t *testing.T) {
 	}
 	if w := f.do(req{method: "DELETE", path: "/api/access/" + f.keyIDs["agent"], user: "alice", skipCSRF: true}); w.Code == 204 {
 		t.Fatal("revocation reported success without storage")
-	}
-}
-
-// A stdio client runs the gateway without HTTP routes, so it cannot serve
-// the database-backed modes; the storage section refuses it before opening
-// the database.
-func TestStorageRefusesStdio(t *testing.T) {
-	t.Setenv("TEST_STORAGE_KEY", base64.StdEncoding.EncodeToString(randBytes(32)))
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	body := "storage:\n  path: " + filepath.Join(dir, "mcpwarden.db") + "\n  key_env: TEST_STORAGE_KEY\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	err := run(path, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err == nil || !strings.Contains(err.Error(), "--stdio") {
-		t.Fatal("stdio accepted with storage", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "mcpwarden.db")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("database created for a refused stdio start", err)
 	}
 }
 

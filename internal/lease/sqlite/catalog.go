@@ -113,7 +113,7 @@ func (s *Store) LoadCatalog(ctx context.Context) (catalogdb.Rows, error) {
 	var out catalogdb.Rows
 	err := s.run(ctx, loadDeadline, func(t *tx) error {
 		var err error
-		out, err = loadRows(t)
+		out, err = loadRows(t, "")
 		return err
 	})
 	if err != nil {
@@ -122,13 +122,18 @@ func (s *Store) LoadCatalog(ctx context.Context) (catalogdb.Rows, error) {
 	return out, nil
 }
 
-func loadRows(t *tx) (catalogdb.Rows, error) {
+// loadRows reads every catalog row, or one owner's when owner is set.
+func loadRows(t *tx, owner string) (catalogdb.Rows, error) {
 	var out catalogdb.Rows
+	where, args := "", []any(nil)
+	if owner != "" {
+		where, args = " WHERE owner_id=$1", []any{owner}
+	}
 	steps := []struct {
 		sql  string
 		scan func(*sql.Rows) error
 	}{
-		{`SELECT owner_id,username,created_at,updated_at,sealed FROM catalog_accounts ORDER BY owner_id`, func(r *sql.Rows) error {
+		{`SELECT owner_id,username,created_at,updated_at,sealed FROM catalog_accounts` + where + ` ORDER BY owner_id`, func(r *sql.Rows) error {
 			var a catalogdb.Account
 			var c, u sql.NullInt64
 			if err := r.Scan(&a.OwnerID, &a.Username, &c, &u, &a.Sealed); err != nil {
@@ -139,7 +144,7 @@ func loadRows(t *tx) (catalogdb.Rows, error) {
 			return nil
 		}},
 		{`SELECT access_id,owner_id,coalesce(public_id,''),secret_digest,kind,role,created_at,updated_at,last_used_at,
-            expires_at,ended_at,revoked_at,deleted_at,sealed FROM catalog_access ORDER BY access_id`, func(r *sql.Rows) error {
+            expires_at,ended_at,revoked_at,deleted_at,sealed FROM catalog_access` + where + ` ORDER BY access_id`, func(r *sql.Rows) error {
 			var a catalogdb.Access
 			var c, u, l, x, e, rv, d sql.NullInt64
 			if err := r.Scan(&a.ID, &a.OwnerID, &a.PublicID, &a.SecretDigest, &a.Kind, &a.Role, &c, &u, &l, &x, &e, &rv, &d, &a.Sealed); err != nil {
@@ -150,7 +155,7 @@ func loadRows(t *tx) (catalogdb.Rows, error) {
 			out.Access = append(out.Access, a)
 			return nil
 		}},
-		{`SELECT connector_id,owner_id,coalesce(name,''),auth_type,created_at,updated_at,deleted_at,sealed FROM catalog_connectors ORDER BY connector_id`, func(r *sql.Rows) error {
+		{`SELECT connector_id,owner_id,coalesce(name,''),auth_type,created_at,updated_at,deleted_at,sealed FROM catalog_connectors` + where + ` ORDER BY connector_id`, func(r *sql.Rows) error {
 			var k catalogdb.Connector
 			var c, u, d sql.NullInt64
 			if err := r.Scan(&k.ID, &k.OwnerID, &k.Name, &k.AuthType, &c, &u, &d, &k.Sealed); err != nil {
@@ -160,7 +165,7 @@ func loadRows(t *tx) (catalogdb.Rows, error) {
 			out.Connectors = append(out.Connectors, k)
 			return nil
 		}},
-		{`SELECT owner_id,provider,updated_at,sealed FROM catalog_discovery ORDER BY owner_id,provider`, func(r *sql.Rows) error {
+		{`SELECT owner_id,provider,updated_at,sealed FROM catalog_discovery` + where + ` ORDER BY owner_id,provider`, func(r *sql.Rows) error {
 			var d catalogdb.Discovery
 			var u sql.NullInt64
 			if err := r.Scan(&d.OwnerID, &d.Provider, &u, &d.Sealed); err != nil {
@@ -170,7 +175,7 @@ func loadRows(t *tx) (catalogdb.Rows, error) {
 			out.Discovery = append(out.Discovery, d)
 			return nil
 		}},
-		{`SELECT owner_id,provider,mode,disabled,created_at,updated_at,sealed FROM catalog_visibility ORDER BY owner_id,provider`, func(r *sql.Rows) error {
+		{`SELECT owner_id,provider,mode,disabled,created_at,updated_at,sealed FROM catalog_visibility` + where + ` ORDER BY owner_id,provider`, func(r *sql.Rows) error {
 			var v catalogdb.Visibility
 			var c, u sql.NullInt64
 			if err := r.Scan(&v.OwnerID, &v.Provider, &v.Mode, &v.Disabled, &c, &u, &v.Sealed); err != nil {
@@ -182,7 +187,7 @@ func loadRows(t *tx) (catalogdb.Rows, error) {
 		}},
 	}
 	for _, step := range steps {
-		if err := t.query(step.sql, nil, step.scan); err != nil {
+		if err := t.query(step.sql, args, step.scan); err != nil {
 			return catalogdb.Rows{}, catalogdb.ErrStorage
 		}
 	}

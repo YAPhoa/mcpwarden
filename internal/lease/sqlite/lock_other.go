@@ -16,5 +16,6 @@ func openLock(string) (*lockFile, error) {
 }
 
 func (l *lockFile) try(bool) error             { return errors.New("unsupported platform") }
+func (l *lockFile) unlock() error              { return nil }
 func (l *lockFile) close() error               { return nil }
 func (l *lockFile) stat() (os.FileInfo, error) { return nil, errors.New("unsupported platform") }

@@ -29,6 +29,21 @@ var _ audit.Store = (*History)(nil)
 
 func NewHistory(db HistoryDB) *History { return &History{db: db} }
 
+// HistoryWriter writes history rows without reading them.
+type HistoryWriter interface {
+	InsertHistory(context.Context, catalogdb.HistoryRow) error
+}
+
+// NewHistoryWriter is the history of a --stdio process: it writes through
+// the client and reads nothing, since pages are served over HTTP.
+func NewHistoryWriter(db HistoryWriter) *History { return &History{db: writeOnly{db}} }
+
+type writeOnly struct{ HistoryWriter }
+
+func (writeOnly) QueryHistory(context.Context, catalogdb.HistoryQuery) (catalogdb.HistoryResult, error) {
+	return catalogdb.HistoryResult{}, catalogdb.ErrStorage
+}
+
 func (h *History) Write(r audit.Record) error {
 	r, raw, err := audit.Encode(r)
 	if err != nil {

@@ -61,6 +61,8 @@ type Repository struct {
 	lost   <-chan struct{}
 	onFail func()
 	now    func() time.Time
+	// snapshot marks a read-only repository (NewSnapshot).
+	snapshot bool
 
 	mu sync.RWMutex
 	st *state
@@ -147,6 +149,9 @@ func (c *change) event(kind, subject string) {
 // apply runs one owner transaction. plan runs with the view locked and must
 // not change the view; it returns the writes and the publication.
 func (r *Repository) apply(owner string, endLeases bool, plan func(c *change, st *state) (func(), error)) error {
+	if r.snapshot {
+		return ErrReadOnly
+	}
 	if r.Failed() {
 		return ErrUnavailable
 	}
@@ -453,6 +458,15 @@ func (r *Repository) Discovery(owner, name string) (catalog.Discovery, bool) {
 func (r *Repository) SetDiscovery(owner, name string, tools []*mcp.Tool) error {
 	if owner == "" || name == "" {
 		return fmt.Errorf("invalid provider")
+	}
+	if r.snapshot {
+		// A snapshot keeps discovery in memory, so a refresh works without
+		// writing the catalog.
+		d := copyDiscovery(catalog.Discovery{Tools: tools, UpdatedAt: r.now()})
+		r.mu.Lock()
+		r.st.discovery[catalog.ProviderKey{Owner: owner, Provider: name}] = d
+		r.mu.Unlock()
+		return nil
 	}
 	return r.apply(owner, false, func(c *change, st *state) (func(), error) {
 		k := catalog.ProviderKey{Owner: owner, Provider: name}
