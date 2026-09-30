@@ -294,12 +294,14 @@ function renderRequests() {
 // lists them once; it never allows a call.
 function setupCard(r, phase, pending, busy) {
   const actionable = phase.key === 'pending' || phase.key === 'approved', actions = [];
-  if (pending?.uncertain) actions.push(el('p', {class: 'help warning', text: 'The gateway did not confirm whether the inspect window started. Check its status before trying again.'}),
-    el('button', {type: 'button', 'data-request': r.id, 'data-action': 'check', disabled: busy, text: 'Check status'}));
-  else if (actionable) {
-    actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'deny', disabled: Boolean(state.busy), text: 'Cancel'}));
+  if (actionable) actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'deny', disabled: Boolean(state.busy), text: 'Cancel'}));
+  if (pending?.uncertain) {
+    actions.push(el('p', {class: 'help warning', text: 'The gateway did not confirm whether the inspect window started. Check its status before trying again; a retry reuses the same activation and cannot start a second window.'}),
+      el('button', {type: 'button', 'data-request': r.id, 'data-action': 'check', disabled: Boolean(state.busy), text: 'Check status'}));
+    if (r.requester.current) actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'retry', disabled: Boolean(state.busy) || !unlocked(), text: 'Retry the same activation'}));
+  } else if (actionable && r.requester.current) {
     // Only the browser session that asked can run it.
-    if (r.requester.current) actions.push(el('button', {type: 'button', class: 'primary', 'data-request': r.id, 'data-action': 'inspect', disabled: Boolean(state.busy), 'aria-describedby': unlocked() ? null : 'vault-status-text', text: busy ? 'Inspecting…' : 'Connect and inspect'}));
+    actions.push(el('button', {type: 'button', class: 'primary', 'data-request': r.id, 'data-action': 'inspect', disabled: Boolean(state.busy), 'aria-describedby': unlocked() ? null : 'vault-status-text', text: busy ? 'Inspecting…' : 'Connect and inspect'}));
   }
   return el('article', {class: 'access-row vault-request', 'data-request-card': r.id},
     el('div', {class: 'access-record'}, el('h3', {text: `Connect and inspect ${connectorName(r.credential)}`}),
@@ -582,13 +584,22 @@ $('vault-requests').addEventListener('click', event => {
   const action = button.dataset.action;
   if (action === 'deny') deny(request);
   else if (action === 'start') start(request);
-  else if (action === 'retry') activate(request, state.pending.get(request.id)?.operation);
+  else if (action === 'retry') {
+    if (setup(request)) inspectRequest(request);
+    else activate(request, state.pending.get(request.id)?.operation);
+  }
   else if (action === 'check') checkRequest(request);
   else if (action === 'inspect') inspectRequest(request);
 });
 async function deny(request) {
   const generation = state.generation; state.busy = request.id; render();
-  try { await client.request('POST', `/api/approvals/${request.id}/deny`, {body: '{}'}); guard(generation); notice('Request denied. The agent can ask again.'); await load(); }
+  try {
+    await client.request('POST', `/api/approvals/${request.id}/deny`, {body: '{}'});
+    guard(generation);
+    state.pending.delete(request.id);
+    notice(setup(request) ? 'Inspect request cancelled.' : 'Request denied. The agent can ask again.');
+    await load();
+  }
   catch (error) { failed(error); }
   finally { if (generation === state.generation) { state.busy = ''; render(); } }
 }
@@ -688,7 +699,10 @@ async function inspectStarted(request, generation, name) {
     current = (await client.request('POST', `/api/approvals/${request.id}/begin`, {body: JSON.stringify({request_digest: request.request_digest})})).data;
     guard(generation);
   }
-  const started = await release(current, crypto.randomUUID(), generation);
+  // An uncertain activation may already have committed. Retry that operation,
+  // then continue discovery on the same window.
+  const operation = state.pending.get(request.id)?.operation || crypto.randomUUID();
+  const started = await release(current, operation, generation);
   await discover(started.lease_id, name, generation);
 }
 async function discover(leaseID, name, generation) {
@@ -701,7 +715,8 @@ async function discover(leaseID, name, generation) {
 function inspectFailed(error) {
   if (error.code === 'release') { pageError(error.message); return; }
   if (error.code === 'stale') error = new OwnerError(error.status, 'stale', 'The inspect window ended, or the credential or connector changed. Reload, then connect and inspect again.');
-  failed(error);
+  if (error.uncertain) pageError('The gateway did not confirm whether Connect and inspect finished. Check the request and window status before trying again.');
+  else failed(error);
   queueReload();
 }
 async function checkRequest(request) {

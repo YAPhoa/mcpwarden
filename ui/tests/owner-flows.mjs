@@ -295,6 +295,66 @@ try {
   }
   assert(tool?.id, 'inspected tools are not listed');
 
+  for (const scenario of [
+    {name: 'retry when the activation request was lost', acted: false, action: 'retry'},
+    {name: 'retry when the activation response was lost', acted: true, action: 'retry'},
+    {name: 'finish inspection after checking an active window', acted: true, action: 'check'},
+    {name: 'cancel when the activation request was lost', acted: false, action: 'cancel'},
+  ]) {
+    await step(`setup recovery: ${scenario.name}`);
+    await openVault(page, 'credentials');
+    const before = fixture.upstreamMethods();
+    let requestID, committedStatus;
+    await page.route('**/api/approvals/*/activate', async route => {
+      requestID = new URL(route.request().url()).pathname.split('/').at(-2);
+      if (scenario.acted) committedStatus = (await route.fetch()).status();
+      await route.abort('failed');
+    }, {times: 1});
+    await inspectButton.click();
+    await waitText(page, '#vault-error', 'did not confirm');
+    await openVault(page, 'access');
+    const recoveryCard = page.locator(`[data-request-card="${requestID}"]`);
+    await recoveryCard.locator('[data-action="check"]').waitFor();
+    const request = await owner('GET', `/api/access-requests/${requestID}`);
+    assert.equal(request.status, 200);
+    assert.equal(request.data.state, scenario.acted ? 'activated' : 'approved');
+    if (scenario.acted) assert(committedStatus >= 200 && committedStatus < 300, 'intercepted activation failed');
+    assert.deepEqual(fixture.upstreamMethods(), before, 'uncertain activation started discovery without an owner action');
+
+    if (scenario.action === 'cancel') {
+      await recoveryCard.locator('[data-action="deny"]').click();
+      await waitText(page, '#vault-notice', 'Inspect request cancelled');
+      assert.equal((await owner('GET', `/api/access-requests/${requestID}`)).data.state, 'denied');
+      await page.waitForFunction(id => document.querySelector(`[data-request-card="${id}"]`)?.querySelectorAll('button').length === 0, requestID);
+      assert.equal((await owner('GET', '/api/leases?include=ended')).data.filter(l => l.request_id === requestID).length, 0);
+      assert.deepEqual(fixture.upstreamMethods(), before, 'cancelling inspection contacted the upstream');
+      continue;
+    }
+    if (!scenario.acted || scenario.action === 'check') {
+      await recoveryCard.locator('[data-action="check"]').click();
+      await waitText(page, '#vault-notice', scenario.acted ? 'Access did start' : 'Access has not started');
+    }
+    const discovered = page.waitForResponse(r => r.request().method() === 'POST' && /\/api\/leases\/[^/]+\/discover$/.test(new URL(r.url()).pathname));
+    if (scenario.action === 'check') {
+      const window = await waitWindow(page, requestID, owner);
+      await page.click(`[data-window-card="${window.lease_id}"] [data-action="inspect"]`);
+    } else {
+      await recoveryCard.locator('[data-action="retry"]').click();
+    }
+    assert.equal((await discovered).status(), 200, 'recovery did not finish discovery');
+    await waitText(page, '#vault-notice', 'synthetic: saved 2 tools');
+    const attempts = log.requests.filter(r => r.path === `/api/approvals/${requestID}/activate`);
+    assert.equal(attempts.length, scenario.action === 'retry' ? 2 : 1);
+    assert(attempts[0].headers['idempotency-key'], 'activation has no operation ID');
+    if (scenario.action === 'retry') assert.equal(attempts[0].headers['idempotency-key'], attempts[1].headers['idempotency-key'], 'setup retry used a new activation');
+    const windows = (await owner('GET', '/api/leases?include=ended')).data.filter(l => l.request_id === requestID);
+    assert.equal(windows.length, 1, 'setup recovery started more than one window');
+    assert.equal(windows[0].state, 'revoked', 'recovered inspect window did not end');
+    const methods = fixture.upstreamMethods().slice(before.length);
+    assert.equal(methods.filter(m => m === 'tools/list').length, 1, 'setup recovery did not list tools exactly once');
+    assert(!methods.includes('tools/call'), 'setup recovery called a tool');
+  }
+
   await step('review an agent request with untrusted labels and constraints');
   const first = await ask(agent);
   for (const path of [`/api/approvals/${first.id}/begin`, `/api/approvals/${first.id}/activate`]) {

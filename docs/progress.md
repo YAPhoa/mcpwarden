@@ -1691,3 +1691,22 @@ locked:". Unused functions and stale docs were removed.
 Windows and macOS), `go mod tidy -diff`, `integrity.py`, `go test -race
 -count=1 ./...` with the PostgreSQL fixture, the `CGO_ENABLED=0` build and
 SQLite tests, `npm test` and the Chromium owner flows on SQLite passed.
+
+## 2026-09-30 — PR #16 setup activation recovery
+
+Connect and inspect now offers a retry after an uncertain activation and
+keeps Cancel available while the request is pending or approved. A retry
+reuses the original activation operation ID, then continues discovery on
+that window. Confirmed cancellation clears the uncertain state. Network
+errors no longer claim that inspection could not have started.
+
+Four browser regressions cover a lost activation request, a lost response
+after activation committed, checking an active window before inspecting,
+and cancelling an activation that never reached the gateway. They verify
+operation ID reuse, exactly one window and discovery, no tool calls, and
+no upstream contact before recovery or after cancellation.
+
+Local validation passed: `go build ./...`, `go vet ./...`, the full uncached
+`go test -race -count=1 -timeout=15m ./...` suite with SQLite and PostgreSQL,
+UI unit tests, integrity checks, and the complete Chromium owner flows on
+SQLite. The disposable browser and gateway fixture were closed.
