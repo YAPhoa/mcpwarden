@@ -127,3 +127,84 @@ func (p *LeasedCall) Close() {
 		clear(p.args)
 	}
 }
+
+// Bounds of one setup discovery: at most lease.MaxTools tools over
+// maxDiscoveryPages pages, and maxDiscoveryBytes of encoded definitions.
+const (
+	maxDiscoveryPages = 16
+	maxDiscoveryBytes = 4 << 20
+)
+
+// DiscoveryError fails a setup discovery. Step names what failed without any
+// upstream text or credential value: connect, list, pages, tools, size, name,
+// schema or cursor. It matches ErrLeasedUpstream.
+type DiscoveryError struct{ Step string }
+
+func (e *DiscoveryError) Error() string        { return "discovery failed: " + e.Step }
+func (e *DiscoveryError) Is(target error) bool { return target == ErrLeasedUpstream }
+
+func discoveryFailed(step string) error { return &DiscoveryError{Step: step} }
+
+// DiscoverLeased connects a vault connector and lists its tools under a setup
+// window's material (lease.Service.Setup). The credential transport forwards
+// only connection setup and tools/list in that phase, so no tool can run. It
+// opens one session, with no retries, standalone stream or background refresh,
+// and closes it before returning. A repeated cursor, a duplicate or empty tool
+// name, a tool the gateway could not register (registry.CheckSchemas), or a
+// list over the bounds fails the whole discovery.
+func DiscoverLeased(ctx context.Context, material lease.Material) ([]*mcp.Tool, error) {
+	handle, ok := material.(*secret.Handle)
+	if !ok {
+		return nil, lease.ErrKey
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcpwarden", Version: "0.1.0"}, nil)
+	// No tool is pinned: the setup phase refuses every tools/call.
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: handle.Endpoint(), HTTPClient: handle.Client(""), MaxRetries: -1, DisableStandaloneSSE: true}, nil)
+	if err != nil {
+		return nil, discoveryFailed("connect")
+	}
+	defer session.Close()
+	var tools []*mcp.Tool
+	names := map[string]bool{}
+	seen := map[string]bool{}
+	size := 0
+	cursor := ""
+	for page := 0; page < maxDiscoveryPages; page++ {
+		res, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
+		if err != nil {
+			return nil, discoveryFailed("list")
+		}
+		for _, tool := range res.Tools {
+			switch {
+			case tool == nil || tool.Name == "" || names[tool.Name]:
+				return nil, discoveryFailed("name")
+			case len(tools) == lease.MaxTools:
+				return nil, discoveryFailed("tools")
+			case registry.CheckSchemas(tool) != nil:
+				return nil, discoveryFailed("schema")
+			}
+			raw, err := json.Marshal(tool)
+			if err != nil {
+				return nil, discoveryFailed("schema")
+			}
+			size += len(raw)
+			if size > maxDiscoveryBytes {
+				return nil, discoveryFailed("size")
+			}
+			names[tool.Name] = true
+			tools = append(tools, tool)
+		}
+		if res.NextCursor == "" {
+			if tools == nil {
+				tools = []*mcp.Tool{}
+			}
+			return tools, nil
+		}
+		if seen[res.NextCursor] {
+			return nil, discoveryFailed("cursor")
+		}
+		seen[res.NextCursor] = true
+		cursor = res.NextCursor
+	}
+	return nil, discoveryFailed("pages")
+}

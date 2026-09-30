@@ -3,6 +3,7 @@ package main
 import (
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yaphoa/mcpwarden/internal/audit"
 	"github.com/yaphoa/mcpwarden/internal/catalog"
 	"github.com/yaphoa/mcpwarden/internal/proxy"
@@ -41,6 +42,24 @@ func (g *guardedCustody) credential(owner, connectorID string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// saveSetup saves the tools found by "Connect and inspect" and ends the setup
+// window in the same transaction, then shows them in the owner's runtime as
+// the connector's cached tools. Holding the runtime lock across both keeps a
+// connector removed meanwhile from reappearing.
+func (rs *runtimes) saveSetup(owner, name, connectorID, leaseID string, tools []*mcp.Tool) error {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if err := rs.guarded.api.catalog.SetupDiscovery(owner, name, connectorID, leaseID, tools); err != nil {
+		return err
+	}
+	// A runtime created later loads the saved discovery itself.
+	if rt := rs.users[owner]; rt != nil {
+		rt.proxy.Changed(name, tools, true)
+		rt.proxy.Changed(name, nil, false)
+	}
+	return nil
 }
 
 // execution returns the owner's adapter. Calls use the connector's own call

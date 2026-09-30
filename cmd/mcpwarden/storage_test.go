@@ -36,6 +36,7 @@ func TestOwnerFlowsOnPostgres(t *testing.T) {
 		{"provider-changes", TestStorageProviderChangesEndAuthority},
 		{"loss", TestStorageLossStopsGateway},
 		{"guarded-execution", TestGuardedHeaderExecution},
+		{"connect-and-inspect", TestConnectAndInspect},
 		{"stale-sessions", TestStorageStaleSessionsEnd},
 	} {
 		t.Run(test.name, test.run)

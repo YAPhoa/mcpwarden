@@ -24,12 +24,15 @@ import (
 )
 
 // headerUpstream is a real MCP server that records which credential reached
-// it. It serves the fixture's "search" and "write" tools.
+// it. It serves the fixture's "search" and "write" tools; tests may add more
+// to mcp. While down is set it answers 503.
 type headerUpstream struct {
 	server *httptest.Server
+	mcp    *mcp.Server
 	mu     sync.Mutex
 	seen   map[string]int // Authorization value -> requests
 	calls  atomic.Int32
+	down   atomic.Bool
 }
 
 func newHeaderUpstream(t *testing.T) *headerUpstream {
@@ -42,10 +45,15 @@ func newHeaderUpstream(t *testing.T) *headerUpstream {
 		})
 	}
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	u.mcp = s
 	u.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u.mu.Lock()
 		u.seen[r.Header.Get("Authorization")]++
 		u.mu.Unlock()
+		if u.down.Load() {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		h.ServeHTTP(w, r)
 	}))
 	t.Cleanup(u.server.Close)
@@ -83,6 +91,7 @@ func (f *ownerFixture) guardedGateway() *guardedGateway {
 	history := f.backend.history
 	rs := newRuntimes(f.t.Context(), cfg, pol, history, f.store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	rs.guarded = &guardedCustody{api: f.api, store: f.store, history: history}
+	f.api.saveDiscovery = rs.saveSetup
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", f.accounts.protect(rs.access.bindMCP(mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		p := rs.get(requestOwner(r)).proxy

@@ -70,6 +70,7 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	// owner vault none can be created, and any stored one never dials.
 	if security != nil {
 		rs.guarded = &guardedCustody{api: security, store: store, history: history}
+		security.saveDiscovery = rs.saveSetup
 	}
 	local := rs.get("local")
 	mux := http.NewServeMux()
@@ -157,9 +158,6 @@ func run(path string, stdio bool, logger *slog.Logger) error {
 	mux.Handle("/api/connections", apiProtect(http.HandlerFunc(rs.connections)))
 	mux.Handle("/api/connections/", apiProtect(http.HandlerFunc(rs.connection)))
 	mux.Handle("/api/discovery/", clientProtect(http.HandlerFunc(rs.discovery)))
-	if testRoutes != nil {
-		testRoutes(mux, rs, apiProtect)
-	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

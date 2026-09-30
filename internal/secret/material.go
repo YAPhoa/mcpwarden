@@ -178,7 +178,9 @@ func (t *credentialTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	if json.Unmarshal(raw, &rpc) != nil {
 		return nil, ErrInvalid
 	}
-	if phase == "prepare" {
+	// "prepare" sets up a tool call's session; "setup" is the owner's
+	// discovery run. Neither may send a tool call.
+	if phase == "prepare" || phase == "setup" {
 		switch rpc.Method {
 		case "server/discover", "initialize", "notifications/initialized", "tools/list":
 		default:

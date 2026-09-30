@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-09-29 — Step 5: Connect and inspect (removal plan PR 5)
+
+Added owner setup discovery. The owner's own browser session requests and
+activates a `setup_discovery` window (no tools, no call budget, at most 300 s,
+approval mode as for tool windows). `lease.Service.Setup` runs one discovery in
+material phase `setup`, where the credential transport forwards only connection
+setup and `tools/list`; `Service.CatalogSetup` saves the discovered tools and
+ends the window (`lease.revoked`, source `setup_completed`) in one owner
+transaction, and refuses the save when the window ended or changed meanwhile.
+A failed discovery or save revokes the window with source `setup_failed`. The
+route is `POST /api/leases/{id}/discover`, and the Vault & windows console adds
+Connect and inspect on each credential. The flowtest seed route is removed; the
+browser flows now discover through the UI.
+
+Local `gofmt`, `go build ./...`, `go vet ./...`, `go vet -tags historyscale`,
+Windows/macOS vet of `./internal/lease/sqlite ./cmd/mcpwarden`,
+`go mod tidy -diff`, `CGO_ENABLED=0` build and the full
+`go test -race -count=1 ./...` with the isolated PostgreSQL fixture passed.
+`npm test` (72) and the Chromium owner flows on SQLite and PostgreSQL passed.
+
+Review round 1 (`d30ae86`): one blocking finding and three should-fix test
+groups. A tool without an object input schema passed discovery and then
+panicked `AddTool` on publication; discovery now fails on it, and every runtime
+skips such tools (`registry.CheckSchemas`), which also fixes the same crash
+from a no-auth connector. Added tests for the setup phase of the credential
+transport, every discovery bound, a closed tab, Stop during a run, a refused
+save, tool windows across an inspect, requester rules, and event sources.
+Optional fixes: the route counts only exposable names and lists `skipped`,
+logs the failed step, answers 409 when the window ended during the run and
+503 `not_saved` when the save did not commit; the console hides run buttons
+on another session's setup items, uses a 60-second window and setup-specific
+Stop copy. All the checks above passed again, including the full race suite
+with PostgreSQL and the Chromium flows on both databases.
+
+Review round 2 (`582d179`): nothing blocking or should-fix. Took the optional
+notes: tests for the failure step log (no upstream text or credential), the
+`not_saved` answer, another browser session's `current: false` items (403 to
+start or run, 204 to stop), and a repeated cursor that is not followed; the
+stop-during-run test no longer waits without a timeout; a run that hits the
+30-second limit logs step `timeout`. The `cmd/mcpwarden` race tests with
+PostgreSQL, vet (plain, Windows, macOS) and `go mod tidy -diff` passed.
+
 ## 2026-09-25 — PR #8 follow-up review, merge and deployment
 
 Reviewed head `5e61ae5` and confirmed both earlier findings are fixed. SSE events
@@ -1649,3 +1691,22 @@ locked:". Unused functions and stale docs were removed.
 Windows and macOS), `go mod tidy -diff`, `integrity.py`, `go test -race
 -count=1 ./...` with the PostgreSQL fixture, the `CGO_ENABLED=0` build and
 SQLite tests, `npm test` and the Chromium owner flows on SQLite passed.
+
+## 2026-09-30 — PR #16 setup activation recovery
+
+Connect and inspect now offers a retry after an uncertain activation and
+keeps Cancel available while the request is pending or approved. A retry
+reuses the original activation operation ID, then continues discovery on
+that window. Confirmed cancellation clears the uncertain state. Network
+errors no longer claim that inspection could not have started.
+
+Four browser regressions cover a lost activation request, a lost response
+after activation committed, checking an active window before inspecting,
+and cancelling an activation that never reached the gateway. They verify
+operation ID reuse, exactly one window and discovery, no tool calls, and
+no upstream contact before recovery or after cancellation.
+
+Local validation passed: `go build ./...`, `go vet ./...`, the full uncached
+`go test -race -count=1 -timeout=15m ./...` suite with SQLite and PostgreSQL,
+UI unit tests, integrity checks, and the complete Chromium owner flows on
+SQLite. The disposable browser and gateway fixture were closed.

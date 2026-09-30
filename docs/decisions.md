@@ -676,3 +676,60 @@ carries D2, D3, D5, D6, D7 and D9; D10 landed in PR 2 and D8 in PR 3.
   publishes ports on 127.0.0.1 only.
 - The owner browser flows run on SQLite in all three engines and on
   PostgreSQL in Chromium (`OWNER_STORAGE=postgres`).
+
+## 2026-09-29 — Connect and inspect (setup discovery, removal plan PR 5)
+
+Yohanes asked for step 5 on 2026-09-29: the owner explicitly authorizes a short
+discovery window, the gateway discovers and saves the connector's tools, and
+discovery ends without permitting tool execution.
+
+- **The window is the owner's own.** A `setup_discovery` scope names the
+  owner's browser session as its requester. `lease.Service.current` accepts a
+  browser requester only for that purpose and an API key only for `tool_use`,
+  so no key can request, start or run one, and `oauth_setup` stays refused
+  until step 6. Only the session that requested it may activate and run it. It
+  names no tools and no call budget and lasts at most 300 seconds. The
+  approval policy applies unchanged (`confirm` begins, then activates).
+- **One run, then the window ends.** `Service.Setup` marks the window used
+  under the owner gate before lending the material, so concurrent or repeated
+  runs fail. The save and the end of the window commit together through
+  `Service.CatalogSetup`, which rechecks the window (active, live, current,
+  run, same connector) in the same transaction before the catalog mutation
+  runs. The check reads the catalog through the authority, so it cannot run
+  after the repository takes its view lock. A failed run or a refused save
+  revokes the window. No new event type or lease state: the end is
+  `lease.revoked` with source `setup_completed` or `setup_failed`, both added
+  to the event source allowlist.
+- **Discovery through the SDK.** `upstream.DiscoverLeased` uses one
+  `StreamableClientTransport` with `MaxRetries: -1` and
+  `DisableStandaloneSSE: true`, like `PrepareLeased`, over the vault handle's
+  constrained client with no pinned tool. The credential transport's `setup`
+  phase allows the same maintenance methods as `prepare` (`server/discover`,
+  `initialize`, `notifications/initialized`, `tools/list`) and refuses
+  `tools/call` before injecting headers. Paging stops at 16 pages; a repeated
+  cursor, a duplicate or empty name, more than 256 tools or more than 4 MiB of
+  definitions fails the whole run. The SDK's session DELETE at close is refused
+  locally, as for leased calls.
+- **Saving does not end tool windows.** A tool window binds each tool's
+  definition digest, so a changed definition makes it stale and the owner
+  reviews the new one; unchanged tools keep working.
+- **Refresh stays off.** The runtime refresh route and
+  `warden_refresh_provider` still return 409 for a vault connector; the message
+  now points to Connect and inspect.
+- **No seed route.** The `flowtest` build tag and `PUT /api/test/discovery/`
+  are removed. The browser flows discover through Connect and inspect against
+  the synthetic upstream, which accepts only the vault credentials, and make one
+  real agent call inside a window.
+- **Tools the SDK server cannot register are refused (review round 1).**
+  `mcp.Server.AddTool` (go-sdk v1.8.0, `server.go`) panics on a tool whose
+  input schema is missing, is not a JSON object or has a type other than
+  `"object"`, or whose output schema does not encode; the SDK client does not
+  check this when listing. `registry.CheckSchemas` makes the same checks.
+  Discovery fails the whole run on such a tool (502, `setup_failed`, nothing
+  saved), and `Registry.Replace` skips and reports it for every connector, so
+  no listed or stored tool can panic a runtime or a manager goroutine.
+- **Failures keep a category, not a cause.** `upstream.DiscoveryError` names
+  the failed step (connect, list, pages, tools, size, name, schema, cursor),
+  which the route logs without upstream text. A window that ended during the
+  run answers 409 `stale`, and a catalog save that did not commit answers 503
+  `not_saved`. The console asks for a 60-second window.

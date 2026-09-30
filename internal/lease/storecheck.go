@@ -27,6 +27,10 @@ func CheckLease(owner string, l Lease, r Request) error {
 	return nil
 }
 
+// eventSources are the authorization sources of activation events and the
+// outcomes of a setup window that ended after its one discovery run.
+var eventSources = map[string]bool{"": true, "client_activation": true, "owner_confirmation": true, "setup_completed": true, "setup_failed": true}
+
 var eventReasons = map[string]bool{"": true, "key": true, "stale": true, "denied": true, "not_found": true, "locked": true, "api_key": true}
 
 func optionalVersion(v string) bool {
@@ -39,7 +43,7 @@ func optionalVersion(v string) bool {
 
 // ValidEvent reports whether e is an allowlisted event for owner.
 func ValidEvent(owner string, e Event) bool {
-	if e.OwnerID != owner || !identity.Valid(e.ID) || !identity.Valid(e.BootID) || e.At.IsZero() || e.ActorID != "" && !identity.Valid(e.ActorID) || e.Source != "" && e.Source != "client_activation" && e.Source != "owner_confirmation" {
+	if e.OwnerID != owner || !identity.Valid(e.ID) || !identity.Valid(e.BootID) || e.At.IsZero() || e.ActorID != "" && !identity.Valid(e.ActorID) || !eventSources[e.Source] {
 		return false
 	}
 	return (e.CredentialID == "" || identity.Valid(e.CredentialID)) && (e.SubjectID == "" || identity.Valid(e.SubjectID)) && optionalVersion(e.Epoch) && optionalVersion(e.Revision) &&

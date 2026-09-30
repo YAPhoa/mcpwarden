@@ -65,6 +65,9 @@ function handleFor(publicID) { return publicHandle(publicID, state.accessItems.m
 function connectorName(credential) { return credential?.connector_name || 'Unknown connector'; }
 function providerHealthy(name) { const p = state.providers.find(p => p.name === name); return !p || p.enabled !== false && (p.healthy || p.custody === 'vault'); }
 function currentCredential(id) { return state.wrappers?.credentials.find(c => c.credential_id === id && !c.deleted); }
+function setup(x) { return x?.purpose === 'setup_discovery'; }
+function callerLabel(x) { return setup(x) ? 'Your browser' : x.requester?.label || x.client?.label || 'Unnamed key'; }
+function providerFor(name) { return state.providers.find(p => p.name === name); }
 function modeLabel(mode) { return mode === 'none' ? 'No extra confirmation' : 'Confirm each request'; }
 function startLabel(mode, seconds) { return `${mode === 'none' ? 'Start access' : 'Allow'} for ${durationLabel(seconds)}`; }
 
@@ -287,8 +290,28 @@ function renderRequests() {
   const container = $('vault-requests');
   replaceKeepingFocus(container, list.length ? list.map(r => requestCard(r, now)) : [el('p', {class: 'empty', text: 'No access requests. When an agent asks for access, it appears here for your review.'})]);
 }
+// A setup request is the owner's own Connect and inspect. It names no tools and
+// lists them once; it never allows a call.
+function setupCard(r, phase, pending, busy) {
+  const actionable = phase.key === 'pending' || phase.key === 'approved', actions = [];
+  if (actionable) actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'deny', disabled: Boolean(state.busy), text: 'Cancel'}));
+  if (pending?.uncertain) {
+    actions.push(el('p', {class: 'help warning', text: 'The gateway did not confirm whether the inspect window started. Check its status before trying again; a retry reuses the same activation and cannot start a second window.'}),
+      el('button', {type: 'button', 'data-request': r.id, 'data-action': 'check', disabled: Boolean(state.busy), text: 'Check status'}));
+    if (r.requester.current) actions.push(el('button', {type: 'button', 'data-request': r.id, 'data-action': 'retry', disabled: Boolean(state.busy) || !unlocked(), text: 'Retry the same activation'}));
+  } else if (actionable && r.requester.current) {
+    // Only the browser session that asked can run it.
+    actions.push(el('button', {type: 'button', class: 'primary', 'data-request': r.id, 'data-action': 'inspect', disabled: Boolean(state.busy), 'aria-describedby': unlocked() ? null : 'vault-status-text', text: busy ? 'Inspecting…' : 'Connect and inspect'}));
+  }
+  return el('article', {class: 'access-row vault-request', 'data-request-card': r.id},
+    el('div', {class: 'access-record'}, el('h3', {text: `Connect and inspect ${connectorName(r.credential)}`}),
+      el('p', {class: 'record-meta'}, el('span', {class: `badge ${phase.tone}`, text: phase.label}), el('span', {text: `Requested ${exact(r.created_at)}`})),
+      el('p', {class: 'help', text: r.requester.current ? 'Lists the connector’s tools once and saves them. It cannot call a tool.' : 'Started from another browser session; only that session can run it.'})),
+    actions.length ? el('div', {class: 'access-row-actions'}, actions) : '');
+}
 function requestCard(r, now) {
   const phase = requestPhase(r, now), pending = state.pending.get(r.id), busy = state.busy === r.id;
+  if (setup(r)) return setupCard(r, phase, pending, busy);
   const actionable = phase.key === 'pending' || phase.key === 'approved';
   const heading = actionable ? el('h3', {}, 'Allow ', el('span', {class: 'untrusted-label', text: r.requester.label || 'an unnamed key'}), ` to use ${connectorName(r.credential)}?`) : el('h3', {}, el('span', {class: 'untrusted-label', text: r.requester.label || 'Unnamed key'}), ` · ${connectorName(r.credential)}`);
   const meta = [el('span', {class: `badge ${phase.tone}`, text: phase.label}), el('span', {text: `${modeLabel(r.approval_mode)} · requested ${exact(r.created_at)}`})];
@@ -311,11 +334,16 @@ function requestCard(r, now) {
     actions.length ? el('div', {class: 'access-row-actions'}, actions) : '');
 }
 
-function windowView(l) { return {...l, phase: windowPhase(l, serverNow(), providerHealthy(l.credential.connector_name))}; }
+function windowView(l) {
+  const phase = windowPhase(l, serverNow(), providerHealthy(l.credential.connector_name));
+  // An inspect window ends itself after its one run; that is not a stop.
+  if (setup(l) && phase.key === 'revoked') return {...l, phase: {key: 'expired', label: 'Inspect ended', tone: ''}};
+  return {...l, phase};
+}
 function renderWindows() {
   const all = state.windows.map(windowView);
   const filters = {state: $('vault-filter-state').value, caller: $('vault-filter-caller').value, connector: $('vault-filter-connector').value};
-  syncFilter('vault-filter-caller', 'All callers', [...new Map(all.map(l => [l.client.access_id, l.client.label || 'Unnamed key'])).entries()]);
+  syncFilter('vault-filter-caller', 'All callers', [...new Map(all.map(l => [l.client.access_id, callerLabel(l)])).entries()]);
   syncFilter('vault-filter-connector', 'All connectors', [...new Map(all.map(l => [l.credential.connector_id, connectorName(l.credential)])).entries()]);
   const shown = all.filter(l => (!filters.state || l.phase.key === filters.state) && (!filters.caller || l.client.access_id === filters.caller) && (!filters.connector || l.credential.connector_id === filters.connector));
   const active = all.filter(l => l.phase.key === 'active' || l.phase.key === 'provider').length;
@@ -328,8 +356,19 @@ function syncFilter(id, all, entries) {
   select.replaceChildren(el('option', {value: '', text: all}), ...entries.map(([key, label]) => el('option', {value: key, text: label})));
   select.value = entries.some(([key]) => key === value) ? value : '';
 }
+function setupWindowCard(l, live) {
+  const actions = live ? [el('button', {type: 'button', class: 'danger', 'data-window': l.lease_id, 'data-action': 'stop', disabled: Boolean(state.busy), text: 'Stop'})] : [];
+  if (live && l.client.current) actions.push(el('button', {type: 'button', class: 'primary', 'data-window': l.lease_id, 'data-action': 'inspect', disabled: Boolean(state.busy), text: state.busy === l.lease_id ? 'Inspecting…' : 'Inspect now'}));
+  const ends = live ? el('span', {}, 'Ends at ', el('strong', {text: exact(l.expires_at)}), ' · ', el('span', {role: 'timer', 'data-deadline': l.expires_at, 'data-window-deadline': l.lease_id}), ' left')
+    : el('span', {text: `Ended ${exact(l.ended_at || l.expires_at)}`});
+  return el('article', {class: 'access-row vault-window', 'data-window-card': l.lease_id, 'data-state': l.phase.key},
+    el('div', {class: 'access-record'}, el('h3', {text: `Connect and inspect · ${connectorName(l.credential)}`}),
+      el('p', {class: 'record-meta'}, el('span', {class: `badge ${l.phase.tone}`, text: l.phase.label}), ends, el('span', {text: l.client.current ? 'Lists tools only · no tool calls' : 'Another browser session · lists tools only'}))),
+    actions.length ? el('div', {class: 'access-row-actions'}, actions) : '');
+}
 function windowCard(l) {
   const live = l.phase.key === 'active' || l.phase.key === 'provider', handle = handleFor(l.client.public_id);
+  if (setup(l)) return setupWindowCard(l, live);
   const actions = [];
   if (live) actions.push(el('button', {type: 'button', class: 'danger', 'data-window': l.lease_id, 'data-action': 'stop', disabled: Boolean(state.busy), text: 'Stop access'}));
   actions.push(el('button', {type: 'button', 'data-window': l.lease_id, 'data-action': 'renew', disabled: Boolean(state.busy), text: 'Renew'}));
@@ -355,10 +394,16 @@ function renderCredentials() {
     const {destination, reason} = destinationFor(c), stored = state.wrappers?.credentials.find(k => k.connector_id === c.id);
     const status = stored?.deleted ? 'Removed from the vault' : stored ? `Encrypted in vault · version ${stored.epoch}` : 'Not in the vault yet';
     const disabled = !destination || stored?.deleted || !unlocked() || Boolean(state.busy);
+    const p = providerFor(c.name), live = stored && !stored.deleted, inspected = Boolean(p?.last_discovered || p?.tool_count);
+    const tools = !live ? '' : inspected ? `${p.tool_count} tool${p.tool_count === 1 ? '' : 's'} saved · inspected ${exact(p.last_discovered)}` : 'No tools yet. Connect and inspect to list them.';
     return el('article', {class: 'access-row', 'data-connector': c.id},
-      el('div', {class: 'access-record'}, el('h3', {text: c.name}), el('p', {class: 'record-meta'}, el('span', {class: `badge ${stored && !stored.deleted ? 'success' : ''}`, text: status}), el('span', {class: 'mono', text: c.url})),
-        el('p', {class: 'help', text: destination ? `Header${c.header_names.length === 1 ? '' : 's'}: ${c.header_names.join(', ')}` : reason})),
-      el('div', {class: 'access-row-actions'}, el('button', {type: 'button', 'data-connector-id': c.id, disabled, 'aria-describedby': unlocked() ? null : 'vault-status-text', text: stored ? 'Replace credential' : 'Add encrypted credential'}),
+      el('div', {class: 'access-record'}, el('h3', {text: c.name}), el('p', {class: 'record-meta'}, el('span', {class: `badge ${live ? 'success' : ''}`, text: status}), el('span', {class: 'mono', text: c.url})),
+        el('p', {class: 'help', text: destination ? `Header${c.header_names.length === 1 ? '' : 's'}: ${c.header_names.join(', ')}` : reason}),
+        tools ? el('p', {class: 'help', text: tools}) : ''),
+      el('div', {class: 'access-row-actions'},
+        live ? el('button', {type: 'button', class: 'primary', 'data-inspect-connector': c.id, disabled: !unlocked() || Boolean(state.busy) || p?.enabled === false, 'aria-describedby': unlocked() ? null : 'vault-status-text',
+          text: state.busy === c.id ? 'Inspecting…' : inspected ? 'Connect and inspect again' : 'Connect and inspect'}) : '',
+        el('button', {type: 'button', 'data-connector-id': c.id, disabled, 'aria-describedby': unlocked() ? null : 'vault-status-text', text: stored ? 'Replace credential' : 'Add encrypted credential'}),
         // Removing needs no key, so it stays available while the vault is locked.
         stored && !stored.deleted ? el('button', {type: 'button', class: 'danger', 'data-remove-connector': c.id, disabled: Boolean(state.busy), text: 'Remove'}) : ''));
   });
@@ -539,12 +584,22 @@ $('vault-requests').addEventListener('click', event => {
   const action = button.dataset.action;
   if (action === 'deny') deny(request);
   else if (action === 'start') start(request);
-  else if (action === 'retry') activate(request, state.pending.get(request.id)?.operation);
+  else if (action === 'retry') {
+    if (setup(request)) inspectRequest(request);
+    else activate(request, state.pending.get(request.id)?.operation);
+  }
   else if (action === 'check') checkRequest(request);
+  else if (action === 'inspect') inspectRequest(request);
 });
 async function deny(request) {
   const generation = state.generation; state.busy = request.id; render();
-  try { await client.request('POST', `/api/approvals/${request.id}/deny`, {body: '{}'}); guard(generation); notice('Request denied. The agent can ask again.'); await load(); }
+  try {
+    await client.request('POST', `/api/approvals/${request.id}/deny`, {body: '{}'});
+    guard(generation);
+    state.pending.delete(request.id);
+    notice(setup(request) ? 'Inspect request cancelled.' : 'Request denied. The agent can ask again.');
+    await load();
+  }
   catch (error) { failed(error); }
   finally { if (generation === state.generation) { state.busy = ''; render(); } }
 }
@@ -568,6 +623,20 @@ async function start(request) {
 async function activate(request, operation = crypto.randomUUID()) {
   if (!unlocked()) { openUnlock('Unlock your vault to start access.'); return; }
   const generation = state.generation; state.busy = request.id; render();
+  try {
+    await release(request, operation, generation);
+    notice(`Access started for ${request.requester.label || 'the agent'}. The countdown uses the gateway’s end time.`);
+    await load();
+    document.querySelector('#vault-windows [data-window-card] button')?.focus();
+  } catch (error) {
+    if (error.code === 'release') { pageError(error.message); return; }
+    if (error.uncertain) { pageError('The gateway did not confirm whether access started. Check its status before trying again.'); render(); return; }
+    failed(error);
+  } finally { if (generation === state.generation) { state.busy = ''; render(); } }
+}
+// release decrypts this request's credential key in the vault worker and sends
+// it once to start the window, which it returns.
+async function release(request, operation, generation) {
   let key;
   try {
     const credential = currentCredential(request.credential.credential_id);
@@ -582,23 +651,73 @@ async function activate(request, operation = crypto.randomUUID()) {
     const body = JSON.stringify({gateway_boot_id: request.gateway_boot_id, request_digest: request.request_digest, challenge: request.challenge, credential_id: request.credential.credential_id, credential_epoch: request.credential.epoch, cek: b64url(key)});
     key.fill(0); key = null;
     state.pending.set(request.id, {operation, uncertain: false});
+    let started;
     try {
-      await client.request('POST', `/api/approvals/${request.id}/activate`, {body, idempotencyKey: operation});
+      started = (await client.request('POST', `/api/approvals/${request.id}/activate`, {body, idempotencyKey: operation})).data;
     } catch (error) {
       if (error.uncertain) { state.pending.set(request.id, {operation, uncertain: true}); throw error; }
       state.pending.delete(request.id); throw error;
     }
     guard(generation);
     state.pending.delete(request.id);
-    notice(`Access started for ${request.requester.label || 'the agent'}. The countdown uses the gateway’s end time.`);
-    await load();
-    document.querySelector('#vault-windows [data-window-card] button')?.focus();
-  } catch (error) {
-    key?.fill(0);
-    if (error.code === 'release') { pageError(error.message); return; }
-    if (error.uncertain) { pageError('The gateway did not confirm whether access started. Check its status before trying again.'); render(); return; }
-    failed(error);
-  } finally { if (generation === state.generation) { state.busy = ''; render(); } }
+    return started;
+  } finally { key?.fill(0); }
+}
+
+// ---- Connect and inspect ----
+// A setup window belongs to this browser session only and lasts at most five
+// minutes. The gateway connects once through the vault credential, saves the
+// tool list and ends the window in the same step. It never calls a tool, and
+// the list does not grant any agent access.
+$('vault-credentials').addEventListener('click', event => {
+  const button = event.target.closest('button[data-inspect-connector]');
+  if (!button || state.busy) return;
+  const connection = state.connections.find(c => c.id === button.dataset.inspectConnector);
+  const stored = state.wrappers?.credentials.find(k => k.connector_id === button.dataset.inspectConnector && !k.deleted);
+  if (connection && stored) inspect(connection, stored);
+});
+async function inspect(connection, stored) {
+  if (!unlocked()) { openUnlock('Unlock your vault, then connect and inspect again.'); return; }
+  const generation = state.generation; state.busy = connection.id; render();
+  try {
+    const request = (await client.request('POST', '/api/access-requests', {body: JSON.stringify({purpose: 'setup_discovery', credential_id: stored.credential_id, duration_seconds: 60})})).data;
+    guard(generation);
+    await inspectStarted(request, generation, connection.name);
+  } catch (error) { inspectFailed(error); }
+  finally { if (generation === state.generation) { state.busy = ''; render(); } }
+}
+async function inspectRequest(request) {
+  if (!unlocked()) { openUnlock('Unlock your vault, then connect and inspect again.'); return; }
+  const generation = state.generation; state.busy = request.id; render();
+  try { await inspectStarted(request, generation, connectorName(request.credential)); }
+  catch (error) { inspectFailed(error); }
+  finally { if (generation === state.generation) { state.busy = ''; render(); } }
+}
+async function inspectStarted(request, generation, name) {
+  let current = request;
+  if (current.approval_mode === 'confirm' && current.state === 'pending') {
+    current = (await client.request('POST', `/api/approvals/${request.id}/begin`, {body: JSON.stringify({request_digest: request.request_digest})})).data;
+    guard(generation);
+  }
+  // An uncertain activation may already have committed. Retry that operation,
+  // then continue discovery on the same window.
+  const operation = state.pending.get(request.id)?.operation || crypto.randomUUID();
+  const started = await release(current, operation, generation);
+  await discover(started.lease_id, name, generation);
+}
+async function discover(leaseID, name, generation) {
+  const result = (await client.request('POST', `/api/leases/${leaseID}/discover`, {body: '{}'})).data;
+  guard(generation);
+  const skipped = result.skipped?.length ? ` ${result.skipped.length} more ${result.skipped.length === 1 ? 'has a name' : 'have names'} agents cannot use and ${result.skipped.length === 1 ? 'is' : 'are'} skipped.` : '';
+  notice(`${name}: saved ${result.tool_count} tool${result.tool_count === 1 ? '' : 's'}.${skipped} The inspect window has ended; agents still need an access window to call them.`);
+  await load();
+}
+function inspectFailed(error) {
+  if (error.code === 'release') { pageError(error.message); return; }
+  if (error.code === 'stale') error = new OwnerError(error.status, 'stale', 'The inspect window ended, or the credential or connector changed. Reload, then connect and inspect again.');
+  if (error.uncertain) pageError('The gateway did not confirm whether Connect and inspect finished. Check the request and window status before trying again.');
+  else failed(error);
+  queueReload();
 }
 async function checkRequest(request) {
   const generation = state.generation; state.busy = request.id; render();
@@ -620,12 +739,24 @@ $('vault-windows').addEventListener('click', event => {
   if (!button || state.busy) return;
   const l = state.windows.find(w => w.lease_id === button.dataset.window);
   if (!l) return;
-  if (button.dataset.action === 'stop') stop(l); else openRenew(l, button);
+  if (button.dataset.action === 'stop') stop(l);
+  else if (button.dataset.action === 'inspect') inspectWindow(l);
+  else openRenew(l, button);
 });
 async function stop(l) {
   const generation = state.generation; state.busy = l.lease_id; render();
-  try { await client.request('DELETE', `/api/leases/${l.lease_id}`); guard(generation); notice(`Access stopped for ${l.client.label || 'the agent'}. Calls already running may finish.`); await load(); }
+  try {
+    await client.request('DELETE', `/api/leases/${l.lease_id}`); guard(generation);
+    notice(setup(l) ? 'Inspect window stopped. Nothing more is listed or saved under it.' : `Access stopped for ${l.client.label || 'the agent'}. Calls already running may finish.`);
+    await load();
+  }
   catch (error) { failed(error); }
+  finally { if (generation === state.generation) { state.busy = ''; render(); } }
+}
+async function inspectWindow(l) {
+  const generation = state.generation; state.busy = l.lease_id; render();
+  try { await discover(l.lease_id, connectorName(l.credential), generation); }
+  catch (error) { inspectFailed(error); }
   finally { if (generation === state.generation) { state.busy = ''; render(); } }
 }
 // Dialog triggers are re-rendered while open, so focus returns by identity.

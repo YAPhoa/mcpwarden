@@ -96,8 +96,8 @@ func (p *Proxy) Changed(upstreamName string, tools []*mcp.Tool, healthy bool) {
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
 	skipped := p.Registry.Replace(upstreamName, tools, healthy)
-	for _, name := range skipped {
-		p.Logger.Warn("invalid exposed tool name skipped", "upstream", upstreamName, "tool", name)
+	for _, t := range skipped {
+		p.Logger.Warn("upstream tool skipped", "upstream", upstreamName, "tool", t.Name, "reason", t.Reason)
 	}
 	previous := map[string]bool{}
 	for _, name := range p.registered {

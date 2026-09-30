@@ -14,8 +14,8 @@ Use **Add upstream** in the panel to register a remote Streamable HTTP URL, time
 The connection stores header names only, never values. For any method other than no authentication, save the credential in **Vault & windows** (`/vault`): it is encrypted in the browser, and the gateway never holds it. Such connectors are in vault custody from creation:
 
 - The gateway never dials them in the background, and **Refresh** is off (the API returns 409).
-- Every tool call needs an access window that you start; without one the call fails with `MCPWARDEN_LEASE_REQUIRED`.
-- Tool discovery for them arrives with setup discovery (roadmap step 5). Until then a new credentialed connector has no tools and cannot be used.
+- To list their tools, open **Vault & windows → Credentials** with the vault unlocked and choose **Connect and inspect**. It starts a five-minute window for your browser only, connects once, saves the tool list and ends the window. It never calls a tool and gives no agent access. Use **Connect and inspect again** after the upstream changes its tools. Until the first inspect a new connector has no tools.
+- Every tool call needs an access window that you start; without one the call fails with `MCPWARDEN_LEASE_REQUIRED`. A window whose tool definition changed since you approved it stops working; the agent asks again and you review the new definition.
 
 Credentialed methods need the owner vault (`owner_security`) and a signed-in local account; the shared operator workspace gets no authentication only. Without them, the panel disables these methods and the API accepts only no authentication. The endpoint must be public HTTPS with a lowercase host and a path, or HTTP on this machine for development. A hostname that resolves to a private address passes this check but fails when a call inside a window dials it. Upstream OAuth is not available; it returns under the vault in roadmap step 6.
 
